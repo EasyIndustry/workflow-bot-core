@@ -76,12 +76,14 @@ momento se separan también, van a otro repo cada uno, no a este.
 
 **Fase 1 — empaquetar y taguear, sin infraestructura nueva.**
 
-1. `pyproject.toml` en la raíz, con `backend/` como el paquete instalable
-   (probablemente renombrado a algo más propio que "backend" al publicarse
-   fuera de su repo de origen — "backend" es un nombre relativo al monorepo
-   viejo, no dice nada para quien lo instala de afuera).
-2. Console scripts para lo que hoy son invocaciones `python -m`:
-   `python -m backend.core` (CLI) y `python -m backend.mcp` (servidor MCP).
+1. ✅ `pyproject.toml` en la raíz, distribución `bot-core` con `backend/` como
+   el paquete instalable (`pip install -e .`, o con extras:
+   `pip install -e ".[crypto,mcp]"`). El módulo interno sigue llamándose
+   `backend` por ahora — renombrarlo es un cambio de imports en todo el
+   código y los ~500 tests, no algo para hacer de paso.
+2. ✅ Console scripts: `bot-core` (CLI, antes `python -m backend.core`) y
+   `bot-core-mcp` (servidor MCP, antes `python -m backend.mcp`). Las
+   invocaciones `python -m` se siguen pudiendo usar igual.
 3. Política de versión atada a `CONTRACT_VERSION`:
    - Bump de `CONTRACT_VERSION` (rompe plugins existentes) → major.
    - Tool/port/feature nueva sin romper nada → minor.
@@ -112,7 +114,8 @@ distribución más seria. No hay que resolverlo antes de tener el problema.
 
 - [ ] Confirmar nombre definitivo del paquete/repo (hoy este README usa
       "bot-core" como placeholder).
-- [ ] `pyproject.toml` + empaquetado de `backend/`.
+- [x] `pyproject.toml` + empaquetado de `backend/` (paquete `bot-core`,
+      instalable con `pip install -e .`; ver Fase 1 más abajo).
 - [x] Definir versión inicial: arranca en `0.1.0` (el empaquetado con
       `pyproject.toml` todavía no existe; subir a `1.0.0` queda para cuando
       esa fase esté cerrada).

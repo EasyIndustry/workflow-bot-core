@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bot-core"
+version = "0.1.0"
+description = "Motor de workflows con trazas: parsea un flujo en Mermaid, lo ejecuta y deja registro de qué pasó en cada nodo."
+readme = "backend/README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+crypto = ["cryptography==50.0.1"]
+mcp = ["mcp==2.1.1"]
+dev = ["pytest"]
+
+[project.scripts]
+bot-core = "backend.core.cli:main"
+bot-core-mcp = "backend.mcp.server:main"
+
+[tool.setuptools.packages.find]
+include = ["backend", "backend.*"]

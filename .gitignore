@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 backend/data/
+*.egg-info/
+build/
+dist/
