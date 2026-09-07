@@ -7,6 +7,8 @@ núcleo lo parsea, lo ejecuta y deja registro de qué pasó en cada nodo.
 python -m backend.core doctor                       # ¿levanta todo?
 python -m backend.core tools                        # catálogo de tools
 python -m backend.core plugins                      # plugins, sus ports y su config
+python -m backend.core workflows                    # flujos guardados
+python -m backend.core add flujo.mmd                # guarda un .mmd en la instalación
 python -m backend.core check flujo.mmd              # validar sin ejecutar
 python -m backend.core run flujo.mmd --row '{"id":"42"}'
 python -m backend.core run flujo.mmd --dry-run      # recorrer sin tocar el mundo
