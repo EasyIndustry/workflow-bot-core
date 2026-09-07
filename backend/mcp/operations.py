@@ -240,10 +240,13 @@ def run_flow(
     Usar un directorio temporal, o `:memory:` vía BOOTSTRAP_storage para no
     dejar rastro.
 
-    **El actor decide qué se puede.** Por defecto `agente-mcp`, que se da de alta
-    como `kind=agent` y nace sin permiso para tools `dangerous` ni para el port
-    `process`. Ampliarlo es un alta explícita del lado de quien opera la
-    instalación —`users allow`— y no algo que se pida desde acá.
+    **El actor decide qué se puede.** Por defecto `agente-mcp`, pensado como
+    `kind=agent`: sin permiso para tools `dangerous` ni para el port `process`.
+    No se autocrea —el actor no existe hasta que alguien lo da de alta a
+    propósito— así que hay que registrarlo una vez por instalación:
+    `python -m backend.core users add agente-mcp --kind agent`. Ampliar sus
+    permisos es un alta explícita del lado de quien opera la instalación
+    —`users allow`— y no algo que se pida desde acá.
 
     Un flujo que el actor no puede correr falla **antes** de ejecutar nada, y
     dice qué nodo y qué regla lo impidió.

@@ -203,7 +203,10 @@ TOOLS: list[types.Tool] = [
             "case_id": {"type": "string"},
             "actor": {
                 "type": "string",
-                "description": "Actor registrado. Por defecto 'agente-mcp'.",
+                "description": (
+                    "Actor registrado. Por defecto 'agente-mcp', que hay que dar "
+                    "de alta una vez por instalación: no se autocrea."
+                ),
             },
             "plugins": _PLUGINS,
             "save": {
@@ -285,8 +288,10 @@ por eso pide dos cosas:
     temporal, nunca la de producción.
   - un actor con permisos. El default `agente-mcp` es de tipo `agent`: no puede
     ejecutar tools marcados `dangerous` ni plugins que declaren el port
-    `process`. Si hace falta más, lo habilita quien opera la instalación con
-    `users allow` — no se pide desde acá.
+    `process`. No se autocrea —hay que darlo de alta una vez por instalación,
+    `python -m backend.core users add agente-mcp --kind agent`— y si hace
+    falta más, lo habilita quien opera la instalación con `users allow`; no se
+    pide desde acá.
 
 Un flujo vedado falla antes de ejecutar nada y dice qué nodo y qué regla lo
 impidió. `list_users` muestra qué puede cada actor.
