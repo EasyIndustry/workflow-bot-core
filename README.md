@@ -30,9 +30,18 @@ arquitectura en [backend/docs/ARQUITECTURA.md](backend/docs/ARQUITECTURA.md).
   directamente, sin abrir una rama nueva por tarea.
 
 Cuando algo en `develop` está listo para quedar estable, se abre un PR
-`develop → main`. Los releases (tags `vX.Y.Z`) se cortan desde `main`, y
-`.github/workflows/release.yml` arma el paquete y publica el GitHub Release
-solo con pushear el tag.
+`develop → main`. `.github/workflows/release.yml` arma el paquete y publica
+el GitHub Release solo con pushear el tag correspondiente:
+
+- **Pre-release** (`v0.2.0-beta.1`, `v0.2.0-rc.1`, ...) — se tagea sobre
+  `develop`, para poder instalar features en curso
+  (`pip install git+<repo>@v0.2.0-beta.1`) sin tocar nada estable. Queda
+  marcado como "pre-release" en GitHub automáticamente.
+- **Release** (`v0.2.0`, sin sufijo) — se tagea sólo sobre `main`, después de
+  que el PR mergeó.
+
+Antes de taguear, actualizar a mano el `version` de `pyproject.toml` para que
+coincida (no hay versionado automático desde git todavía).
 
 ## Qué se puede hacer con esto
 
