@@ -1,0 +1,17 @@
+%% folder: BASE
+%% description: Espera activa con retry_gate — la forma que más se repite en producción.
+flowchart TD
+    SN(inicio)
+    CHEQUEAR["¿ya terminó? § demo.chequear"]
+    PUERTA["¿queda algún intento? § flow.retry_gate | retryGateKey=espera, retryGateMax=5"]
+    ESPERAR["esperar y volver § core.wait | seconds=60"]
+    LISTO["terminó § core.log | message=el proceso terminó"]
+    AGOTADO["sin intentos § core.log | message=se agotaron los intentos, level=error"]
+    CORTAR["marcar el caso § core.set_status | status=err"]
+    SN --> CHEQUEAR
+    CHEQUEAR -->|ok| LISTO
+    CHEQUEAR -->|loop| PUERTA
+    PUERTA -->|ok| ESPERAR
+    PUERTA -->|err| AGOTADO
+    ESPERAR --> CHEQUEAR
+    AGOTADO --> CORTAR

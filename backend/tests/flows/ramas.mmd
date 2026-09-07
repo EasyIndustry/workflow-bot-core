@@ -1,0 +1,12 @@
+%% folder: BASE
+%% description: Ramas por status, con la de error terminando en un estado forzado.
+flowchart TD
+    SN(inicio)
+    BUSCAR["buscar la carpeta § demo.buscar | etiqueta=entrada"]
+    OK["encontrada § core.log | message=carpeta en {carpeta}"]
+    FALTA["no está § core.log | message=no se encontró la carpeta, level=error"]
+    CORTAR["marcar el caso § core.set_status | status=err"]
+    SN --> BUSCAR
+    BUSCAR -->|ok| OK
+    BUSCAR -->|err| FALTA
+    FALTA --> CORTAR

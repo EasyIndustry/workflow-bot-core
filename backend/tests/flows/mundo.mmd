@@ -1,0 +1,19 @@
+%% folder: PORTS
+%% description: Ejercita los cuatro ports en un solo flujo, para probar la inyección de punta a punta.
+flowchart TD
+    SN(inicio)
+    TRAER["traer el caso § demo.fetch | url=https://api.test/casos/{id}"]
+    BUSCAR["buscar archivos § demo.buscar | etiqueta=entrada"]
+    MOVER["archivar § demo.mover | origen={carpeta}, destino=/archivo"]
+    CORRER["disparar el proceso § demo.correr | ejecutable=procesar"]
+    ESPERAR["dar tiempo § core.wait | seconds=30"]
+    FIN["listo § core.log | message=caso {id} archivado en {destino}"]
+    ERROR["algo falló § core.set_status | status=err"]
+    SN --> TRAER
+    TRAER -->|ok| BUSCAR
+    TRAER -->|err| ERROR
+    BUSCAR -->|ok| MOVER
+    BUSCAR -->|err| ERROR
+    MOVER --> CORRER
+    CORRER --> ESPERAR
+    ESPERAR --> FIN

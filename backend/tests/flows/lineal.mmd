@@ -1,0 +1,10 @@
+%% folder: BASE
+%% description: El caso más simple: tres nodos en fila, sin ramas.
+flowchart TD
+    SN(inicio)
+    N1["registrar entrada § core.log | message=procesando {id}"]
+    N2["pausa breve § core.wait | seconds=0"]
+    N3["registrar salida § core.log | message=listo {id}"]
+    SN --> N1
+    N1 --> N2
+    N2 --> N3

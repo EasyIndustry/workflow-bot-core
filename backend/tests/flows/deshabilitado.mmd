@@ -1,0 +1,7 @@
+%% folder: BASE
+%% state: disabled
+%% description: Un flujo apagado. Existe para probar que los chequeos lo saltean.
+flowchart TD
+    SN(inicio)
+    N1["no debería correr § core.log | message=nunca"]
+    SN --> N1

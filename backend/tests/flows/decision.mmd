@@ -1,0 +1,13 @@
+%% folder: BASE
+%% description: Decisión sobre un campo de la fila, con varias etiquetas por arista.
+flowchart TD
+    SN(inicio)
+    D1{Qué tipo es? § tipo}
+    URGENTE["prioridad alta § core.log | message=urgente: {id}"]
+    NORMAL["prioridad normal § core.log | message=normal: {id}"]
+    FIN["cerrar § core.log | message=terminado"]
+    SN --> D1
+    D1 -->|urgente, prioritario, express| URGENTE
+    D1 --> NORMAL
+    URGENTE --> FIN
+    NORMAL --> FIN

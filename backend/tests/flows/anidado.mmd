@@ -1,0 +1,10 @@
+%% folder: BASE
+%% description: Llama a otro flujo por nombre y sigue con lo que ese flujo dejó en el contexto.
+flowchart TD
+    SN(inicio)
+    ANTES["empieza § core.log | message=llamando al subflujo"]
+    SUB["correr lineal § flow.ejecutar | flowName=lineal"]
+    DESPUES["siguió § core.log | message=el subflujo terminó"]
+    SN --> ANTES
+    ANTES --> SUB
+    SUB --> DESPUES

@@ -1,0 +1,37 @@
+# El núcleo no tiene dependencias.
+#
+# Es deliberado y vale la pena defenderlo: motor, contrato, ports y CLI corren
+# con la stdlib de Python 3.10+. Una máquina de producción sin salida a PyPI
+# instala y arranca. Lo único que se agrega abajo es lo que no se puede
+# escribir a mano de forma responsable.
+
+# ── Adapters ────────────────────────────────────────────────────────────
+#
+# Ninguno hace falta hoy: los cuatro adapters incluidos (urllib, os+shutil,
+# subprocess, sqlite3) son stdlib. Cuando se escriba uno que necesite una
+# librería, va acá — y sólo acá, porque `adapters/` es la única capa con
+# derecho a importarla.
+
+# ── Secretos ────────────────────────────────────────────────────────────
+#
+# Cifra los valores de la tabla `env` (Fernet). Se agrega en vez de escribir
+# el cifrado a mano: criptografía propia es la peor clase de código propio.
+# Trae ruedas para Windows y Linux, así que no hace falta compilador.
+#
+# El núcleo arranca sin esto instalado; sólo falla —con un mensaje explícito—
+# al intentar guardar o leer un secreto.
+cryptography==50.0.1
+
+# ── Servidor MCP (opcional) ─────────────────────────────────────────────
+#
+# Sólo para `python -m backend.mcp`, el servidor de autoría. El motor, la CLI y
+# la suite corren sin esto; `backend/mcp/operations.py` tampoco lo importa, así
+# que la lógica se testea igual aunque no esté instalado.
+#
+# Se usa el SDK en vez de escribir JSON-RPC a mano por la misma razón que
+# `cryptography`: mantener una implementación propia de un protocolo es peor
+# que la dependencia.
+mcp==2.1.1
+
+# ── Desarrollo ──────────────────────────────────────────────────────────
+# pip install pytest
