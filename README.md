@@ -88,9 +88,14 @@ momento se separan también, van a otro repo cada uno, no a este.
    - Bump de `CONTRACT_VERSION` (rompe plugins existentes) → major.
    - Tool/port/feature nueva sin romper nada → minor.
    - Fixes como #9/#10 → patch.
-4. CI en GitHub Actions: correr la suite en cada push/PR, y en cada tag
-   `vX.Y.Z` armar el paquete y publicar un GitHub Release (changelog +
-   artefacto). Hoy no hay ningún workflow — se arranca de cero.
+4. ✅ CI en GitHub Actions (`.github/workflows/`):
+   - `ci.yml` corre la suite en cada push/PR a `main`/`develop`, contra
+     Python 3.10/3.11/3.12, con `[crypto,mcp,dev]` instalados.
+   - `release.yml` se dispara al pushear un tag `vX.Y.Z`: corre la suite,
+     arma sdist + wheel (`python -m build`), y publica el GitHub Release con
+     esos artefactos y el changelog autogenerado (`gh release create
+     --generate-notes`). Ya no hace falta crear el release a mano desde la
+     web — sólo pushear el tag.
 5. Los consumidores pinean versión. Sin necesidad de un índice de paquetes
    propio todavía: `pip install git+https://github.com/<org>/<este-repo>@vX.Y.Z`
    ya alcanza. Un índice (GitHub Packages, PyPI privado) es una mejora
@@ -119,7 +124,7 @@ distribución más seria. No hay que resolverlo antes de tener el problema.
 - [x] Definir versión inicial: arranca en `0.1.0` (el empaquetado con
       `pyproject.toml` todavía no existe; subir a `1.0.0` queda para cuando
       esa fase esté cerrada).
-- [ ] Workflow de CI: test + build + release por tag.
+- [x] Workflow de CI: test + build + release por tag (ver Fase 1 más arriba).
 - [ ] Decidir si este repo queda público desde el día uno o arranca privado
       hasta el primer release estable.
 - [ ] Revisar `backend/requirements.txt` y confirmar que sigue reflejando

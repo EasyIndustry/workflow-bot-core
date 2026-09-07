@@ -21,3 +21,4 @@ bot-core-mcp = "backend.mcp.server:main"
 
 [tool.setuptools.packages.find]
 include = ["backend", "backend.*"]
+exclude = ["backend.tests", "backend.tests.*"]
