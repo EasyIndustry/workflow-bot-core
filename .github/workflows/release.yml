@@ -40,7 +40,16 @@ jobs:
           if [[ "${{ github.ref_name }}" == *-* ]]; then
             flags+=(--prerelease)
           fi
-          gh release create "${{ github.ref_name }}" dist/* \
-            --title "${{ github.ref_name }}" \
-            --generate-notes \
-            "${flags[@]}"
+
+          # Si el tag se creó desde la web ("Draft a new release") el release
+          # ya existe antes de que este workflow corra: gh release create
+          # fallaría con "already exists". En ese caso sólo faltan subirle
+          # los artefactos armados acá.
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            gh release upload "${{ github.ref_name }}" dist/* --clobber
+          else
+            gh release create "${{ github.ref_name }}" dist/* \
+              --title "${{ github.ref_name }}" \
+              --generate-notes \
+              "${flags[@]}"
+          fi
