@@ -392,6 +392,19 @@ def install_plugin(
     `source` es sólo metadata —de dónde salió esta carpeta ('agent', 'bucket',
     lo que corresponda—: no cambia la validación de arriba, que es la misma
     para cualquier valor.
+
+    Dos guardas contra un `path`/`plugins_dir` mal armados (issue #2: un
+    agente puede confundir el checkout de desarrollo con una instalación
+    separada):
+
+    - Si `origen` es igual a, contiene, o está contenido en `destino`, la
+      instalación se rechaza antes de tocar nada: copiar y después reemplazar
+      `destino` de por medio borraría archivos de `origen` que nunca se
+      llegaron a copiar (por ejemplo, un `__init__.py` de re-export o una
+      carpeta de fixtures al lado del archivo que sí se instala).
+    - Un `destino` existente nunca se borra: se renombra a
+      `<name>.reemplazado-<timestamp>` al lado, y ahí queda como red de
+      seguridad recuperable a mano. No se limpia solo.
     """
     resultado = load_plugin(name, path, root=root)
     if not resultado["ok"]:
@@ -402,6 +415,15 @@ def install_plugin(
     destino_base.mkdir(parents=True, exist_ok=True)
     destino = destino_base / name
     temporal = destino_base / f"{name}.instalando"
+
+    if origen == destino or origen in destino.parents or destino in origen.parents:
+        raise OperationError(
+            f'"{path}" y el destino de instalación "{destino}" se pisan: uno '
+            "contiene al otro. Instalar ahí borraría archivos de origen que "
+            "nunca se copian (todo lo que no sea el plugin instalable). Usar "
+            "un `plugins_dir` que sea una instalación separada del checkout "
+            "de desarrollo."
+        )
 
     if temporal.exists():
         shutil.rmtree(temporal)
@@ -425,8 +447,10 @@ def install_plugin(
         encoding="utf-8",
     )
 
+    backup = None
     if destino.exists():
-        shutil.rmtree(destino)
+        backup = destino_base / f"{name}.reemplazado-{time.time_ns()}"
+        destino.rename(backup)
     temporal.rename(destino)
 
     return {
@@ -436,6 +460,7 @@ def install_plugin(
         "ports": resultado["plugin"]["ports"],
         "path": str(destino),
         "source": source,
+        "backup": str(backup) if backup else None,
         "errors": [],
     }
 

@@ -274,6 +274,61 @@ def test_install_plugin_reinstala_reemplazando_entero(raiz, tmp_path):
     assert "PluginManifest" in (destino / "__init__.py").read_text()
 
 
+def test_install_plugin_rechaza_cuando_origen_esta_dentro_del_destino(raiz, tmp_path):
+    """
+    Issue #2: instalar un archivo que vive dentro de su propia carpeta destino
+    —el bug real: `plugins_dir` apuntando al checkout de desarrollo en vez de
+    a una instalación separada— no puede terminar en un rmtree que borra todo
+    lo que no sea ese archivo (un __init__.py de re-export, una carpeta de
+    fixtures, lo que sea que compartiera carpeta con él).
+    """
+    plugins_dir = tmp_path / "plugins"
+    paquete = plugins_dir / "archivos"
+    paquete.mkdir(parents=True)
+    (paquete / "plugin.py").write_text(_plugin_minimo("archivos"), encoding="utf-8")
+    (paquete / "__init__.py").write_text("from .plugin import PLUGIN\n", encoding="utf-8")
+    prueba = paquete / "prueba"
+    prueba.mkdir()
+    (prueba / "fixture.txt").write_text("dato de prueba\n", encoding="utf-8")
+
+    with pytest.raises(ops.OperationError) as exc:
+        ops.install_plugin(
+            "archivos", str(paquete / "plugin.py"), str(plugins_dir), source="agent", root=raiz
+        )
+
+    assert "se pisan" in str(exc.value)
+    assert (paquete / "plugin.py").is_file()
+    assert (paquete / "__init__.py").is_file()
+    assert (prueba / "fixture.txt").is_file()
+
+
+def test_install_plugin_no_borra_el_destino_anterior_lo_deja_de_backup(raiz, tmp_path):
+    """
+    Reemplazar un destino existente no es un rmtree: lo que hubiera ahí queda
+    renombrado al lado, recuperable a mano.
+    """
+    plugins_dir = tmp_path / "plugins"
+    primero = ops.install_plugin("demo", DEMO, str(plugins_dir), source="agent", root=raiz)
+    assert primero["ok"] is True
+    destino = plugins_dir / "demo"
+    (destino / "marca.txt").write_text("algo que no viene de la instalación\n", encoding="utf-8")
+
+    origen_v2 = tmp_path / "demo_v2"
+    origen_v2.mkdir()
+    (origen_v2 / "__init__.py").write_text(_plugin_minimo("demo"), encoding="utf-8")
+
+    segundo = ops.install_plugin("demo", str(origen_v2), str(plugins_dir), source="agent", root=raiz)
+
+    assert segundo["ok"] is True
+    assert segundo["backup"] is not None
+    backup = pathlib.Path(segundo["backup"])
+    assert backup.is_dir()
+    assert (backup / "marca.txt").read_text(encoding="utf-8") == (
+        "algo que no viene de la instalación\n"
+    )
+    assert not (destino / "marca.txt").exists()
+
+
 # ── Guardar un flujo sin ejecutarlo ──────────────────────────────────────
 
 
