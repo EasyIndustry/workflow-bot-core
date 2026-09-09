@@ -154,7 +154,7 @@ def test_la_instancia_arma_registro_ports_y_stores(instance):
     """
     assert instance.registry.errors == []
     assert set(instance.registry.tool_ids) == {"core.log", "core.set_status", "core.wait"}
-    assert set(instance.registry.adapters) == {"http", "fs", "process", "clock"}
+    assert set(instance.registry.adapters) == {"http", "fs", "process", "clock", "browser"}
 
 
 def test_los_adapters_inyectados_son_los_que_llegan_al_tool(demo_instance, adapters):
@@ -560,3 +560,14 @@ def test_la_carpeta_de_plugins_se_carga_sola(tmp_path, adapters):
         assert "suelto" in cargado.source
     finally:
         inst.close()
+
+
+def test_close_cierra_los_adapters_que_lo_declaran(instance, adapters):
+    """
+    `http`/`fs`/`process`/`clock` no tienen nada que cerrar; `browser` sí
+    —un proceso de navegador real—. `Instance.close()` no sabe cuál es cuál:
+    cierra el que declare `close()` y listo.
+    """
+    instance.close()
+
+    assert adapters["browser"].cerrado is True

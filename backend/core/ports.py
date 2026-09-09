@@ -291,6 +291,47 @@ class ClockPort(Protocol):
         ...
 
 
+# ── Navegador ───────────────────────────────────────────────────────────
+
+
+@runtime_checkable
+class BrowserPort(Protocol):
+    """
+    Un navegador real: navegar, clickear, leer lo que la pantalla ya muestra.
+
+    Sesión, perfil persistente y login son decisión de negocio de quien usa
+    este port —un plugin—, nunca del adapter: el adapter no sabe qué es "estar
+    logueado" para ninguna app en particular, sólo maneja el navegador.
+    """
+
+    def goto(self, url: str, *, timeout: float | None = None) -> None:
+        """Navega a `url`. `PortError` si no carga a tiempo."""
+        ...
+
+    def click(self, selector: str, *, timeout: float | None = None) -> None:
+        """Clickea el primer elemento que matchea `selector`. `PortError` si no aparece a tiempo."""
+        ...
+
+    def leer_texto(self, selector: str, *, timeout: float | None = None) -> str:
+        """El texto visible del primer elemento que matchea `selector`."""
+        ...
+
+    def screenshot(self) -> bytes:
+        """La pantalla actual, como PNG."""
+        ...
+
+    @property
+    def available(self) -> bool:
+        """
+        Si el adapter puede operar en esta máquina.
+
+        Igual que `CryptoPort.available`: existe para poder decir "falta
+        instalar Playwright" antes de que un plugin intente usarlo, en vez de
+        fallar recién ahí.
+        """
+        ...
+
+
 # ── Criptografía ────────────────────────────────────────────────────────
 
 
@@ -382,6 +423,7 @@ HTTP = "http"
 FS = "fs"
 PROCESS = "process"
 CLOCK = "clock"
+BROWSER = "browser"
 STORAGE = "storage"
 CRYPTO = "crypto"
 
@@ -390,6 +432,7 @@ PORTS: dict[str, type] = {
     FS: FsPort,
     PROCESS: ProcessPort,
     CLOCK: ClockPort,
+    BROWSER: BrowserPort,
     STORAGE: StoragePort,
     CRYPTO: CryptoPort,
 }
@@ -398,10 +441,11 @@ PORTS: dict[str, type] = {
 # del núcleo. Un plugin con acceso al almacenamiento elegiría dónde persisten
 # sus datos —exactamente lo que `Resource` existe para impedir— y uno con
 # acceso al cifrado podría leer secretos que no le corresponden.
-PLUGIN_PORTS = frozenset({HTTP, FS, PROCESS, CLOCK})
+PLUGIN_PORTS = frozenset({HTTP, FS, PROCESS, CLOCK, BROWSER})
 
 
 __all__ = [
+    "BROWSER",
     "CLOCK",
     "CRYPTO",
     "FS",
@@ -410,6 +454,7 @@ __all__ = [
     "PORTS",
     "PROCESS",
     "STORAGE",
+    "BrowserPort",
     "ClockPort",
     "CryptoPort",
     "FileInfo",

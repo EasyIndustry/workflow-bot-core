@@ -298,13 +298,59 @@ class FakeClock:
         return sum(self.slept)
 
 
+class FakeBrowser:
+    """
+    Navegador guionado: nunca abre uno de verdad.
+
+    `paginas` mapea una URL a los selectores que se pueden leer ahí, como
+    `{url: {selector: texto}}`. Igual que `FakeHttp`: navegar a una URL no
+    guionada, o leer un selector que no está en el guion, levanta PortError.
+    """
+
+    def __init__(self, paginas: dict | None = None) -> None:
+        self.paginas = {url: dict(selectores) for url, selectores in (paginas or {}).items()}
+        self.calls: list[dict] = []
+        self.cerrado = False
+        self._url_actual: str | None = None
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def goto(self, url, *, timeout=None):
+        self.calls.append({"op": "goto", "url": url, "timeout": timeout})
+        if url not in self.paginas:
+            raise PortError(f"FakeBrowser: nadie guionó la página {url}")
+        self._url_actual = url
+
+    def click(self, selector, *, timeout=None):
+        self.calls.append({"op": "click", "selector": selector, "timeout": timeout})
+        if self._url_actual is None:
+            raise PortError("FakeBrowser: click sin haber navegado antes")
+
+    def leer_texto(self, selector, *, timeout=None):
+        self.calls.append({"op": "leer_texto", "selector": selector, "timeout": timeout})
+        selectores = self.paginas.get(self._url_actual or "", {})
+        if selector not in selectores:
+            raise PortError(f"FakeBrowser: nadie guionó el selector {selector!r}")
+        return selectores[selector]
+
+    def screenshot(self):
+        self.calls.append({"op": "screenshot"})
+        return b""
+
+    def close(self):
+        self.cerrado = True
+
+
 def fake_adapters(**overrides) -> dict:
-    """Los cuatro ports en versión falsa. Se puede pisar cualquiera."""
+    """Los cinco ports en versión falsa. Se puede pisar cualquiera."""
     adapters = {
         "http": FakeHttp(),
         "fs": FakeFs(),
         "process": FakeProcess(),
         "clock": FakeClock(),
+        "browser": FakeBrowser(),
     }
     adapters.update(overrides)
     return adapters

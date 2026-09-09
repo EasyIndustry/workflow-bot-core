@@ -38,7 +38,7 @@ mundo.**
 escritorio, un formato de archivo— se escribe como plugin y se instala por
 entry point.
 
-Los cuatro ports con adapter incluido:
+Los ports con adapter incluido:
 
 | Port | Adapter | Librería |
 |---|---|---|
@@ -46,8 +46,16 @@ Los cuatro ports con adapter incluido:
 | `fs` | `LocalFsAdapter` | `os` + `shutil` |
 | `process` | `SubprocessAdapter` | `subprocess` |
 | `clock` | `SystemClockAdapter` | `time` |
+| `browser` | `PlaywrightBrowserAdapter` | `playwright` |
 | `storage` | `SqliteStorageAdapter` | `sqlite3` |
 | `crypto` | `FernetCryptoAdapter` | `cryptography` |
+
+`browser` maneja un navegador real (navegar, clickear, leer lo que la pantalla
+ya muestra) pero **no** sabe de sesiones: perfil persistente y login son
+responsabilidad del plugin que lo use, nunca del adapter. El adapter por
+defecto no persiste nada entre corridas; una instalación que necesite sesión
+entre corridas inyecta su propio `PlaywrightBrowserAdapter(user_data_dir=...)`
+vía `Instance(root, adapters={...})`.
 
 `storage` y `crypto` son del núcleo: un plugin no los puede pedir. Uno con
 acceso al almacenamiento elegiría dónde persisten sus datos —exactamente lo que

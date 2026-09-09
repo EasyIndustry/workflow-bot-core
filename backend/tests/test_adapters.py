@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
+from backend.adapters.browser_playwright import PlaywrightBrowserAdapter
 from backend.adapters.clock_system import SystemClockAdapter
 from backend.adapters.crypto_fernet import FernetCryptoAdapter
 from backend.adapters.fs_local import LocalFsAdapter
@@ -377,3 +378,30 @@ def test_available_contesta_aunque_la_libreria_este_rota(tmp_path, monkeypatch):
     # Y al usarlo de verdad, sube como PortError y no como el panic pelado.
     with pytest.raises(PortError, match="cryptography"):
         adapter.encrypt("hola")
+
+
+# ── Navegador ───────────────────────────────────────────────────────────
+
+
+def test_browser_no_disponible_si_playwright_no_esta_instalado_o_roto(monkeypatch):
+    """
+    Mismo criterio que `CryptoPort.available`: sin el paquete, o con uno roto,
+    `available` contesta que no en vez de levantar, y usarlo de verdad sube
+    como `PortError` explícito.
+    """
+    import builtins
+
+    original = builtins.__import__
+
+    def _romper(nombre, *args, **kwargs):
+        if nombre.startswith("playwright"):
+            raise BaseException("el binding nativo explotó")  # noqa: TRY002
+        return original(nombre, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _romper)
+    adapter = PlaywrightBrowserAdapter()
+
+    assert adapter.available is False
+    with pytest.raises(PortError, match="playwright"):
+        adapter.goto("https://example.com")
+    adapter.close()

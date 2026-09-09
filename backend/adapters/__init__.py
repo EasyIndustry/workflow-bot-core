@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from backend.core import ports
 
+from .browser_playwright import PlaywrightBrowserAdapter
 from .clock_system import SystemClockAdapter
 from .crypto_fernet import FernetCryptoAdapter
 from .fs_local import LocalFsAdapter
@@ -53,6 +54,10 @@ def build_default_adapters(
             allowlist=process_allowlist,
         ),
         ports.CLOCK: SystemClockAdapter(),
+        # Sin perfil persistente por defecto: una instalación que necesite
+        # sesión entre corridas inyecta su propio PlaywrightBrowserAdapter
+        # (ver docstring del adapter) en vez de configurarlo acá.
+        ports.BROWSER: PlaywrightBrowserAdapter(),
     }
 
 
@@ -60,6 +65,7 @@ __all__ = [
     "IN_MEMORY",
     "FernetCryptoAdapter",
     "LocalFsAdapter",
+    "PlaywrightBrowserAdapter",
     "SqliteStorageAdapter",
     "SubprocessAdapter",
     "SystemClockAdapter",

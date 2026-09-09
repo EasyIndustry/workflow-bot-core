@@ -20,7 +20,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Instalar bot-core con extras
-        run: pip install -e ".[crypto,mcp,dev]"
+        run: pip install -e ".[crypto,mcp,browser,dev]"
 
       - name: Doctor
         run: bot-core doctor

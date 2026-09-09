@@ -49,12 +49,14 @@ from .contract import (
     ToolResult,
 )
 from .ports import (
+    BROWSER,
     CLOCK,
     FS,
     HTTP,
     PLUGIN_PORTS,
     PROCESS,
     STORAGE,
+    BrowserPort,
     ClockPort,
     FileInfo,
     FsPort,
@@ -69,6 +71,7 @@ from .registry import ToolRegistry, build_default_registry
 from .resources import ResourceError, TableStore, store_for
 
 __all__ = [
+    "BROWSER",
     "CLOCK",
     "CONTRACT_VERSION",
     "FS",
@@ -80,6 +83,7 @@ __all__ = [
     "STORAGE",
     "Action",
     "ActionHandler",
+    "BrowserPort",
     "ClockPort",
     "Field",
     "FileInfo",

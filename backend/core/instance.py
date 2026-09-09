@@ -536,6 +536,14 @@ class Instance:
 
     def close(self) -> None:
         self.db.close()
+        # La mayoría de los adapters no tiene estado que cerrar (http/fs/
+        # process/clock son stdlib sin proceso propio); el que sí lo tiene
+        # —hoy, el navegador— declara su propio `close()`, y acá se cierra
+        # sin que el núcleo sepa cuál es cuál.
+        for adapter in self.adapters.values():
+            cerrar = getattr(adapter, "close", None)
+            if callable(cerrar):
+                cerrar()
 
 
 # ── Armado por defecto ──────────────────────────────────────────────────

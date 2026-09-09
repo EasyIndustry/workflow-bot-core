@@ -47,7 +47,7 @@ def crypto(tmp_path):
 
 @pytest.fixture
 def adapters():
-    """Los cuatro ports, falsos. El test los muta para guionar el mundo."""
+    """Los cinco ports, falsos. El test los muta para guionar el mundo."""
     return fake_adapters()
 
 

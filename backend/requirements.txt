@@ -22,6 +22,14 @@
 # al intentar guardar o leer un secreto.
 cryptography==50.0.1
 
+# ── Navegador (opcional) ────────────────────────────────────────────────
+#
+# `BrowserPort`/`PlaywrightBrowserAdapter`. El núcleo, la CLI y la suite
+# corren sin esto; sólo falla —con un mensaje explícito— al intentar usar el
+# port `browser` sin el paquete instalado. Además de esto hace falta
+# `playwright install chromium` para tener el navegador en sí.
+playwright==1.62.0
+
 # ── Servidor MCP (opcional) ─────────────────────────────────────────────
 #
 # Sólo para `python -m backend.mcp`, el servidor de autoría. El motor, la CLI y

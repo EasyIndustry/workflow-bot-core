@@ -162,6 +162,7 @@ def list_ports(**_) -> dict:
               "copy_tree, remove_file, remove_tree, rename, read_text, write_text",
         p.PROCESS: "run(command: Sequence[str], cwd, timeout, env) -> ProcessResult",
         p.CLOCK: "now(), monotonic(), sleep(seconds, is_cancelled)",
+        p.BROWSER: "goto(url), click(selector), leer_texto(selector), screenshot() -> bytes",
     }
     return {
         "pedibles_por_un_plugin": [
