@@ -23,3 +23,10 @@ bot-core-mcp = "backend.mcp.server:main"
 [tool.setuptools.packages.find]
 include = ["backend", "backend.*"]
 exclude = ["backend.tests", "backend.tests.*"]
+
+[tool.setuptools.package-data]
+# VERSION no es código: release.yml lo escribe con el tag antes de empaquetar
+# (issue #5), para que un backend/ vendorizado sin pasar por pip tenga de
+# dónde leer la versión. Si no existe al buildear (un dev local, por
+# ejemplo), setuptools no se queja -- simplemente no lo incluye.
+backend = ["VERSION"]

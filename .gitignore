@@ -4,3 +4,4 @@ backend/data/
 *.egg-info/
 build/
 dist/
+backend/VERSION

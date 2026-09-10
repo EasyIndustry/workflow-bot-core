@@ -21,6 +21,7 @@ esté siempre ejercitado, porque el propio núcleo lo transita.
 from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 
 from . import ports as port_names
 from .contract import (
@@ -35,24 +36,43 @@ from .contract import (
     ToolResult,
 )
 
+# `backend/VERSION`, que `release.yml` escribe con el tag (pelado del "v")
+# antes de empaquetar. Constante de módulo y no inline en la función para que
+# un test pueda apuntarla a un archivo temporal sin tocar el repo real.
+_ARCHIVO_VERSION = Path(__file__).resolve().parents[1] / "VERSION"
+
 
 def _version_del_nucleo() -> str:
     """
-    La versión instalada de `bot-core`, para que este manifest no declare una
-    constante que se desincroniza del tag apenas se corta un release (issue
-    #5: `pyproject.toml` decía 0.1.0 con tags ya en v0.2.1-beta1, y acá había
-    otra constante más, "0.2.0", sin relación con ninguna de las dos).
+    La versión de `bot-core`, para que este manifest no declare una constante
+    que se desincroniza del tag apenas se corta un release (issue #5:
+    `pyproject.toml` decía 0.1.0 con tags ya en v0.2.1-beta1, y acá había otra
+    constante más, "0.2.0", sin relación con ninguna de las dos).
 
-    `importlib.metadata` lee el `.dist-info` que deja `pip install` —de un
-    release bajado o de un editable install—, la misma fuente que
-    `pip show bot-core`. Un `backend/` copiado a mano, sin pasar por pip, no
-    tiene de dónde sacarla: por eso el fallback explícito en vez de fingir un
-    número.
+    Dos fuentes, en orden:
+
+    1. **`importlib.metadata`**, que lee el `.dist-info` que deja
+       `pip install` —de un release bajado o de un editable install—, la
+       misma fuente que `pip show bot-core`. Es la autoritativa cuando existe.
+    2. **`backend/VERSION`**, para cuando no: un `backend/` vendorizado desde
+       el tarball de un release —copiado a mano, sin pasar por pip— no tiene
+       `.dist-info` de dónde leer nada (seguimiento del issue #5, visto en la
+       webapp). `release.yml` deja ese archivo en el árbol antes de
+       empaquetar justo para este caso.
+
+    Sin ninguna de las dos, el fallback explícito: mejor una versión que dice
+    "no sé" que fingir un número.
     """
     try:
         return version("bot-core")
     except PackageNotFoundError:
-        return "0.0.0+sin-instalar"
+        pass
+
+    try:
+        contenido = _ARCHIVO_VERSION.read_text(encoding="utf-8").strip()
+    except OSError:
+        contenido = ""
+    return contenido or "0.0.0+sin-instalar"
 
 
 LOG = ToolManifest(

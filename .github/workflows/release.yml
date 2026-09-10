@@ -19,6 +19,14 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Escribir backend/VERSION desde el tag
+        # Issue #5 (seguimiento): un backend/ vendorizado desde este release
+        # -- copiado a mano, sin pasar por pip install -- no tiene .dist-info
+        # de dónde leer la versión. Este archivo viaja en el árbol (wheel,
+        # sdist, y el checkout de este mismo job) para que
+        # _version_del_nucleo() tenga de dónde leerla igual.
+        run: echo "${GITHUB_REF_NAME#v}" > backend/VERSION
+
       - name: Correr la suite antes de publicar
         run: |
           pip install -e ".[crypto,mcp,browser,dev]"
