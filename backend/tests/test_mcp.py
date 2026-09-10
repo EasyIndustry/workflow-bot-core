@@ -629,6 +629,34 @@ def test_run_flow_ejecuta_de_verdad_y_deja_traza(raiz):
     assert any("procesando 0044" in linea for linea in resultado["logs"])
 
 
+def test_resumen_de_run_no_pierde_el_error_kind():
+    """
+    Issue #4: `_resumen_de_run` recorta la traza completa a lo que un agente
+    necesita ver -- pero recortar no puede perder la clasificación del error,
+    que es justo lo que un disparador automático no tiene hoy.
+    """
+    resultado = {
+        "status": "err",
+        "message": "Detenido en \"F\": la sesión ya no sirve",
+        "failed_node": "F",
+        "error_kind": "sesion_vencida",
+        "logs": [],
+        "trace": [
+            {
+                "node_id": "F",
+                "fn": "demo.algo",
+                "params": {},
+                "status": "err",
+                "message": "la sesión ya no sirve",
+                "error_kind": "sesion_vencida",
+            }
+        ],
+    }
+    resumen = ops._resumen_de_run(resultado)
+    assert resumen["error_kind"] == "sesion_vencida"
+    assert resumen["trace"][0]["error_kind"] == "sesion_vencida"
+
+
 def test_run_flow_deniega_un_tool_peligroso_sin_tocar_nada(raiz, tmp_path):
     """
     La propiedad que justifica todo el mecanismo: el agente no puede, y el

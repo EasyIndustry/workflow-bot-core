@@ -551,6 +551,13 @@ class ToolResult:
     outputs se mergea al contexto del run bajo los nombres declarados en el
     manifest. loop activa la arista |loop| del flujo (reemplaza el flag global
     loopNext que antes vivía en el estado del navegador).
+
+    error_kind clasifica un error para quien dispara el run y no puede ver el
+    `message` de texto libre (issue #4): "red", "sesion_vencida", lo que el
+    tool quiera. String libre y no un enum cerrado a propósito — cada plugin
+    conoce sus propias causas de falla, y una taxonomía impuesta desde acá
+    envejecería mal. `None` es "sin clasificar", no "sin error": un `status`
+    err con `error_kind=None` sigue siendo un error.
     """
 
     status: str = STATUS_OK
@@ -558,6 +565,7 @@ class ToolResult:
     message: str = ""
     loop: bool = False
     traceback: str | None = None
+    error_kind: str | None = None
 
     @property
     def failed(self) -> bool:
@@ -568,8 +576,8 @@ class ToolResult:
         return cls(status=STATUS_OK, outputs=outputs, message=message)
 
     @classmethod
-    def err(cls, message: str, **outputs: Any) -> "ToolResult":
-        return cls(status=STATUS_ERR, outputs=outputs, message=message)
+    def err(cls, message: str, *, error_kind: str | None = None, **outputs: Any) -> "ToolResult":
+        return cls(status=STATUS_ERR, outputs=outputs, message=message, error_kind=error_kind)
 
     @classmethod
     def again(cls, message: str = "", **outputs: Any) -> "ToolResult":
@@ -592,6 +600,7 @@ class ToolResult:
             "message": self.message,
             "loop": self.loop,
             "traceback": self.traceback,
+            "error_kind": self.error_kind,
         }
 
 

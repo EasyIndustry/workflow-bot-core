@@ -93,6 +93,7 @@ class NodeTrace:
     outputs: dict = field(default_factory=dict)
     loop: bool = False
     traceback: str | None = None
+    error_kind: str | None = None
     duration_ms: int = 0
     visit: int = 1
     depth: int = 1
@@ -111,6 +112,7 @@ class NodeTrace:
             "outputs": self.outputs,
             "loop": self.loop,
             "traceback": self.traceback,
+            "error_kind": self.error_kind,
             "duration_ms": self.duration_ms,
             "visit": self.visit,
             "depth": self.depth,
@@ -129,6 +131,7 @@ class RunResult:
     status: str = STATUS_OK
     message: str = ""
     failed_node: str | None = None
+    error_kind: str | None = None
     trace: list[NodeTrace] = field(default_factory=list)
     logs: list[LogEntry] = field(default_factory=list)
     dry_run: bool = False
@@ -145,6 +148,7 @@ class RunResult:
             "status": self.status,
             "message": self.message,
             "failed_node": self.failed_node,
+            "error_kind": self.error_kind,
             "dry_run": self.dry_run,
             "trace": [t.to_dict() for t in self.trace],
             "logs": [entry.to_dict() for entry in self.logs],
@@ -188,18 +192,21 @@ class _Run:
             LogEntry(t=time.strftime("%H:%M:%S"), message=message, level=level, node_id=node_id)
         )
 
-    def fail(self, message: str, node_id: str | None = None) -> None:
+    def fail(
+        self, message: str, node_id: str | None = None, *, error_kind: str | None = None
+    ) -> None:
         """
         Marca el run como fallido.
 
-        Preserva el PRIMER mensaje y el primer nodo: al desapilar flujos
-        anidados, cada nivel querría reportar su propio "terminó con error" y
-        taparía la causa raíz.
+        Preserva el PRIMER mensaje, el primer nodo y su error_kind: al
+        desapilar flujos anidados, cada nivel querría reportar su propio
+        "terminó con error" y taparía la causa raíz.
         """
         primero = not self.result.failed
         self.result.status = STATUS_ERR
         if primero:
             self.result.message = message
+            self.result.error_kind = error_kind
         if node_id and not self.result.failed_node:
             self.result.failed_node = node_id
         if message:
@@ -497,6 +504,7 @@ def _run_action(
     trace.outputs = dict(result.outputs)
     trace.loop = result.loop
     trace.traceback = result.traceback
+    trace.error_kind = result.error_kind
     trace.duration_ms = int((time.monotonic() - started) * 1000)
 
     if result.outputs:
@@ -518,6 +526,7 @@ def _run_action(
                 f'Detenido en "{node_id}" ({node.fn}): '
                 f"{result.message or 'terminó con error'}",
                 node_id,
+                error_kind=result.error_kind,
             )
             return None
 

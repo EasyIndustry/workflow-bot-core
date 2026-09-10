@@ -329,6 +329,10 @@ def _resumen_de_run(resultado: dict) -> dict:
         "status": resultado["status"],
         "message": resultado["message"],
         "failed_node": resultado["failed_node"],
+        # Issue #4: quien dispara el run (hoy, Task Scheduler fuera del
+        # core; mañana, un agente vía este mismo tool) necesita distinguir la
+        # causa de una falla más allá del texto libre de `message`.
+        "error_kind": resultado.get("error_kind"),
         "sin_resolver": sorted({
             entrada["message"].split("variables sin resolver: ", 1)[1]
             for entrada in resultado.get("logs", [])
@@ -341,6 +345,7 @@ def _resumen_de_run(resultado: dict) -> dict:
                 "params": t["params"],
                 "status": t["status"],
                 "message": t["message"],
+                "error_kind": t.get("error_kind"),
             }
             for t in resultado.get("trace", [])
         ],

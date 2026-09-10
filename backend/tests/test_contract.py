@@ -237,6 +237,31 @@ def test_excepcion_se_convierte_en_error_con_traceback():
     assert result.traceback and "RuntimeError" in result.traceback
 
 
+def test_tool_result_err_admite_error_kind_libre():
+    """
+    Issue #4: quien dispara un run no puede distinguir causas de falla sólo
+    con un `message` de texto libre. `error_kind` es un string sin enum
+    cerrado -- cada plugin conoce sus propias causas.
+    """
+    resultado = ToolResult.err("la sesión ya no sirve", error_kind="sesion_vencida")
+    assert resultado.error_kind == "sesion_vencida"
+    assert resultado.to_dict()["error_kind"] == "sesion_vencida"
+
+
+def test_tool_result_err_sin_error_kind_es_none_no_falta_de_error():
+    resultado = ToolResult.err("algo salió mal")
+    assert resultado.status == "err"
+    assert resultado.error_kind is None
+
+
+def test_error_kind_de_un_tool_llega_intacto_a_traves_del_registry():
+    reg = _bare_registry(
+        "t.falla_clasificada", lambda ctx: ToolResult.err("timeout de red", error_kind="red")
+    )
+    resultado = _run_bare(reg, "t.falla_clasificada")
+    assert resultado.error_kind == "red"
+
+
 def test_status_no_declarado_se_rechaza():
     reg = _bare_registry("t.raro", lambda ctx: ToolResult(status="quizas"))
     assert _run_bare(reg, "t.raro").status == "err"

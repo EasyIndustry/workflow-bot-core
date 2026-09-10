@@ -185,6 +185,28 @@ def test_error_sin_arista_err_corta_el_flujo():
     assert [t.node_id for t in result.trace] == ["F"]  # L nunca se ejecutó
 
 
+def test_error_kind_del_tool_llega_al_trace_y_al_resultado_del_run():
+    """
+    Issue #4: quien dispara el run (hoy Task Scheduler, fuera del core) no ve
+    el `message` de texto libre -- necesita `error_kind` en el resultado
+    final, no sólo en la traza del nodo que falló.
+    """
+    tool = _tool(
+        "test.falla_clasificada",
+        lambda ctx: ToolResult.err("la sesión ya no sirve", error_kind="sesion_vencida"),
+    )
+    result = _run(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    F["test.falla_clasificada"]\n'
+        '    B --> F\n',
+        registry=_registry(tool),
+    )
+    assert result.failed
+    assert result.error_kind == "sesion_vencida"
+    assert result.trace[0].error_kind == "sesion_vencida"
+
+
 def test_error_con_arista_err_ramifica_y_sigue():
     tool = _tool("test.falla", lambda ctx: ToolResult.err("se rompió"))
     result = _run(
