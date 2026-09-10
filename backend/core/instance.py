@@ -329,6 +329,7 @@ class Instance:
         dry_run: bool = False,
         is_cancelled=None,
         persist: bool = True,
+        allow_broken: bool = False,
     ) -> RunResult:
         """
         Ejecuta un flujo y guarda su traza.
@@ -339,18 +340,36 @@ class Instance:
         falsificable desde adentro no serviría para autorizar.
 
         Un actor inexistente o sin permiso falla **antes** de ejecutar nada.
+        Un flujo con un tool que no está instalado, también: sin este chequeo,
+        el nodo falla, el executor sigue por `|err|` (pensada para fallas de
+        *runtime* — la API no respondió, el archivo no estaba, no para un
+        error de configuración) y el run completo termina `status: ok` con el
+        trabajo real sin hacer, sin que nada lo señale. Mismo criterio que
+        `authorize`: se mira el grafo entero antes de tocar nada, y se dice
+        qué nodos. `allow_broken=True` lo saltea, para quien sepa lo que hace.
 
         Los dry-run también se guardan: sirven para ver qué se validó y cuándo.
         """
         texto = self.load_workflow(flow_name)
         policy = self.policy_for(actor)
+        graph = parse_flow(texto, with_meta=False)
 
-        vedados = self.authorize(parse_flow(texto, with_meta=False), policy)
+        vedados = self.authorize(graph, policy)
         if vedados:
             raise UserError(
                 f'El actor "{policy.actor}" no puede ejecutar "{flow_name}":\n  '
                 + "\n  ".join(vedados)
             )
+
+        if not allow_broken:
+            rotos = [d for d in self.check_graph(graph) if d.severity is Severity.ERROR]
+            if rotos:
+                detalle = "\n  ".join(
+                    f"{d.node_id}: {d.message}" if d.node_id else d.message for d in rotos
+                )
+                raise UserError(
+                    f'"{flow_name}" no se puede ejecutar, tiene errores:\n  {detalle}'
+                )
 
         empezado = self._ahora()
 

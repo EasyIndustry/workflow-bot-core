@@ -151,6 +151,12 @@ Un flujo vedado falla **antes** de ejecutar nada, y dice qué nodo y qué regla 
 impidió. El chequeo se repite por nodo dentro del executor, porque un subflujo
 que `flow.ejecutar` resuelve en runtime no se puede inspeccionar de antemano.
 
+Lo mismo si el flujo llama a un tool que no está instalado: `run` frena antes
+de ejecutar, con el mismo criterio (`check_graph` sobre el grafo entero). Sin
+esto, el nodo fallaba, el executor seguía por `|err|` —pensada para fallas de
+*runtime*, no de configuración— y el run terminaba `status: ok` con el trabajo
+real sin hacer. `allow_broken=True` (`--allow-broken` en la CLI) lo saltea.
+
 **La granularidad de ports es por plugin, no por tool.** Los ports se declaran
 en `PluginManifest` y se inyectan a todos los tools de ese plugin, así que
 cualquiera podría usar cualquiera. Se deniega de más a propósito, y el mensaje

@@ -548,6 +548,40 @@ def test_run_con_actor_inexistente_sale_con_codigo_propio(correr, tmp_path):
     assert codigo == 3
 
 
+def test_run_con_tool_inexistente_falla_antes_de_ejecutar(correr, tmp_path):
+    """
+    Issue #9: antes esto terminaba con código 0 y "status: ok", el nodo roto
+    escondido detrás de una arista |err|. Mismo código 3 que un actor sin
+    permiso: es la misma clase de "no se puede ejecutar", no un fallo de run.
+    """
+    archivo = tmp_path / "roto.mmd"
+    archivo.write_text(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    N["archivos.copiar"]\n'
+        '    E["core.log | message=manejado"]\n'
+        '    B --> N\n'
+        '    N -->|err| E\n'
+    )
+    codigo, _ = correr("run", str(archivo))
+    assert codigo == 3
+
+
+def test_run_allow_broken_corre_igual(correr, tmp_path):
+    archivo = tmp_path / "roto.mmd"
+    archivo.write_text(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    N["archivos.copiar"]\n'
+        '    E["core.log | message=manejado"]\n'
+        '    B --> N\n'
+        '    N -->|err| E\n'
+    )
+    codigo, salida = correr("run", str(archivo), "--allow-broken", "--json")
+    assert codigo == 0
+    assert json.loads(salida)["status"] == "ok"
+
+
 # ── Correr un archivo ya no lo guarda ───────────────────────────────────
 
 

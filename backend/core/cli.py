@@ -233,6 +233,7 @@ def cmd_run(inst: Instance, args) -> int:
             actor=args.actor,
             dry_run=args.dry_run,
             persist=not args.no_persist,
+            allow_broken=args.allow_broken,
         )
     except UserError as exc:
         print(str(exc), file=sys.stderr)
@@ -614,6 +615,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--case", help="Id del caso (default: row.id, o 'cli').")
     p.add_argument("--dry-run", action="store_true", help="Valida y recorre sin ejecutar tools.")
     p.add_argument("--no-persist", action="store_true", help="No guarda el run ni su log.")
+    p.add_argument(
+        "--allow-broken",
+        action="store_true",
+        help="Corre igual aunque el flujo tenga errores (tool sin instalar, etc.). "
+             "Sin esto, un flujo roto falla antes de ejecutar nada.",
+    )
     p.add_argument(
         "--save",
         action="store_true",

@@ -527,6 +527,53 @@ def test_la_autorizacion_tambien_aplica_en_dry_run(demo_instance):
         demo_instance.run("peligroso", "0044", actor="agente", dry_run=True)
 
 
+FLUJO_TOOL_INEXISTENTE = (
+    'flowchart TD\n'
+    '    B(inicio)\n'
+    '    N["archivos.copiar"]\n'
+    '    E["core.log | message=manejado"]\n'
+    '    B --> N\n'
+    '    N -->|err| E\n'
+)
+
+
+def test_un_tool_inexistente_no_ejecuta_nada(instance):
+    """
+    Issue #9: antes, el nodo fallaba, el executor seguía por `|err|` (pensada
+    para fallas de runtime, no de configuración) y el run completo terminaba
+    "ok" con el trabajo real sin hacer, sin que nada lo señalara. Ahora falla
+    antes de tocar nada, mismo criterio que un actor sin permiso.
+    """
+    from backend.core.users import UserError
+
+    instance.workflows.save_mmd("roto", FLUJO_TOOL_INEXISTENTE)
+
+    with pytest.raises(UserError, match="archivos.copiar"):
+        instance.run("roto", "0044")
+
+    assert instance.runs.list() == []
+
+
+def test_un_tool_inexistente_tambien_bloquea_el_dry_run(instance):
+    """Mismo criterio que la autorización: el punto del dry-run es enterarse antes."""
+    from backend.core.users import UserError
+
+    instance.workflows.save_mmd("roto", FLUJO_TOOL_INEXISTENTE)
+
+    with pytest.raises(UserError, match="archivos.copiar"):
+        instance.run("roto", "0044", dry_run=True)
+
+
+def test_allow_broken_corre_igual_por_el_camino_de_antes(instance):
+    """El escape hatch: quien sepa lo que hace puede correrlo igual."""
+    instance.workflows.save_mmd("roto", FLUJO_TOOL_INEXISTENTE)
+
+    resultado = instance.run("roto", "0044", allow_broken=True)
+
+    assert resultado.status == "ok"
+    assert [t.node_id for t in resultado.trace] == ["N", "E"]
+
+
 def test_authorize_reporta_todos_los_nodos_vedados_de_una(demo_instance):
     """
     El chequeo previo existe para dar el panorama completo en vez de morir en

@@ -657,6 +657,44 @@ def test_run_flow_deniega_un_tool_peligroso_sin_tocar_nada(raiz, tmp_path):
     assert list(destino.iterdir()) == []
 
 
+def _flujo_tool_inexistente(tmp_path):
+    flujo = tmp_path / "roto.mmd"
+    flujo.write_text(
+        "flowchart TD\n"
+        "    B(inicio)\n"
+        '    N["archivos.copiar"]\n'
+        '    E["core.log | message=manejado"]\n'
+        "    B --> N\n"
+        "    N -->|err| E\n",
+        encoding="utf-8",
+    )
+    return flujo
+
+
+def test_run_flow_con_tool_inexistente_falla_antes_de_ejecutar(raiz, tmp_path):
+    """
+    Issue #9: antes esto terminaba en status "ok" con el nodo roto escondido
+    detrás de `|err|`. Mismo criterio que un tool peligroso sin permiso: falla
+    en el chequeo previo, antes de ejecutar nada.
+    """
+    _alta(raiz)
+    flujo = _flujo_tool_inexistente(tmp_path)
+
+    with pytest.raises(ops.OperationError) as exc:
+        ops.run_flow(str(flujo), root=raiz, row={"id": "0044"})
+
+    assert "archivos.copiar" in str(exc.value)
+
+
+def test_run_flow_allow_broken_corre_igual(raiz, tmp_path):
+    _alta(raiz)
+    flujo = _flujo_tool_inexistente(tmp_path)
+
+    resultado = ops.run_flow(str(flujo), root=raiz, row={"id": "0044"}, allow_broken=True)
+
+    assert resultado["status"] == "ok"
+
+
 def test_un_humano_si_puede(raiz, tmp_path):
     _alta(raiz, "operador", "human")
     flujo = tmp_path / "mueve.mmd"

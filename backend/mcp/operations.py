@@ -242,11 +242,12 @@ def run_flow(
     actor: str = "agente-mcp",
     plugins: dict | None = None,
     save: bool = False,
+    allow_broken: bool = False,
 ) -> dict:
     """
     Ejecuta un flujo **de verdad**: toca red, disco y procesos.
 
-    Dos guardas que no son opcionales:
+    Tres guardas que no son opcionales:
 
     **`root` es obligatorio, sin default.** Las demás operaciones caen en
     `backend/` si nadie dice nada, y en seco eso casi no molesta. Con ejecución
@@ -264,7 +265,10 @@ def run_flow(
     —`users allow`— y no algo que se pida desde acá.
 
     Un flujo que el actor no puede correr falla **antes** de ejecutar nada, y
-    dice qué nodo y qué regla lo impidió.
+    dice qué nodo y qué regla lo impidió. Lo mismo si el flujo llama a un tool
+    que no está instalado: sin `allow_broken`, falla antes de tocar nada en
+    vez de terminar `status: ok` con ese nodo silenciosamente saltado por la
+    arista `|err|`.
     """
     if not str(root or "").strip():
         raise OperationError(
@@ -280,6 +284,8 @@ def run_flow(
         argv += ["--case", case_id]
     if save:
         argv.append("--save")
+    if allow_broken:
+        argv.append("--allow-broken")
 
     resultado = _cli(*argv, root=root, plugins=plugins, actor=actor)
     resumen = _resumen_de_run(resultado)

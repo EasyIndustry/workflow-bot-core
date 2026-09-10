@@ -238,6 +238,15 @@ TOOLS: list[types.Tool] = [
                 "type": "boolean",
                 "description": "Persiste el flujo en la instalación. Por defecto no.",
             },
+            "allow_broken": {
+                "type": "boolean",
+                "description": (
+                    "Corre igual aunque el flujo tenga errores (un tool sin "
+                    "instalar, por ejemplo). Por defecto no: sin esto, un flujo "
+                    "roto falla ANTES de ejecutar nada en vez de terminar "
+                    "'ok' con ese nodo saltado en silencio."
+                ),
+            },
         },
         ["flow", "root"],
     ),
