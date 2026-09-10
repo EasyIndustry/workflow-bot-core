@@ -233,6 +233,43 @@ def test_decision_sin_variable_es_error():
     assert any("sin variable" in m for m in _errors(graph))
 
 
+# ── Issue #10: valores citados ───────────────────────────────────────────
+
+
+def test_valor_citado_preserva_coma_y_pipe():
+    """El ejemplo real del issue: un mensaje de log con una coma adentro."""
+    graph = parse_flow(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    N3["Registrar UY § core.log | message="Caso {id} es de UY, no se copia""]\n'
+        '    B --> N3\n'
+    )
+    assert graph.runnable
+    assert graph.nodes["N3"].params["message"] == "Caso {id} es de UY, no se copia"
+
+
+def test_valor_citado_con_pipe_no_corta_los_params():
+    graph = parse_flow(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    N["core.log | message="a|b", level=warning"]\n'
+        '    B --> N\n'
+    )
+    assert graph.runnable
+    assert graph.nodes["N"].params == {"message": "a|b", "level": "warning"}
+
+
+def test_comilla_sin_cerrar_es_error():
+    graph = parse_flow(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    N["core.log | message="a, b, c"]\n'
+        '    B --> N\n'
+    )
+    assert not graph.runnable
+    assert any("comilla sin cerrar" in m for m in _errors(graph))
+
+
 def test_parser_nunca_levanta_excepcion():
     for basura in ("", "   ", "flowchart TD", "-->|||", "A{{{", 'X["a § b | = "]'):
         graph = parse_flow(basura)

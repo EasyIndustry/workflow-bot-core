@@ -453,10 +453,11 @@ def test_resultado_es_serializable():
 # ── El footgun de la coma ───────────────────────────────────────────────
 
 
-def test_valor_con_coma_avisa_en_lugar_de_perderse():
+def test_valor_con_coma_sin_comillas_es_error_no_warning():
     """
-    La coma separa params, así que un valor no puede contenerla. el motor anterior
-    descartaba el sobrante en silencio.
+    Issue #10: la coma sigue separando params fuera de comillas —ningún flujo
+    existente cambia—, pero perder texto a mitad de palabra ya no deja el
+    flujo "runnable": es peor que no ejecutar nada.
     """
     graph = parse_flow(
         'flowchart TD\n'
@@ -464,9 +465,21 @@ def test_valor_con_coma_avisa_en_lugar_de_perderse():
         '    L["core.log | message=Hola, mundo"]\n'
         '    B --> L\n'
     )
-    assert graph.runnable  # es warning, no error
+    assert not graph.runnable
     assert graph.nodes["L"].params["message"] == "Hola"
-    assert any("mundo" in d.message for d in graph.warnings)
+    assert any("mundo" in d.message for d in graph.errors)
+
+
+def test_valor_con_coma_entre_comillas_se_preserva_entero():
+    """La forma de escribir la coma a propósito: no se pierde nada."""
+    graph = parse_flow(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    L["core.log | message="Hola, mundo""]\n'
+        '    B --> L\n'
+    )
+    assert graph.runnable
+    assert graph.nodes["L"].params["message"] == "Hola, mundo"
 
 
 if __name__ == "__main__":

@@ -122,23 +122,36 @@ def test_el_separador_no_le_agrega_un_espacio_al_valor_anterior():
     assert despues.nodes["N1"].params["suffix"] == " - HECHO "
 
 
+# ── Comas y pipes: se citan solos, no se avisan más ─────────────────────
+
+
+def test_un_valor_con_pipe_no_es_problema_se_cita_solo():
+    """Issue #10: antes esto no round-trippeaba; ahora se escribe entre comillas."""
+    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "a|b"}, line=1)})
+    assert verificar(grafo) == []
+    assert '"a|b"' in to_mermaid(grafo)
+
+
+def test_un_valor_con_coma_no_es_problema_se_cita_solo():
+    """Es el defecto original: `message=Hola, mundo` perdía " mundo"."""
+    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "Hola, mundo"}, line=1)})
+    assert verificar(grafo) == []
+    antes, despues = _ida_y_vuelta(to_mermaid(grafo))
+    assert despues.nodes["N1"].params["msg"] == "Hola, mundo"
+
+
+def test_un_valor_sin_coma_ni_pipe_no_se_cita():
+    """No le agrega comillas a los nodos que no las necesitan."""
+    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "hola"}, line=1)})
+    assert 'msg="hola"' not in to_mermaid(grafo)
+    assert "msg=hola" in to_mermaid(grafo)
+
+
 # ── Lo que no se puede escribir ─────────────────────────────────────────
 
 
-def test_un_valor_con_pipe_se_avisa():
-    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "a|b"}, line=1)})
-    problemas = verificar(grafo)
-    assert len(problemas) == 1
-    assert "N1 › msg" in problemas[0]
-
-
-def test_un_valor_con_coma_se_avisa():
-    """Es el defecto original: `message=Hola, mundo` perdía " mundo"."""
-    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "Hola, mundo"}, line=1)})
-    assert any("," in p for p in verificar(grafo))
-
-
 def test_un_valor_con_comilla_se_avisa():
+    """Sin escape para una comilla dentro de un valor citado, esto sigue roto."""
     grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": 'di "hola"'}, line=1)})
     assert verificar(grafo)
 
@@ -162,7 +175,7 @@ def test_un_pipe_en_una_condicion_si_es_un_problema():
 
 
 def test_strict_levanta_antes_de_guardar_algo_roto():
-    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "a|b"}, line=1)})
+    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": 'di "hola"'}, line=1)})
     try:
         to_mermaid(grafo, strict=True)
         raise AssertionError("debió levantar")
@@ -172,7 +185,7 @@ def test_strict_levanta_antes_de_guardar_algo_roto():
 
 def test_sin_strict_escribe_igual_y_deja_decidir():
     """Guardar a medias mientras se escribe está permitido; hacerlo callado, no."""
-    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "a|b"}, line=1)})
+    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": 'di "hola"'}, line=1)})
     assert "core.log" in to_mermaid(grafo)
 
 

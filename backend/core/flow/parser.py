@@ -177,14 +177,18 @@ _EDGE_RE = re.compile(r"^(\w+)\s*-->\s*(?:\|([^|]*)\|)?\s*(\w+)(.*)?$")
 _CONT_RE = re.compile(r"^-->\s*(?:\|([^|]*)\|)?\s*(\w+)(.*)?$")
 
 _SHAPES = (
-    (re.compile(r'^(\w+)\["([^"]*)"\]$'), "rect"),
+    # `.*` y no `[^"]*`: un valor citado (`message="a, b"`) mete comillas
+    # adentro de la etiqueta, y greedy + backtracking hace que esto siga
+    # tomando la primera y la última como el wrapper de Mermaid, no las de
+    # adentro (ver `_dividir_pares`, que es quien realmente las interpreta).
+    (re.compile(r'^(\w+)\["(.*)"\]$'), "rect"),
     (re.compile(r"^(\w+)\[([^\]]+)\]$"), "rect"),
     (re.compile(r"^(\w+)\{([^}]+)\}$"), "diamond"),
     (re.compile(r"^(\w+)\(([^)]+)\)$"), "round"),
 )
 
 _INLINE_SHAPES = (
-    (re.compile(r'^\["([^"]*)"\]$'), "rect"),
+    (re.compile(r'^\["(.*)"\]$'), "rect"),
     (re.compile(r"^\[([^\]]+)\]$"), "rect"),
     (re.compile(r"^\{([^}]+)\}$"), "diamond"),
     (re.compile(r"^\(([^)]+)\)$"), "round"),
@@ -220,16 +224,45 @@ def _split_display(label: str) -> tuple[str, str]:
     return label[:idx].strip(), label[idx + len(DISPLAY_SEP) :].strip()
 
 
-def _parse_action_label(label: str) -> tuple[str, dict[str, str], str, list[str]]:
+def _dividir_pares(texto: str) -> tuple[list[str], bool]:
     """
-    Parsea "Nombre § fn.id | k=v, k2=v2" → (fn_id, params, display, descartados).
+    Separa por `,` y `|`, salvo dentro de comillas dobles.
+
+    `k="v, con coma"` es un solo segmento: la coma de adentro no separa. La
+    comilla sólo abre pegada a un `=` (`key="...`) — en cualquier otro lugar
+    del valor es un carácter más, sin efecto. No hay escape para una comilla
+    dentro del valor citado: es el límite conocido de esta primera versión.
+
+    Devuelve además si el texto terminó con una comilla sin cerrar, para que
+    quien llama pueda avisar en vez de devolver un valor cortado a la mitad.
+    """
+    segmentos: list[str] = []
+    actual: list[str] = []
+    en_comillas = False
+    for ch in texto:
+        if ch == '"' and (en_comillas or not actual or actual[-1] == "="):
+            en_comillas = not en_comillas
+            actual.append(ch)
+        elif ch in ",|" and not en_comillas:
+            segmentos.append("".join(actual))
+            actual = []
+        else:
+            actual.append(ch)
+    segmentos.append("".join(actual))
+    return segmentos, en_comillas
+
+
+def _parse_action_label(label: str) -> tuple[str, dict[str, str], str, list[str], bool]:
+    """
+    Parsea "Nombre § fn.id | k=v, k2=v2" → (fn_id, params, display, descartados, sin_cerrar).
 
     El valor no se trimea, igual que en el motor anterior: preserva sufijos con espacios
-    como windowsRenameSuffix= - COMPLETADO.
+    como windowsRenameSuffix= - COMPLETADO. Lo mismo adentro de un valor citado.
 
-    La coma separa parámetros, así que un valor **no puede contener comas**:
-    `message=Hola, mundo` pierde " mundo". el motor anterior lo descartaba en
-    silencio; acá los segmentos sin `=` se devuelven para avisar.
+    Un valor entre comillas dobles puede contener comas y pipes:
+    `message="Hola, mundo"` guarda "Hola, mundo" entero. Sin comillas, la coma
+    sigue separando como siempre —`message=Hola, mundo` pierde " mundo"— así
+    que ningún flujo existente cambia de comportamiento con esto.
     """
     display, definition = _split_display(label)
     pipe = definition.find("|")
@@ -237,19 +270,24 @@ def _parse_action_label(label: str) -> tuple[str, dict[str, str], str, list[str]
 
     params: dict[str, str] = {}
     descartados: list[str] = []
+    sin_cerrar = False
     if pipe >= 0:
-        for pair in re.split(r"[,|]", definition[pipe + 1 :]):
+        pares, sin_cerrar = _dividir_pares(definition[pipe + 1 :])
+        for pair in pares:
             eq = pair.find("=")
             if eq < 0:
                 if pair.strip():
                     descartados.append(pair.strip())
                 continue
             key = pair[:eq].strip()
+            valor = pair[eq + 1 :]
+            if len(valor) >= 2 and valor[0] == '"' and valor[-1] == '"':
+                valor = valor[1:-1]
             if key:
-                params[key] = pair[eq + 1 :]
+                params[key] = valor
             elif pair.strip():
                 descartados.append(pair.strip())
-    return fn_id, params, display, descartados
+    return fn_id, params, display, descartados, sin_cerrar
 
 
 class _Builder:
@@ -289,13 +327,25 @@ class _Builder:
                 variable = ""
             node = DecisionNode(variable=variable, display=display, line=line)
         else:
-            fn_id, params, display, descartados = _parse_action_label(label)
+            fn_id, params, display, descartados, sin_cerrar = _parse_action_label(label)
             if not fn_id:
                 self.error(f'Nodo de acción "{node_id}" sin función', line, node_id)
+            # Error y no warning: un flujo con un valor mutilado queda
+            # "runnable" con un texto cortado a la mitad, que es peor que no
+            # ejecutar nada. `graph.runnable` (y por lo tanto `run()`) ya
+            # respeta la severidad del diagnóstico, así que subirla acá
+            # alcanza para que el flujo deje de poder correr así.
             for texto in descartados:
-                self.warn(
+                self.error(
                     f'En "{node_id}" se descartó "{texto}": no tiene forma clave=valor. '
-                    f"La coma separa parámetros, así que un valor no puede contener comas.",
+                    f'Si el valor necesita una coma o un pipe, va entre comillas: '
+                    f'clave="{texto}".',
+                    line,
+                    node_id,
+                )
+            if sin_cerrar:
+                self.error(
+                    f'En "{node_id}" hay una comilla sin cerrar en el valor de un parámetro.',
                     line,
                     node_id,
                 )

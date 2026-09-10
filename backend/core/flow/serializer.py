@@ -8,15 +8,20 @@ valor que la contenía se partía en dos — el flujo se guardaba roto y nadie s
 enteraba hasta la ejecución. Con el serializador acá, la gramática vive en un
 solo lugar y `parse_flow(to_mermaid(g))` es un test.
 
-Dos reglas que salen de eso:
+Tres reglas que salen de eso:
 
 1. **Los parámetros se unen con `|`, nunca con coma.** La coma se sigue
    aceptando al parsear —hay 30 nodos escritos así— pero no se escribe más.
-2. **Lo que no puede round-trippear se avisa, no se emite y se reza.**
+2. **Un valor con `,` o `|` se cita solo.** `message=Hola, mundo` se escribe
+   `message="Hola, mundo"`: el parser entiende una comilla pegada al `=` como
+   el arranque del valor, y todo lo que hay hasta la comilla de cierre —comas
+   y pipes incluidos— es parte de él (issue #10; antes esto se perdía a mitad
+   de palabra, con sólo un warning).
+3. **Lo que no puede round-trippear se avisa, no se emite y se reza.**
    `verificar()` devuelve los problemas y `to_mermaid(..., strict=True)` levanta
-   antes de guardar. Un valor con `|`, con `,`, o con `"` no sobrevive al
-   parseo, y guardarlo en silencio es el defecto que este módulo existe para no
-   repetir.
+   antes de guardar. Un valor con `"` no sobrevive al parseo —no hay forma de
+   escapar una comilla dentro de un valor citado, todavía— y guardarlo en
+   silencio es el defecto que este módulo existe para no repetir.
 """
 
 from __future__ import annotations
@@ -34,7 +39,7 @@ from .parser import (
 
 # Un valor con estos caracteres no vuelve igual del parser: `|` y `,` son
 # separadores de parámetros, y `"` cierra la etiqueta del nodo.
-PROHIBIDOS_EN_VALOR = ('|', ',', '"')
+PROHIBIDOS_EN_VALOR = ('"',)
 
 # Y en una condición de arista, la coma **sí** significa algo: es el operador
 # IN, que arma la lista de valores. Ahí lo que no puede aparecer es el pipe,
@@ -208,6 +213,19 @@ def _orden(grafo: FlowGraph) -> list[str]:
     return [n for n, _ in con_linea] + sin_linea
 
 
+def _citar_si_hace_falta(valor: str) -> str:
+    """
+    Envuelve el valor en comillas si tiene `,` o `|`: sin eso, el parser lo
+    leería como el arranque de otro parámetro. Un valor sin ninguno de los dos
+    se escribe tal cual, como siempre — no le agrega comillas a los ~30 nodos
+    existentes que no las necesitan.
+    """
+    valor = str(valor)
+    if "," in valor or "|" in valor:
+        return f'"{valor}"'
+    return valor
+
+
 def _nodo(node_id: str, nodo) -> str:
     if isinstance(nodo, StartNode):
         return f"{node_id}({nodo.label})"
@@ -225,7 +243,7 @@ def _nodo(node_id: str, nodo) -> str:
         # `k1=v1, k2=v2`.
         definicion = nodo.fn.strip()
         for clave, valor in nodo.params.items():
-            definicion += f"| {clave}={valor}"
+            definicion += f"| {clave}={_citar_si_hace_falta(valor)}"
         # El espacio va sólo delante del primer pipe, donde no puede pegarse a
         # ningún valor: `fn` ya está trimeado.
         definicion = definicion.replace("|", " |", 1) if nodo.params else definicion
