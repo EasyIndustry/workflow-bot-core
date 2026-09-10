@@ -352,6 +352,41 @@ def test_sql_invalido_es_port_error():
     almacen.close()
 
 
+def test_columns_devuelve_los_nombres_en_orden():
+    """
+    Issue #6: un visor de la base necesita esto sin hablar SQLite -- que lo
+    resuelva el adapter (acá, PRAGMA table_info) y no quien lo usa.
+    """
+    almacen = SqliteStorageAdapter(IN_MEMORY)
+    almacen.migrate({"t": 1}, {"t": {1: "CREATE TABLE t (id INTEGER, a TEXT, b INTEGER);"}})
+
+    assert almacen.columns("t") == ["id", "a", "b"]
+    almacen.close()
+
+
+def test_columns_de_una_tabla_inexistente_es_lista_vacia():
+    """
+    Mismo criterio que `versions()`: las tablas válidas ya salen de
+    `schema.SCHEMA`, así que "no existe" no necesita ser un caso especial
+    para quien llama.
+    """
+    almacen = SqliteStorageAdapter(IN_MEMORY)
+    assert almacen.columns("no_existe") == []
+    almacen.close()
+
+
+def test_columns_rechaza_un_nombre_que_no_es_un_identificador():
+    """
+    PRAGMA no acepta parámetros posicionales: `table` se interpola en el SQL
+    sí o sí. Sin esta validación, un `table` que dejara de venir sólo de
+    `schema.SCHEMA` sería una inyección directa.
+    """
+    almacen = SqliteStorageAdapter(IN_MEMORY)
+    with pytest.raises(PortError, match="inválido"):
+        almacen.columns("t); DROP TABLE t; --")
+    almacen.close()
+
+
 # ── Cifrado ─────────────────────────────────────────────────────────────
 
 

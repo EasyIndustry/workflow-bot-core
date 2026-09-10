@@ -490,6 +490,19 @@ class StoragePort(Protocol):
 
     def executemany(self, sql: str, rows: Iterable[Iterable]) -> int: ...
 
+    def columns(self, table: str) -> list[str]:
+        """
+        Los nombres de columna de `table`, en orden. Lista vacía si la tabla
+        no existe: las tablas válidas ya salen de `schema.SCHEMA`, así que
+        quien llama no necesita distinguir "no existe" de "no tiene
+        columnas" —ninguna tabla real del núcleo tiene cero columnas—.
+
+        Mismo límite honesto que el resto del port: en SQLite se resuelve
+        con `PRAGMA table_info`, así que portar el dialecto sigue siendo
+        trabajo de quien escriba el adapter nuevo, no algo que esto evite.
+        """
+        ...
+
     def close(self) -> None: ...
 
 
