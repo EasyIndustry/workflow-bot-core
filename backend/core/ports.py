@@ -332,6 +332,85 @@ class BrowserPort(Protocol):
         ...
 
 
+# ── Ventana de escritorio ───────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class WindowInfo:
+    """
+    Una ventana ya encontrada, para no tener que rebuscarla en cada llamada.
+
+    `handle` es un token opaco del adapter: se recibe de `find_window` y se
+    devuelve tal cual en las llamadas siguientes, nunca se arma a mano ni se
+    interpreta. Es lo que permite que el mismo objeto de valor sirva sin
+    importar qué hay detrás del adapter.
+    """
+
+    handle: str
+    title: str
+    process: str = ""
+
+
+@runtime_checkable
+class WindowPort(Protocol):
+    """
+    Una ventana nativa de escritorio: encontrarla, clickear, tipear, leer.
+
+    Deliberadamente sin nombrar sistema operativo ni librería —mismo criterio
+    que el resto de los ports—: un plugin escrito contra esta forma no sabe,
+    ni le importa, qué hay detrás. Cuál adapter usar lo decide quien arma la
+    instalación (`adapters.build_default_adapters`, según el sistema donde
+    corre), nunca el plugin: así se declara el port una sola vez y funciona
+    igual en cualquier sistema con adapter propio.
+
+    Sin gestión de foco entre llamadas ni de coordenadas de pantalla: igual
+    que `BrowserPort` no resuelve sesión, este port no resuelve qué pasa si
+    dos automatizaciones compiten por la misma ventana. Eso es decisión de
+    quien lo use.
+    """
+
+    def find_window(
+        self,
+        *,
+        title: str | None = None,
+        process: str | None = None,
+        timeout: float | None = None,
+    ) -> WindowInfo:
+        """
+        Busca una ventana por (parte de) su título o por el nombre de su
+        proceso. `PortError` si no aparece a tiempo, o si no se da ninguno de
+        los dos criterios.
+        """
+        ...
+
+    def click(self, window: WindowInfo, control: str, *, timeout: float | None = None) -> None:
+        """Clickea el control identificado por `control` dentro de la ventana. `PortError` si no aparece a tiempo."""
+        ...
+
+    def type_text(
+        self, window: WindowInfo, control: str, text: str, *, timeout: float | None = None
+    ) -> None:
+        """Escribe `text` en el control identificado por `control`."""
+        ...
+
+    def read_text(
+        self, window: WindowInfo, control: str | None = None, *, timeout: float | None = None
+    ) -> str:
+        """El texto de `control`, o de la ventana entera si no se da `control`."""
+        ...
+
+    @property
+    def available(self) -> bool:
+        """
+        Si el adapter puede operar en esta máquina.
+
+        Mismo criterio que `BrowserPort.available`: existe para poder decir
+        "no hay automatización de ventanas en este sistema" antes de que un
+        plugin intente usarla, en vez de fallar recién ahí.
+        """
+        ...
+
+
 # ── Criptografía ────────────────────────────────────────────────────────
 
 
@@ -424,6 +503,7 @@ FS = "fs"
 PROCESS = "process"
 CLOCK = "clock"
 BROWSER = "browser"
+WINDOW = "window"
 STORAGE = "storage"
 CRYPTO = "crypto"
 
@@ -433,6 +513,7 @@ PORTS: dict[str, type] = {
     PROCESS: ProcessPort,
     CLOCK: ClockPort,
     BROWSER: BrowserPort,
+    WINDOW: WindowPort,
     STORAGE: StoragePort,
     CRYPTO: CryptoPort,
 }
@@ -441,7 +522,7 @@ PORTS: dict[str, type] = {
 # del núcleo. Un plugin con acceso al almacenamiento elegiría dónde persisten
 # sus datos —exactamente lo que `Resource` existe para impedir— y uno con
 # acceso al cifrado podría leer secretos que no le corresponden.
-PLUGIN_PORTS = frozenset({HTTP, FS, PROCESS, CLOCK, BROWSER})
+PLUGIN_PORTS = frozenset({HTTP, FS, PROCESS, CLOCK, BROWSER, WINDOW})
 
 
 __all__ = [
@@ -454,6 +535,7 @@ __all__ = [
     "PORTS",
     "PROCESS",
     "STORAGE",
+    "WINDOW",
     "BrowserPort",
     "ClockPort",
     "CryptoPort",
@@ -465,4 +547,6 @@ __all__ = [
     "ProcessPort",
     "ProcessResult",
     "StoragePort",
+    "WindowInfo",
+    "WindowPort",
 ]

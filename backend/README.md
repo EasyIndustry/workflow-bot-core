@@ -47,6 +47,7 @@ Los ports con adapter incluido:
 | `process` | `SubprocessAdapter` | `subprocess` |
 | `clock` | `SystemClockAdapter` | `time` |
 | `browser` | `PlaywrightBrowserAdapter` | `playwright` |
+| `window` | según el sistema operativo | `pywinauto` (Windows) / AT-SPI (Linux) |
 | `storage` | `SqliteStorageAdapter` | `sqlite3` |
 | `crypto` | `FernetCryptoAdapter` | `cryptography` |
 
@@ -56,6 +57,13 @@ responsabilidad del plugin que lo use, nunca del adapter. El adapter por
 defecto no persiste nada entre corridas; una instalación que necesite sesión
 entre corridas inyecta su propio `PlaywrightBrowserAdapter(user_data_dir=...)`
 vía `Instance(root, adapters={...})`.
+
+`window` maneja una ventana nativa de escritorio (encontrarla, clickear,
+tipear, leer un control) y se declara una sola vez: `build_default_adapters()`
+enruta al adapter del sistema operativo donde corre la instalación —
+`pywinauto` en Windows, AT-SPI en Linux— así el plugin no sabe, ni le importa,
+cuál de los dos hay detrás. En un sistema sin adapter propio, `available` es
+False y usarlo levanta un error explícito en vez de fallar a ciegas.
 
 `storage` y `crypto` son del núcleo: un plugin no los puede pedir. Uno con
 acceso al almacenamiento elegiría dónde persisten sus datos —exactamente lo que

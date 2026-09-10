@@ -26,7 +26,10 @@ from backend.adapters.fs_local import LocalFsAdapter
 from backend.adapters.http_urllib import UrllibHttpAdapter
 from backend.adapters.process_subprocess import SubprocessAdapter
 from backend.adapters.storage_sqlite import IN_MEMORY, SqliteStorageAdapter
-from backend.core.ports import PortError
+from backend.adapters.window_atspi import AtspiWindowAdapter
+from backend.adapters.window_pywinauto import PywinautoWindowAdapter
+from backend.adapters.window_unsupported import UnsupportedWindowAdapter
+from backend.core.ports import PortError, WindowInfo
 
 
 # ── HTTP ────────────────────────────────────────────────────────────────
@@ -405,3 +408,49 @@ def test_browser_no_disponible_si_playwright_no_esta_instalado_o_roto(monkeypatc
     with pytest.raises(PortError, match="playwright"):
         adapter.goto("https://example.com")
     adapter.close()
+
+
+# ── Ventana de escritorio ───────────────────────────────────────────────
+#
+# Ninguno de los dos paquetes reales (pywinauto, pyatspi) está instalado en
+# esta suite -- el primero sólo tiene sentido en Windows, y el segundo no es
+# instalable con pip -- así que `available` da False de forma natural, sin
+# necesidad de mockear el import como en el de arriba.
+
+
+def test_window_pywinauto_no_disponible_sin_el_paquete():
+    adapter = PywinautoWindowAdapter()
+
+    assert adapter.available is False
+    with pytest.raises(PortError, match="Windows"):
+        adapter.find_window(title="Bloc de notas")
+
+
+def test_window_atspi_no_disponible_sin_el_paquete():
+    adapter = AtspiWindowAdapter()
+
+    assert adapter.available is False
+    with pytest.raises(PortError, match="accesibilidad"):
+        adapter.find_window(title="Archivos")
+
+
+def test_window_find_window_exige_titulo_o_proceso():
+    for adapter in (PywinautoWindowAdapter(), AtspiWindowAdapter()):
+        with pytest.raises(PortError, match="title.*process|find_window"):
+            adapter.find_window()
+
+
+def test_window_unsupported_en_un_sistema_operativo_sin_adapter():
+    """El de reserva de un sistema sin automatización real, no un mock: es la forma tal cual."""
+    adapter = UnsupportedWindowAdapter("Darwin")
+
+    assert adapter.available is False
+    ventana = WindowInfo(handle="1", title="cualquiera")
+    with pytest.raises(PortError, match="Darwin"):
+        adapter.find_window(title="x")
+    with pytest.raises(PortError, match="Darwin"):
+        adapter.click(ventana, "boton")
+    with pytest.raises(PortError, match="Darwin"):
+        adapter.type_text(ventana, "campo", "texto")
+    with pytest.raises(PortError, match="Darwin"):
+        adapter.read_text(ventana)

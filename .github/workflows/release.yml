@@ -29,7 +29,7 @@ jobs:
 
       - name: Correr la suite antes de publicar
         run: |
-          pip install -e ".[crypto,mcp,browser,dev]"
+          pip install -e ".[crypto,mcp,browser,window,dev]"
           pytest backend/tests -q
 
       - name: Armar el paquete (sdist + wheel)

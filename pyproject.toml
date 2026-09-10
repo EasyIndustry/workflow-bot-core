@@ -14,6 +14,9 @@ dependencies = []
 crypto = ["cryptography==50.0.1"]
 mcp = ["mcp==2.1.1"]
 browser = ["playwright==1.62.0"]
+# Sólo la mitad del port `window`: el adapter de Windows. El de Linux (AT-SPI)
+# no es un paquete de pip -- lo instala el sistema, ver backend/requirements.txt.
+window = ["pywinauto==0.6.8; sys_platform == 'win32'"]
 dev = ["pytest"]
 
 [project.scripts]

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from backend.core.ports import FileInfo, HttpResponse, PortError, ProcessResult
+from backend.core.ports import FileInfo, HttpResponse, PortError, ProcessResult, WindowInfo
 
 
 class FakeHttp:
@@ -343,14 +343,69 @@ class FakeBrowser:
         self.cerrado = True
 
 
+class FakeWindow:
+    """
+    Ventana de escritorio guionada: nunca toca una de verdad.
+
+    `windows` mapea un título o nombre de proceso a los controles legibles,
+    como `{titulo: {control: texto}}`. Igual que `FakeBrowser`: buscar una
+    ventana no guionada, o leer/clickear un control que no está en el guion,
+    levanta `PortError`.
+    """
+
+    def __init__(self, windows: dict | None = None) -> None:
+        self.windows = {clave: dict(controles) for clave, controles in (windows or {}).items()}
+        self.calls: list[dict] = []
+        self._contador = 0
+        self._abiertas: dict[str, str] = {}
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def find_window(self, *, title=None, process=None, timeout=None):
+        self.calls.append({"op": "find_window", "title": title, "process": process})
+        clave = title or process
+        if clave not in self.windows:
+            raise PortError(f"FakeWindow: nadie guionó la ventana {clave!r}")
+        self._contador += 1
+        handle = str(self._contador)
+        self._abiertas[handle] = clave
+        return WindowInfo(handle=handle, title=title or "", process=process or "")
+
+    def _clave(self, window: WindowInfo) -> str:
+        clave = self._abiertas.get(window.handle)
+        if clave is None:
+            raise PortError("FakeWindow: operación sin haber buscado la ventana antes")
+        return clave
+
+    def click(self, window, control, *, timeout=None):
+        self.calls.append({"op": "click", "handle": window.handle, "control": control})
+        self._clave(window)
+
+    def type_text(self, window, control, text, *, timeout=None):
+        self.calls.append(
+            {"op": "type_text", "handle": window.handle, "control": control, "text": text}
+        )
+        self.windows[self._clave(window)][control] = text
+
+    def read_text(self, window, control=None, *, timeout=None):
+        self.calls.append({"op": "read_text", "handle": window.handle, "control": control})
+        controles = self.windows[self._clave(window)]
+        if control not in controles:
+            raise PortError(f"FakeWindow: nadie guionó el control {control!r}")
+        return controles[control]
+
+
 def fake_adapters(**overrides) -> dict:
-    """Los cinco ports en versión falsa. Se puede pisar cualquiera."""
+    """Los seis ports en versión falsa. Se puede pisar cualquiera."""
     adapters = {
         "http": FakeHttp(),
         "fs": FakeFs(),
         "process": FakeProcess(),
         "clock": FakeClock(),
         "browser": FakeBrowser(),
+        "window": FakeWindow(),
     }
     adapters.update(overrides)
     return adapters
@@ -362,9 +417,11 @@ def _norm(path) -> str:
 
 
 __all__ = [
+    "FakeBrowser",
     "FakeClock",
     "FakeFs",
     "FakeHttp",
     "FakeProcess",
+    "FakeWindow",
     "fake_adapters",
 ]

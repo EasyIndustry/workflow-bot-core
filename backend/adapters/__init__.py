@@ -17,6 +17,8 @@ acá, junta y explícita: cambiar de `urllib` a `requests` es escribir
 
 from __future__ import annotations
 
+import platform
+
 from backend.core import ports
 
 from .browser_playwright import PlaywrightBrowserAdapter
@@ -26,6 +28,26 @@ from .fs_local import LocalFsAdapter
 from .http_urllib import UrllibHttpAdapter
 from .process_subprocess import SubprocessAdapter
 from .storage_sqlite import IN_MEMORY, SqliteStorageAdapter
+from .window_atspi import AtspiWindowAdapter
+from .window_pywinauto import PywinautoWindowAdapter
+from .window_unsupported import UnsupportedWindowAdapter
+
+
+def _build_window_adapter():
+    """
+    Un solo port (`window`), enrutado al adapter del sistema operativo donde
+    corre esta instalación.
+
+    Es lo que le ahorra a un plugin declarar el port dos veces: lo pide una
+    sola vez y en Windows le llega un adapter, en Linux otro, sin que el
+    plugin lo sepa ni lo elija.
+    """
+    sistema = platform.system()
+    if sistema == "Windows":
+        return PywinautoWindowAdapter()
+    if sistema == "Linux":
+        return AtspiWindowAdapter()
+    return UnsupportedWindowAdapter(sistema)
 
 
 def build_default_adapters(
@@ -58,17 +80,21 @@ def build_default_adapters(
         # sesión entre corridas inyecta su propio PlaywrightBrowserAdapter
         # (ver docstring del adapter) en vez de configurarlo acá.
         ports.BROWSER: PlaywrightBrowserAdapter(),
+        ports.WINDOW: _build_window_adapter(),
     }
 
 
 __all__ = [
     "IN_MEMORY",
+    "AtspiWindowAdapter",
     "FernetCryptoAdapter",
     "LocalFsAdapter",
     "PlaywrightBrowserAdapter",
+    "PywinautoWindowAdapter",
     "SqliteStorageAdapter",
     "SubprocessAdapter",
     "SystemClockAdapter",
+    "UnsupportedWindowAdapter",
     "UrllibHttpAdapter",
     "build_default_adapters",
 ]

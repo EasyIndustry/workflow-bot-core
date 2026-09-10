@@ -30,6 +30,20 @@ cryptography==50.0.1
 # `playwright install chromium` para tener el navegador en sí.
 playwright==1.62.0
 
+# ── Ventana de escritorio (opcional) ────────────────────────────────────
+#
+# `WindowPort`, enrutado según el sistema operativo (`adapters.build_default_adapters`).
+# El núcleo, la CLI y la suite corren sin esto; sólo falla —con un mensaje
+# explícito— al intentar usar el port `window` sin el paquete instalado.
+#
+# - Windows: pywinauto, un paquete de pip normal.
+# - Linux: el binding del árbol de accesibilidad (paquete `pyatspi`) no es
+#   instalable con pip de forma portable -- lo trae el sistema (en Debian/
+#   Ubuntu, `apt install python3-pyatspi` o el `gir1.2-atspi` equivalente).
+#   Sin eso, `available` da False y usar el port levanta un `PortError`
+#   explícito, igual que cualquier otro adapter opcional sin instalar.
+pywinauto==0.6.8; sys_platform == "win32"
+
 # ── Servidor MCP (opcional) ─────────────────────────────────────────────
 #
 # Sólo para `python -m backend.mcp`, el servidor de autoría. El motor, la CLI y

@@ -56,6 +56,7 @@ from .ports import (
     PLUGIN_PORTS,
     PROCESS,
     STORAGE,
+    WINDOW,
     BrowserPort,
     ClockPort,
     FileInfo,
@@ -66,6 +67,8 @@ from .ports import (
     ProcessPort,
     ProcessResult,
     StoragePort,
+    WindowInfo,
+    WindowPort,
 )
 from .registry import ToolRegistry, build_default_registry
 from .resources import ResourceError, TableStore, store_for
@@ -81,6 +84,7 @@ __all__ = [
     "STATUS_ERR",
     "STATUS_OK",
     "STORAGE",
+    "WINDOW",
     "Action",
     "ActionHandler",
     "BrowserPort",
@@ -113,6 +117,8 @@ __all__ = [
     "ToolManifest",
     "ToolRegistry",
     "ToolResult",
+    "WindowInfo",
+    "WindowPort",
     "build_default_registry",
     "store_for",
 ]
