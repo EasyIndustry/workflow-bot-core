@@ -25,16 +25,20 @@ from __future__ import annotations
 
 import re
 import time
+from typing import Any
 
 from .contract import Resource
 from .jsonio import dumps, loads
-from .ports import StoragePort
+from .ports import CryptoPort, PortError, StoragePort
 from .schema import LOCAL_ORG
 
 # La clave sigue restringida aunque ya no sea un nombre de archivo: viaja en la
 # URL del ABM (`/resources/{plugin}/{resource}/{key}`) y es lo que un flujo
 # escribe a mano en un param (`connection=CASOS BOT`).
 _KEY_RE = re.compile(r"^[\w\- ]+$")
+
+# Marca de un valor de campo cifrado, mismo criterio que `config.py`.
+_CLAVE_CIFRADO = "__secret__"
 
 
 class ResourceError(Exception):
@@ -58,16 +62,56 @@ class TableStore:
         db: StoragePort,
         plugin: str,
         resource: Resource,
+        crypto: CryptoPort | None = None,
         org: str = LOCAL_ORG,
     ) -> None:
         self.db = db
         self.plugin = plugin
         self.resource = resource
+        # El cifrado entra por un port, igual que en EnvStore/ConfigStore: qué
+        # campo es `secret` ya lo sabe este store (viene en `resource.fields`,
+        # que ya recibe), así que acá no hace falta preguntarle a nadie más
+        # (issue #8).
+        self.crypto = crypto
         self.org = org
 
     @property
     def _scope(self) -> tuple[str, str, str]:
         return (self.org, self.plugin, self.resource.name)
+
+    def _cifrar(self, valor: Any) -> str:
+        if self.crypto is None:
+            raise ResourceError(
+                f'no hay cifrado configurado para guardar un campo secreto de "{self.resource.label}"'
+            )
+        try:
+            return self.crypto.encrypt(dumps(valor))
+        except PortError as exc:
+            raise ResourceError(str(exc)) from exc
+
+    def _descifrar(self, cifrado: str) -> Any:
+        """El valor original, o None si no se puede descifrar (otra llave)."""
+        try:
+            return loads(self.crypto.decrypt(cifrado), None)
+        except Exception:
+            return None
+
+    def _envolver_item(self, item: dict) -> dict:
+        """Cifra los campos que el `Resource` declaró `secret`, antes de guardar."""
+        resultado = dict(item)
+        for campo, valor in item.items():
+            declarado = self.resource.field(campo)
+            if declarado is not None and declarado.secret and valor not in (None, ""):
+                resultado[campo] = {_CLAVE_CIFRADO: self._cifrar(valor)}
+        return resultado
+
+    def _desenvolver_item(self, item: dict) -> dict:
+        """El item con sus campos secretos ya descifrados, para el plugin."""
+        resultado = dict(item)
+        for campo, valor in item.items():
+            if isinstance(valor, dict) and set(valor) == {_CLAVE_CIFRADO}:
+                resultado[campo] = self._descifrar(valor[_CLAVE_CIFRADO])
+        return resultado
 
     def list_keys(self) -> list[str]:
         filas = self.db.query(
@@ -98,7 +142,7 @@ class TableStore:
             items.append(
                 {
                     self.resource.key_field: fila["key"],
-                    **cuerpo,
+                    **self._desenvolver_item(cuerpo),
                     "_updated_at": fila["updated_at"],
                 }
             )
@@ -115,7 +159,7 @@ class TableStore:
         cuerpo = loads(fila["data"], None)
         if not isinstance(cuerpo, dict):
             raise ResourceError(f'"{key}" no es un objeto JSON válido')
-        return {**cuerpo, "_updated_at": fila["updated_at"]}
+        return {**self._desenvolver_item(cuerpo), "_updated_at": fila["updated_at"]}
 
     def write(self, key: str, item: dict) -> dict:
         """Valida contra el esquema del resource y guarda."""
@@ -137,8 +181,11 @@ class TableStore:
             " VALUES (?, ?, ?, ?, ?, ?)"
             " ON CONFLICT (org, plugin, resource, key) DO UPDATE SET"
             "   data = excluded.data, updated_at = excluded.updated_at",
-            (*self._scope, key, dumps(cuerpo), ahora),
+            (*self._scope, key, dumps(self._envolver_item(cuerpo)), ahora),
         )
+        # Lo que se devuelve es lo que se guardó, en claro: quien acaba de
+        # escribir un secreto tiene derecho a ver lo que puso, distinto de
+        # `list_items`/`read` de acá en más, que ya vienen de la base.
         return {self.resource.key_field: key, **cuerpo, "_updated_at": ahora}
 
     def delete(self, key: str) -> None:
@@ -166,7 +213,11 @@ class TableStore:
 
 
 def store_for(
-    db: StoragePort, plugin: str, resource: Resource, org: str = LOCAL_ORG
+    db: StoragePort,
+    plugin: str,
+    resource: Resource,
+    crypto: CryptoPort | None = None,
+    org: str = LOCAL_ORG,
 ) -> TableStore:
     """
     Store de un resource. Ya no hay nada que configurar para poder guardar.
@@ -175,4 +226,4 @@ def store_for(
     significaba que no se podía crear un item hasta configurar dónde. Con la
     tabla, una instalación nueva guarda desde el primer minuto.
     """
-    return TableStore(db, plugin, resource, org)
+    return TableStore(db, plugin, resource, crypto, org)

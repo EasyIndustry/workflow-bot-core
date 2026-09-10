@@ -85,6 +85,45 @@ def test_variables_de_entorno_pisan_y_no_se_persisten(db, monkeypatch):
     assert config.read()["timeout"] == 10
 
 
+def test_config_cifra_las_claves_que_secret_keys_marca(db, crypto):
+    """
+    Issue #8: un Setting `secret` quedaba en claro en `settings.value`. Acá
+    `ConfigStore` no sabe qué es un `Setting` -- sólo le preguntan, en cada
+    escritura, qué keys cifrar.
+    """
+    config = ConfigStore(db, crypto, secret_keys=lambda: {"token"})
+    config.update({"token": "shhh", "timeout": 30.0})
+
+    cruda = db.one("SELECT value FROM settings WHERE key = ?", ("token",))["value"]
+    assert "shhh" not in cruda  # en la base no queda ni un pedazo del secreto
+
+    # Pero para quien lo usa (ctx.config, vía effective_config) sigue en claro.
+    assert config.read() == {"token": "shhh", "timeout": 30.0}
+
+
+def test_config_sin_secret_keys_no_cifra_nada(db, crypto):
+    """Comportamiento por defecto: sin decirle qué cifrar, no cifra nada (compatibilidad)."""
+    config = ConfigStore(db, crypto)
+    config.update({"token": "shhh"})
+
+    cruda = db.one("SELECT value FROM settings WHERE key = ?", ("token",))["value"]
+    assert "shhh" in cruda
+
+
+def test_config_secreto_sin_cifrado_configurado_es_un_error_explicito():
+    from backend.adapters.storage_sqlite import IN_MEMORY, SqliteStorageAdapter
+    from backend.core.config import ConfigError
+    from backend.core.schema import MIGRATIONS, SCHEMA
+
+    almacen = SqliteStorageAdapter(IN_MEMORY)
+    almacen.migrate(SCHEMA, MIGRATIONS)
+    config = ConfigStore(almacen, secret_keys=lambda: {"token"})
+
+    with pytest.raises(ConfigError, match="cifrado"):
+        config.update({"token": "shhh"})
+    almacen.close()
+
+
 # ── Historial de runs ───────────────────────────────────────────────────
 
 

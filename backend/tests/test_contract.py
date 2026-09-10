@@ -207,6 +207,26 @@ def test_defaults_precargan_la_configuracion_inicial():
     assert defaults == {"demoBase": "/casos", "demoTimeout": 10.0}
 
 
+def test_secret_setting_keys_junta_los_de_todos_los_plugins_cargados():
+    """
+    Issue #8: es lo que le permite a `ConfigStore` cifrar sin conocer el
+    contrato de `Setting` -- el registry sí lo conoce, y sólo expone la lista
+    de nombres.
+    """
+    manifest = PluginManifest(
+        name="p",
+        label="P",
+        settings=(
+            Setting("token", secret=True),
+            Setting("timeout", ParamType.FLOAT),
+        ),
+    )
+    reg = _registry()  # ya trae "demo", sin ningún Setting secret
+    reg._add_plugin("p", "test", Plugin(manifest=manifest))
+
+    assert reg.secret_setting_keys() == {"token"}
+
+
 def test_plugin_con_contrato_no_soportado_se_rechaza():
     reg = ToolRegistry()
     manifest = PluginManifest(name="futuro", label="Futuro", contract=99)
@@ -609,6 +629,45 @@ def test_dos_plugins_no_se_pisan_una_coleccion_con_el_mismo_nombre(db):
 
     uno.delete("compartida")
     assert otro.list_keys() == ["compartida"]
+
+
+def test_store_cifra_los_campos_que_el_resource_declara_secret(db, crypto):
+    """
+    Issue #8: `token` está declarado `secret=True` en el Field del demo
+    plugin (ver arriba). El store ya sabe eso -- recibe el `Resource`
+    completo--, así que no necesita que nadie más se lo diga.
+    """
+    resource = _registry().plugins[0].manifest.resources[0]
+    store = store_for(db, "demo", resource, crypto)
+    store.write("con secreto", {"ruta": "/x", "token": "shhh"})
+
+    fila = db.one(
+        "SELECT data FROM plugin_items WHERE plugin = ? AND key = ?",
+        ("demo", "con secreto"),
+    )
+    assert "shhh" not in fila["data"]  # en la base no queda ni un pedazo
+
+    # Pero para el plugin (ctx.resource(...)) sigue en claro.
+    assert store.read("con secreto")["token"] == "shhh"
+    assert store.list_items()[0]["token"] == "shhh"
+
+
+def test_store_sin_crypto_sigue_andando_si_no_hay_campo_secreto_con_valor(db):
+    """
+    Compatibilidad: la inmensa mayoría de los items no tocan un campo
+    `secret`, y esos siguen funcionando sin CryptoPort exactamente como antes.
+    """
+    resource = _registry().plugins[0].manifest.resources[0]
+    store = store_for(db, "demo", resource)  # sin crypto
+    assert store.write("sin secreto", {"ruta": "/x"})["ruta"] == "/x"
+
+
+def test_store_campo_secreto_sin_cifrado_configurado_es_un_error_explicito(db):
+    resource = _registry().plugins[0].manifest.resources[0]
+    store = store_for(db, "demo", resource)  # sin crypto
+
+    with pytest.raises(ResourceError, match="cifrado"):
+        store.write("falla", {"ruta": "/x", "token": "shhh"})
 
 
 def test_el_item_guarda_cuando_cambio(db):

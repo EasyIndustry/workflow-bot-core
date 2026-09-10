@@ -359,6 +359,22 @@ class ToolRegistry:
                 valores.update(p.manifest.defaults())
         return valores
 
+    def secret_setting_keys(self) -> set[str]:
+        """
+        Los `key` de Setting que algún plugin instalado declaró `secret`.
+
+        Es lo que le permite a `ConfigStore` cifrar en reposo (issue #8) sin
+        dejar de ser genérico: no conoce el contrato de `Setting`, sólo
+        recibe esta lista de nombres desde quien sí lo conoce.
+        """
+        return {
+            s.key
+            for p in self._plugins
+            if p.manifest
+            for s in p.manifest.settings
+            if s.secret
+        }
+
     def effective_config(self, config: dict) -> dict:
         """
         La configuración como la ve el sistema: defaults del manifest, pisados

@@ -72,7 +72,6 @@ class Instance:
         self.db = storage if storage is not None else _default_storage(self.boot)
         self.db.migrate(SCHEMA, MIGRATIONS)
 
-        self.config = ConfigStore(self.db)
         self.workflows = WorkflowStore(self.db)
         self.runs = RunStore(self.db)
         self.logs = LogStore(self.db)
@@ -85,6 +84,12 @@ class Instance:
         # así que se resuelven acá y no entran al registry.
         self.crypto = crypto if crypto is not None else _default_crypto(self.data_dir)
         self.env = EnvStore(self.db, self.crypto)
+        # `secret_keys` es perezoso porque el registry se arma después, dos
+        # líneas más abajo: para cuando alguien llame `config.update(...)` de
+        # verdad, ya existe (issue #8).
+        self.config = ConfigStore(
+            self.db, self.crypto, secret_keys=lambda: self.registry.secret_setting_keys()
+        )
 
         self.registry = _build_registry(
             self.adapters, {**self._plugins_de_la_carpeta(), **(local_plugins or {})}
@@ -213,7 +218,7 @@ class Instance:
 
     def resource_store(self, plugin: str, resource) -> TableStore:
         """Store de una colección. El plugin no lo construye ni lo ve."""
-        return store_for(self.db, plugin, resource)
+        return store_for(self.db, plugin, resource, self.crypto)
 
     def resource_definition(self, plugin: str, collection: str):
         """El `Resource` que declaró ese plugin, o None."""
