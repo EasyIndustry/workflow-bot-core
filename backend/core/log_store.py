@@ -83,7 +83,7 @@ class LogStore:
 
     # ── Escritura ───────────────────────────────────────────────────────
 
-    def append_run(self, result, flow: str = "", source: str = "") -> int:
+    def append_run(self, result, *, flow: str = "", source: str = "") -> int:
         """
         Vuelca las líneas de un `RunResult` en una sola escritura.
 

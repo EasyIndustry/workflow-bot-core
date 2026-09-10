@@ -380,7 +380,7 @@ class Instance:
         return resultado
 
     def run_action(
-        self, plugin: str, action: str, params: dict | None = None, item: str | None = None
+        self, plugin: str, action: str, *, params: dict | None = None, item: str | None = None
     ):
         """
         Ejecuta una acción de un plugin ("probar conexión", "previsualizar").

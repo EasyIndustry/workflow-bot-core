@@ -275,7 +275,9 @@ def cmd_action(inst: Instance, args) -> int:
         print("--params tiene que ser un objeto JSON", file=sys.stderr)
         return 2
 
-    resultado, registro = inst.run_action(args.plugin, args.action, params, item=args.item)
+    resultado, registro = inst.run_action(
+        args.plugin, args.action, params=params, item=args.item
+    )
 
     if args.json:
         print(json.dumps({

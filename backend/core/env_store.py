@@ -175,6 +175,7 @@ class EnvStore:
         self,
         name: str,
         value: str,
+        *,
         secret: bool = False,
         updated_by: str = LOCAL_ORG,
     ) -> EnvVar:

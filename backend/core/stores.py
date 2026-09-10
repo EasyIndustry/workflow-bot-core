@@ -99,6 +99,7 @@ class WorkflowStore:
         self,
         name: str,
         content: str,
+        *,
         folder: str = "",
         state: str = "enabled",
         description: str = "",
@@ -118,7 +119,9 @@ class WorkflowStore:
     def save_mmd(self, name: str, raw: str) -> Workflow:
         """Guarda un `.mmd` crudo, tomando folder/state/description de su cabecera."""
         meta, contenido = parse_meta(raw)
-        return self.save(name, contenido, meta.folder, meta.state, meta.description)
+        return self.save(
+            name, contenido, folder=meta.folder, state=meta.state, description=meta.description
+        )
 
     def delete(self, name: str) -> bool:
         afectadas = self.db.execute(
@@ -231,6 +234,7 @@ class RunStore:
     def save(
         self,
         result: RunResult,
+        *,
         flow: str = "",
         source: str = "",
         started_at: float | None = None,
@@ -282,6 +286,7 @@ class RunStore:
 
     def list(
         self,
+        *,
         case_id: str | None = None,
         limit: int = 50,
         only_failed: bool = False,

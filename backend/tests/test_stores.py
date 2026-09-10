@@ -186,6 +186,32 @@ def test_historial_puede_excluir_los_dry_run(db):
     assert [s.run_id for s in store.list(include_dry=False)] == ["real"]
 
 
+# ── Issue #11: params opcionales sólo por nombre ─────────────────────────
+
+
+def test_run_store_list_por_posicion_es_typeerror_no_filtro_mal_hecho(db):
+    """
+    El bug real: `include_dry=True` llamado por posición cayó en `actor`, y
+    `GET /runs` devolvió `[]` sin ningún error. Con `*`, el mismo error de
+    quien llama se entera enseguida y no como datos mal filtrados.
+    """
+    store = RunStore(db)
+    with pytest.raises(TypeError):
+        store.list("A", 50, False, None, None, True)  # type: ignore[misc]
+
+
+def test_run_store_save_por_posicion_es_typeerror(db):
+    store = RunStore(db)
+    with pytest.raises(TypeError):
+        store.save(RunResult(run_id="r1", case_id="A"), "flujo", "fuente")  # type: ignore[misc]
+
+
+def test_workflow_store_save_por_posicion_es_typeerror(db):
+    store = WorkflowStore(db)
+    with pytest.raises(TypeError):
+        store.save("nombre", FLUJO, "carpeta", "enabled", "desc")  # type: ignore[misc]
+
+
 if __name__ == "__main__":
     fallos = 0
     tests = {n: f for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)}

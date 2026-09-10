@@ -343,6 +343,12 @@ def test_run_action_con_item_en_accion_sin_resource_es_err(demo_instance):
     assert "no está atada a ninguna colección" in resultado.message
 
 
+def test_run_action_params_e_item_por_posicion_es_typeerror(demo_instance):
+    """Issue #11: mismo criterio que los stores, acá recién agregado con `item`."""
+    with pytest.raises(TypeError):
+        demo_instance.run_action("demo", "ping", {"url": "https://api.test/ping"})
+
+
 def test_los_usos_se_cuentan_sobre_flujos_y_colecciones(demo_instance):
     """
     Contar sólo los flujos daría 0 usos justo para el secreto que más se usa:
