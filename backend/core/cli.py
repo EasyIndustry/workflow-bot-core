@@ -275,7 +275,7 @@ def cmd_action(inst: Instance, args) -> int:
         print("--params tiene que ser un objeto JSON", file=sys.stderr)
         return 2
 
-    resultado, registro = inst.run_action(args.plugin, args.action, params)
+    resultado, registro = inst.run_action(args.plugin, args.action, params, item=args.item)
 
     if args.json:
         print(json.dumps({
@@ -289,6 +289,40 @@ def cmd_action(inst: Instance, args) -> int:
         print(f"{marca} {mensaje}")
     print(f"\n{resultado.status}" + (f": {resultado.message}" if resultado.message else ""))
     return 0 if not resultado.failed else 1
+
+
+def cmd_resources(inst: Instance, args) -> int:
+    """
+    Items de una colección de un plugin, con los campos `secret` tapados.
+
+    Es lo que hace falta antes de poder pedir un item por nombre: sin esto, un
+    agente no tiene forma de saber qué "sources" existen ya guardadas. Nunca
+    ejecuta nada ni resuelve `{env.CLAVE}` — para eso está `action --item`.
+    """
+    definicion = inst.resource_definition(args.plugin, args.resource)
+    if definicion is None:
+        print(
+            f'no hay una colección "{args.resource}" en el plugin "{args.plugin}"',
+            file=sys.stderr,
+        )
+        return 2
+
+    items = inst.resource_items_masked(args.plugin, args.resource)
+
+    if args.json:
+        print(json.dumps({
+            "plugin": args.plugin,
+            "resource": args.resource,
+            "key_field": definicion.key_field,
+            "fields": [f.to_dict() for f in definicion.fields],
+            "items": items,
+        }, indent=2, ensure_ascii=False))
+        return 0
+
+    print(f"{args.plugin}.{args.resource}: {len(items)} item(s)")
+    for item in items:
+        print(f"  - {item.get(definicion.key_field, '?')}")
+    return 0
 
 
 def cmd_users(inst: Instance, args) -> int:
@@ -619,8 +653,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("plugin")
     p.add_argument("action")
     p.add_argument("--params", help='Parámetros, como JSON: \'{"url": "..."}\'')
+    p.add_argument(
+        "--item",
+        help="Clave de un item ya guardado: resuelve los params desde ahí. "
+             "--params explícitos pisan lo que traiga el item.",
+    )
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_action)
+
+    p = sub.add_parser(
+        "resources", help="Items de una colección de un plugin (secrets tapados)."
+    )
+    p.add_argument("plugin")
+    p.add_argument("resource")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_resources)
 
     p = sub.add_parser("trace", help="La traza de un run ya ejecutado.")
     p.add_argument("run_id")

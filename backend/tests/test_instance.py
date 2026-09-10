@@ -274,6 +274,75 @@ def test_una_referencia_env_dentro_de_una_coleccion_se_resuelve_en_el_servidor(
     assert item["token"] == "Bearer abc123"
 
 
+def test_resource_items_masked_tapa_los_campos_secret_sin_resolver_env(demo_instance):
+    """
+    Issue #7: lo que puede salir por el servidor MCP (u otra API) nunca lleva
+    un valor `secret` en claro, tenga o no una referencia `{env.CLAVE}`
+    adentro. Y a diferencia de `resource_items`, acá tampoco se resuelve
+    ninguna referencia — no tiene sentido resolver algo que se tapa igual.
+    """
+    demo_instance.env.save("ALGO", "resuelto")
+    resource = demo_instance.resource_definition("demo", "destinos")
+    demo_instance.resource_store("demo", resource).write(
+        "frio", {"ruta": "{env.ALGO}", "token": "Bearer secreto"}
+    )
+
+    items = demo_instance.resource_items_masked("demo", "destinos")
+
+    assert len(items) == 1
+    item = items[0]
+    assert item["name"] == "frio"
+    assert item["ruta"] == "{env.ALGO}"  # sin resolver
+    assert item["token"] is None  # tapado, no "Bearer secreto"
+
+
+def test_run_action_con_item_resuelve_params_desde_el_resource(demo_instance):
+    """
+    La otra mitad del issue #7: `run_action` puede resolver los params de una
+    acción atada a un `Resource` (`Action.resource`) desde un item ya
+    guardado, en vez de que quien llama reconstruya la config a mano.
+    """
+    resource = demo_instance.resource_definition("demo", "destinos")
+    demo_instance.resource_store("demo", resource).write(
+        "frio", {"ruta": "/deposito", "token": "secreto-de-verdad"}
+    )
+
+    resultado, _ = demo_instance.run_action("demo", "probar_destino", item="frio")
+
+    assert resultado.status == "ok"
+    assert resultado.outputs["ruta"] == "/deposito"
+    assert resultado.outputs["token"] == "secreto-de-verdad"
+
+
+def test_run_action_con_item_y_params_explicitos_estos_pisan(demo_instance):
+    resource = demo_instance.resource_definition("demo", "destinos")
+    demo_instance.resource_store("demo", resource).write(
+        "frio", {"ruta": "/deposito", "token": "secreto-de-verdad"}
+    )
+
+    resultado, _ = demo_instance.run_action(
+        "demo", "probar_destino", params={"ruta": "/otro"}, item="frio"
+    )
+
+    assert resultado.outputs["ruta"] == "/otro"
+    assert resultado.outputs["token"] == "secreto-de-verdad"
+
+
+def test_run_action_con_item_inexistente_es_err_y_no_revienta(demo_instance):
+    resultado, _ = demo_instance.run_action("demo", "probar_destino", item="no-existe")
+
+    assert resultado.status == "err"
+    assert "no-existe" in resultado.message
+
+
+def test_run_action_con_item_en_accion_sin_resource_es_err(demo_instance):
+    """`ping` no declara `resource`: pedirle un item no tiene sentido y se avisa."""
+    resultado, _ = demo_instance.run_action("demo", "ping", item="lo-que-sea")
+
+    assert resultado.status == "err"
+    assert "no está atada a ninguna colección" in resultado.message
+
+
 def test_los_usos_se_cuentan_sobre_flujos_y_colecciones(demo_instance):
     """
     Contar sólo los flujos daría 0 usos justo para el secreto que más se usa:

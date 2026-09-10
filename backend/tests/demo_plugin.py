@@ -64,6 +64,13 @@ MANIFEST = PluginManifest(
             params=(Param("url", required=True),),
             doc="Pega un GET y reporta el status.",
         ),
+        Action(
+            "probar_destino",
+            "Probar destino",
+            params=(Param("ruta"), Param("token")),
+            doc="Eco de los params resueltos. Ejercita run_action(item=...).",
+            resource="destinos",
+        ),
     ),
 )
 
@@ -211,6 +218,10 @@ def _ping(ctx: ToolContext) -> ToolResult:
     return ToolResult.ok(f"respondió {respuesta.status}")
 
 
+def _probar_destino(ctx: ToolContext) -> ToolResult:
+    return ToolResult.ok(**ctx.params)
+
+
 _TOOLS = (
     (FETCH, _fetch),
     (BUSCAR, _buscar),
@@ -224,7 +235,10 @@ def build_plugin() -> Plugin:
     return Plugin(
         manifest=MANIFEST,
         tools=[FunctionTool(manifest=m, fn=f) for m, f in _TOOLS],
-        actions=[FunctionAction(action=MANIFEST.action("ping"), fn=_ping)],
+        actions=[
+            FunctionAction(action=MANIFEST.action("ping"), fn=_ping),
+            FunctionAction(action=MANIFEST.action("probar_destino"), fn=_probar_destino),
+        ],
     )
 
 

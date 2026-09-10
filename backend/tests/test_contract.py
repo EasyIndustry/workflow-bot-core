@@ -464,7 +464,7 @@ def test_una_accion_se_declara_en_el_manifest_y_se_ejecuta():
     adapters["http"].stub("https://api.test/ping", status=200, text="{}")
     reg = _registry(adapters)
 
-    assert [a.name for a in reg.actions_of("demo")] == ["ping"]
+    assert [a.name for a in reg.actions_of("demo")] == ["ping", "probar_destino"]
     result = reg.execute_action(
         "demo", "ping", _ctx_factory({"url": "https://api.test/ping"})
     )

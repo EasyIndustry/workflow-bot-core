@@ -147,6 +147,20 @@ def list_plugins(plugins: dict | None = None, root: str | None = None) -> dict:
     }
 
 
+def list_resource_items(
+    plugin: str, resource: str, plugins: dict | None = None, root: str | None = None
+) -> dict:
+    """
+    Los items guardados de una colección de un plugin ("sources"), con los
+    campos `secret` tapados.
+
+    Es el paso que faltaba antes de `run_action`: sin esto, un agente no tenía
+    forma de saber qué conexiones/fuentes ya existen para poder pedir una por
+    nombre. No ejecuta nada, y nunca devuelve un secreto en claro.
+    """
+    return _cli("resources", plugin, resource, "--json", root=root, plugins=plugins)
+
+
 def list_ports(**_) -> dict:
     """
     Qué puede pedir un plugin en su manifest, y qué le da cada port.
@@ -473,6 +487,7 @@ def run_action(
     plugin: str,
     action: str,
     params: dict | None = None,
+    item: str | None = None,
     plugins: dict | None = None,
     root: str | None = None,
 ) -> dict:
@@ -484,12 +499,19 @@ def run_action(
     una persona fuera de un run. Un `Tool` no lo es —es un nodo de un flujo, y
     sin run no tiene contexto, ni traza, ni log de fila—.
 
+    `item` resuelve los params desde un item ya guardado de la colección que
+    declara la acción (ver `list_resource_items`), en vez de reconstruirlos a
+    mano: "previsualizar" contra una conexión guardada, por ejemplo. `params`
+    explícitos pisan lo que traiga el item.
+
     Para ejercitar un tool: escribir un `.mmd` de un nodo y pasarlo por
     `dry_run_flow`.
     """
     argv = ["action", plugin, action, "--json"]
     if params:
         argv += ["--params", json.dumps(params, ensure_ascii=False)]
+    if item:
+        argv += ["--item", item]
     return _cli(*argv, root=root, plugins=plugins)
 
 

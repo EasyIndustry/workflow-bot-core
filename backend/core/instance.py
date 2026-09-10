@@ -246,6 +246,31 @@ class Instance:
         """Lector ligado a un plugin, que es lo que recibe su contexto."""
         return lambda coleccion: self.resource_items(plugin, coleccion)
 
+    def resource_items_masked(self, plugin: str, collection: str) -> list[dict]:
+        """
+        Items de una colección, para listar — nunca para ejecutar.
+
+        A diferencia de `resource_items`, acá cada campo que el `Resource`
+        declaró `secret` queda en `None` (mismo criterio que `EnvStore.list`
+        con una variable marcada secreta: el valor no sale de acá ni por
+        error). Tampoco resuelve `{env.CLAVE}` — mostrar la referencia sin
+        resolver es lo que corresponde en un listado, resolverla sería
+        trabajo de más para algo que después se tapa igual.
+
+        Es lo que puede salir por el servidor MCP o cualquier otra API: un
+        agente necesita saber qué items existen para poder pedir uno por
+        nombre (`run_action(..., item=...)`), pero nunca sus secretos.
+        """
+        definicion = self.resource_definition(plugin, collection)
+        if definicion is None:
+            return []
+        secretos = {f.name for f in definicion.fields if f.secret}
+        items = self.resource_store(plugin, definicion).list_items()
+        return [
+            {clave: (None if clave in secretos else valor) for clave, valor in item.items()}
+            for item in items
+        ]
+
     # ── Ejecución ───────────────────────────────────────────────────────
 
     def authorize(self, graph: FlowGraph, policy: RunPolicy) -> list[str]:
@@ -354,15 +379,56 @@ class Instance:
                 pass
         return resultado
 
-    def run_action(self, plugin: str, action: str, params: dict | None = None):
+    def run_action(
+        self, plugin: str, action: str, params: dict | None = None, item: str | None = None
+    ):
         """
         Ejecuta una acción de un plugin ("probar conexión", "previsualizar").
 
         No es parte de ningún run: la dispara una persona. Aun así vuelve como
         `ToolResult`, con el mismo aislamiento de fallos que un tool, porque la
         garantía de que nada falla en silencio no depende de quién apretó.
+
+        `item` resuelve los params desde un item ya guardado de la colección
+        que declara la acción (`Action.resource`), en vez de reconstruirlos a
+        mano en cada llamada — "previsualizar" contra una conexión guardada
+        con su url/headers/auth, por ejemplo. `params` explícitos pisan lo que
+        traiga el item, campo por campo.
         """
-        from .contract import ToolContext
+        from .contract import ToolContext, ToolResult
+
+        base: dict = {}
+        if item:
+            declarada = next(
+                (a for a in self.registry.actions_of(plugin) if a.name == action), None
+            )
+            if declarada is None or not declarada.resource:
+                return (
+                    ToolResult.err(
+                        f'"{action}" de "{plugin}" no está atada a ninguna colección: '
+                        "no acepta `item`."
+                    ),
+                    [],
+                )
+            definicion = self.resource_definition(plugin, declarada.resource)
+            encontrado = definicion and next(
+                (
+                    i
+                    for i in self.resource_items(plugin, declarada.resource)
+                    if i.get(definicion.key_field) == item
+                ),
+                None,
+            )
+            if not encontrado:
+                return (
+                    ToolResult.err(f'no existe "{item}" en {declarada.resource} de {plugin}'),
+                    [],
+                )
+            base = {
+                k: v
+                for k, v in encontrado.items()
+                if k != definicion.key_field and not k.startswith("_")
+            }
 
         config = self.effective_config()
         registro: list[tuple[str, str]] = []
@@ -371,7 +437,7 @@ class Instance:
             return ToolContext(
                 run_id="",
                 case_id="",
-                params=_resolver_action_params(declaracion, params or {}, config),
+                params=_resolver_action_params(declaracion, {**base, **(params or {})}, config),
                 config=config,
                 context={},
                 log=lambda mensaje, nivel="info": registro.append((mensaje, nivel)),

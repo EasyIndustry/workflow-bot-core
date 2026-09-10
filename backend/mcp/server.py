@@ -80,6 +80,23 @@ TOOLS: list[types.Tool] = [
         {"plugins": _PLUGINS, "root": _ROOT},
     ),
     _tool(
+        "list_resource_items",
+        "Los items guardados de una colección de un plugin ('sources'): qué "
+        "conexiones/fuentes ya existen, para poder pedir una por nombre con "
+        "run_action(item=...). Los campos declarados 'secret' vuelven en None, "
+        "nunca en claro. No ejecuta nada.",
+        {
+            "plugin": {"type": "string"},
+            "resource": {
+                "type": "string",
+                "description": "Nombre de la colección (Resource.name del plugin).",
+            },
+            "plugins": _PLUGINS,
+            "root": _ROOT,
+        },
+        ["plugin", "resource"],
+    ),
+    _tool(
         "list_ports",
         "Qué ports puede declarar un plugin y qué ofrece cada uno. Un plugin "
         "nunca importa una librería: pide un port.",
@@ -177,6 +194,14 @@ TOOLS: list[types.Tool] = [
             "plugin": {"type": "string"},
             "action": {"type": "string"},
             "params": {"type": "object", "additionalProperties": True},
+            "item": {
+                "type": "string",
+                "description": (
+                    "Clave de un item ya guardado (ver list_resource_items): "
+                    "resuelve los params desde ahí en vez de reconstruirlos a "
+                    "mano. `params` explícitos pisan lo que traiga el item."
+                ),
+            },
             "plugins": _PLUGINS,
             "root": _ROOT,
         },
@@ -231,7 +256,10 @@ TOOLS: list[types.Tool] = [
             "name": {"type": "string", "description": "Nombre del plugin, en minúsculas."},
             "ports": {
                 "type": "array",
-                "items": {"type": "string", "enum": ["http", "fs", "process", "clock"]},
+                "items": {
+                    "type": "string",
+                    "enum": ["http", "fs", "process", "clock", "browser"],
+                },
                 "description": "Los ports que va a necesitar.",
             },
         },
@@ -242,6 +270,7 @@ TOOLS: list[types.Tool] = [
 HANDLERS: dict[str, Callable[..., dict]] = {
     "list_tools": operations.list_tools,
     "list_plugins": operations.list_plugins,
+    "list_resource_items": operations.list_resource_items,
     "list_ports": operations.list_ports,
     "check_flow": operations.check_flow,
     "dry_run_flow": operations.dry_run_flow,

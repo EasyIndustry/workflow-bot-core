@@ -435,6 +435,51 @@ def test_action_con_params_invalidos(correr):
     assert codigo == 2
 
 
+def test_action_con_item_resuelve_params_desde_el_resource(correr):
+    """Issue #7: --item ahorra reconstruir a mano lo que ya está guardado."""
+    from backend.tests.demo_plugin import DESTINOS
+
+    correr("--plugin", f"demo={DEMO}", "plugins", "--json")
+    correr.instancias[-1].resource_store("demo", DESTINOS).write(
+        "frio", {"ruta": "/deposito", "token": "sss"}
+    )
+
+    codigo, salida = correr(
+        "--plugin", f"demo={DEMO}", "action", "demo", "probar_destino", "--item", "frio", "--json"
+    )
+
+    assert codigo == 0
+    outputs = json.loads(salida)["outputs"]
+    assert outputs["ruta"] == "/deposito"
+    assert outputs["token"] == "sss"
+
+
+# ── resources ───────────────────────────────────────────────────────────
+
+
+def test_resources_lista_items_con_secrets_tapados(correr):
+    from backend.tests.demo_plugin import DESTINOS
+
+    correr("--plugin", f"demo={DEMO}", "plugins", "--json")
+    correr.instancias[-1].resource_store("demo", DESTINOS).write(
+        "frio", {"ruta": "/deposito", "token": "sss"}
+    )
+
+    codigo, salida = correr("--plugin", f"demo={DEMO}", "resources", "demo", "destinos", "--json")
+
+    assert codigo == 0
+    datos = json.loads(salida)
+    assert datos["key_field"] == "name"
+    item = next(i for i in datos["items"] if i["name"] == "frio")
+    assert item["ruta"] == "/deposito"
+    assert item["token"] is None
+
+
+def test_resources_de_coleccion_inexistente_es_error(correr):
+    codigo, _ = correr("--plugin", f"demo={DEMO}", "resources", "demo", "nada", "--json")
+    assert codigo == 2
+
+
 # ── Actores desde la CLI ────────────────────────────────────────────────
 
 

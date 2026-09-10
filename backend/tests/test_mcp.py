@@ -157,7 +157,7 @@ def test_load_plugin_acepta_uno_valido(raiz):
     assert resultado["ok"] is True
     assert resultado["plugin"]["ports"] == ["http", "fs", "process", "clock"]
     assert "demo.mover" in resultado["plugin"]["tools"]
-    assert resultado["plugin"]["actions"] == ["ping"]
+    assert resultado["plugin"]["actions"] == ["ping", "probar_destino"]
 
 
 def test_load_plugin_reporta_un_port_sin_adapter(raiz, tmp_path):
@@ -427,6 +427,77 @@ def test_run_action_inexistente_nombra_las_disponibles(raiz):
     assert "ping" in resultado["message"]
 
 
+def _sembrar_destino(raiz, key, **campos):
+    """Escribe un item de `destinos` directo a la base, sin pasar por el MCP."""
+    from backend.core.instance import Instance
+    from backend.tests.demo_plugin import DESTINOS
+
+    inst = Instance(raiz)
+    try:
+        inst.resource_store("demo", DESTINOS).write(key, campos)
+    finally:
+        inst.close()
+
+
+def test_list_resource_items_tapa_secrets(raiz):
+    """
+    Issue #7: un agente tiene que poder ver qué "sources" existen sin que el
+    campo `secret` (token, acá) viaje nunca en claro.
+    """
+    _sembrar_destino(raiz, "frio", ruta="/deposito", token="Bearer abc123")
+
+    resultado = ops.list_resource_items("demo", "destinos", plugins={"demo": DEMO}, root=raiz)
+
+    assert resultado["key_field"] == "name"
+    item = next(i for i in resultado["items"] if i["name"] == "frio")
+    assert item["ruta"] == "/deposito"
+    assert item["token"] is None
+
+
+def test_run_action_con_item_resuelve_params_desde_el_resource(raiz):
+    """
+    La otra mitad del issue #7: "ingresar un source" es una sola llamada, sin
+    reconstruir la config del item a mano.
+    """
+    _sembrar_destino(raiz, "frio", ruta="/deposito", token="secreto-de-verdad")
+
+    resultado = ops.run_action(
+        "demo", "probar_destino", item="frio", plugins={"demo": DEMO}, root=raiz
+    )
+
+    assert resultado["status"] == "ok"
+    assert resultado["outputs"]["ruta"] == "/deposito"
+    assert resultado["outputs"]["token"] == "secreto-de-verdad"
+
+
+def test_run_action_con_item_y_params_explicitos_estos_pisan(raiz):
+    _sembrar_destino(raiz, "frio", ruta="/deposito", token="secreto-de-verdad")
+
+    resultado = ops.run_action(
+        "demo", "probar_destino", params={"ruta": "/otro"}, item="frio",
+        plugins={"demo": DEMO}, root=raiz,
+    )
+
+    assert resultado["outputs"]["ruta"] == "/otro"
+    assert resultado["outputs"]["token"] == "secreto-de-verdad"
+
+
+def test_run_action_con_item_inexistente_es_err(raiz):
+    resultado = ops.run_action(
+        "demo", "probar_destino", item="no-existe", plugins={"demo": DEMO}, root=raiz
+    )
+    assert resultado["status"] == "err"
+    assert "no-existe" in resultado["message"]
+
+
+def test_run_action_con_item_en_accion_sin_resource_es_err(raiz):
+    resultado = ops.run_action(
+        "demo", "ping", item="frio", plugins={"demo": DEMO}, root=raiz
+    )
+    assert resultado["status"] == "err"
+    assert "no está atada a ninguna colección" in resultado["message"]
+
+
 # ── El cableado del protocolo ───────────────────────────────────────────
 
 
@@ -462,6 +533,7 @@ def test_la_lista_de_tools_no_crece_con_los_plugins():
     assert {t.name for t in TOOLS} == {
         "list_tools",
         "list_plugins",
+        "list_resource_items",
         "list_ports",
         "list_users",
         "check_flow",

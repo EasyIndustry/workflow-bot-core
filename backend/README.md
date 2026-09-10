@@ -216,11 +216,12 @@ interfaz de operación: no ejecuta flujos de verdad.
 |---|---|
 | `list_tools` | el catálogo, con params tipados y outputs |
 | `list_plugins` | plugins cargados, sus settings, colecciones y ports |
+| `list_resource_items` | items guardados de una colección ("sources"), secrets tapados |
 | `list_ports` | qué puede declarar un plugin, y qué le da cada port |
 | `check_flow` | valida un `.mmd`: severidad, línea y nodo |
 | `dry_run_flow` | recorre entero con un row, sin ejecutar un solo tool |
 | `load_plugin` | ¿el núcleo acepta este plugin? sin ejecutarlo |
-| `run_action` | ejecuta una `Action` declarada por un plugin |
+| `run_action` | ejecuta una `Action` declarada por un plugin. `item=` resuelve params desde un item guardado |
 | `run_flow` | ejecución real. `root` obligatorio, y el actor limita qué puede |
 | `list_users` | qué puede cada actor, para entender una denegación |
 | `plugin_template` | esqueleto con los ports ya declarados |
