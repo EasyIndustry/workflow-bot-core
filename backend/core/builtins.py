@@ -20,6 +20,8 @@ esté siempre ejercitado, porque el propio núcleo lo transita.
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version
+
 from . import ports as port_names
 from .contract import (
     FunctionTool,
@@ -32,6 +34,26 @@ from .contract import (
     ToolManifest,
     ToolResult,
 )
+
+
+def _version_del_nucleo() -> str:
+    """
+    La versión instalada de `bot-core`, para que este manifest no declare una
+    constante que se desincroniza del tag apenas se corta un release (issue
+    #5: `pyproject.toml` decía 0.1.0 con tags ya en v0.2.1-beta1, y acá había
+    otra constante más, "0.2.0", sin relación con ninguna de las dos).
+
+    `importlib.metadata` lee el `.dist-info` que deja `pip install` —de un
+    release bajado o de un editable install—, la misma fuente que
+    `pip show bot-core`. Un `backend/` copiado a mano, sin pasar por pip, no
+    tiene de dónde sacarla: por eso el fallback explícito en vez de fingir un
+    número.
+    """
+    try:
+        return version("bot-core")
+    except PackageNotFoundError:
+        return "0.0.0+sin-instalar"
+
 
 LOG = ToolManifest(
     id="core.log",
@@ -113,7 +135,7 @@ def _wait(ctx: ToolContext) -> ToolResult:
 MANIFEST = PluginManifest(
     name="core",
     label="Núcleo",
-    version="0.2.0",
+    version=_version_del_nucleo(),
     doc="Primitivas del motor de flujos. No se puede desinstalar.",
     ports=(port_names.CLOCK,),
     settings=(
