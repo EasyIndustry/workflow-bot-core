@@ -475,6 +475,111 @@ def test_window_find_window_exige_titulo_o_proceso():
             adapter.find_window()
 
 
+class _FakeControlConInvoke:
+    def __init__(self):
+        self.invoked = False
+        self.clicked = False
+
+    def invoke(self):
+        self.invoked = True
+
+    def click_input(self):
+        self.clicked = True
+
+
+class _FakeControlSinInvoke:
+    def __init__(self):
+        self.clicked = False
+
+    def click_input(self):
+        self.clicked = True
+
+
+class _FakeControlInvokeFalla:
+    def __init__(self):
+        self.clicked = False
+
+    def invoke(self):
+        raise RuntimeError("el control no soporta Invoke")
+
+    def click_input(self):
+        self.clicked = True
+
+
+class _FakeVentanaPywinauto:
+    def __init__(self, control):
+        self._control = control
+
+    def child_window(self, *, title):
+        return self._control
+
+    def window_text(self):
+        return "ventana"
+
+
+def test_window_pywinauto_click_prefiere_invoke_sobre_mover_el_mouse():
+    """
+    Issue #13: `click_input()` mueve el cursor físico (`SetCursorPos`) y falla
+    en una máquina con algo que se apropia del cursor (un KVM por software, un
+    cliente de acceso remoto). El patrón Invoke de UI Automation no toca el
+    mouse, así que va primero.
+    """
+    adapter = PywinautoWindowAdapter()
+    control = _FakeControlConInvoke()
+    adapter._ventanas["1"] = _FakeVentanaPywinauto(control)
+
+    adapter.click(WindowInfo(handle="1", title="x"), "Export")
+
+    assert control.invoked is True
+    assert control.clicked is False
+
+
+def test_window_pywinauto_click_cae_a_simular_el_mouse_sin_invoke():
+    adapter = PywinautoWindowAdapter()
+    control = _FakeControlSinInvoke()
+    adapter._ventanas["1"] = _FakeVentanaPywinauto(control)
+
+    adapter.click(WindowInfo(handle="1", title="x"), "campo")
+
+    assert control.clicked is True
+
+
+def test_window_pywinauto_click_cae_a_simular_el_mouse_si_invoke_falla():
+    """No todo control soporta Invoke (un campo de texto, por ejemplo): cae al mouse."""
+    adapter = PywinautoWindowAdapter()
+    control = _FakeControlInvokeFalla()
+    adapter._ventanas["1"] = _FakeVentanaPywinauto(control)
+
+    adapter.click(WindowInfo(handle="1", title="x"), "campo")
+
+    assert control.clicked is True
+
+
+def test_window_pywinauto_sugiere_proceso_elevado_cuando_no_se_encuentra(monkeypatch):
+    """
+    Issue #13: un proceso corriendo como administrador no lo puede abrir un
+    Bot sin elevar, y pywinauto lo reporta como "no encontrado" -- el tipo de
+    la excepción (`ProcessNotFoundError`) es la única pista de que es esto y
+    no una ventana que realmente no está.
+    """
+
+    class ProcessNotFoundError(Exception):
+        pass
+
+    class _AplicacionRota:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def connect(self, **kwargs):
+            raise ProcessNotFoundError("no matching process")
+
+    adapter = PywinautoWindowAdapter()
+    monkeypatch.setattr(adapter, "_application", lambda: _AplicacionRota)
+
+    with pytest.raises(PortError, match="administrador"):
+        adapter.find_window(title="Export")
+
+
 def test_window_unsupported_en_un_sistema_operativo_sin_adapter():
     """El de reserva de un sistema sin automatización real, no un mock: es la forma tal cual."""
     adapter = UnsupportedWindowAdapter("Darwin")

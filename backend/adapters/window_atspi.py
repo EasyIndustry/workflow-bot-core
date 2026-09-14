@@ -108,6 +108,12 @@ class AtspiWindowAdapter:
         return encontrado
 
     def click(self, window, control, *, timeout=None):
+        """
+        Clickea `control` disparando su acción de accesibilidad
+        (`queryAction().doAction(0)`), no moviendo el mouse: no hay
+        `SetCursorPos` que romperse en una máquina con algo que se apropia del
+        cursor (issue #13, visto en el adapter de Windows).
+        """
         objetivo = self._buscar_control(self._resolver(window), control)
         try:
             objetivo.queryAction().doAction(0)

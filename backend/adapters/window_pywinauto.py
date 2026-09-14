@@ -70,9 +70,21 @@ class PywinautoWindowAdapter:
             ventana = app.top_window()
             ventana.wait("exists", timeout=espera)
         except Exception as exc:
+            # Un proceso corriendo "como administrador" no lo puede abrir un Bot
+            # sin elevar (OpenProcess deniega el acceso), y pywinauto lo reporta
+            # como "no encontrado" -- aunque el PID exista -- porque no pudo
+            # confirmar que ese proceso matchea (issue #13). Es la causa más común
+            # de este error cuando la ventana está, a la vista, en la pantalla.
+            pista = (
+                " (si la ventana está abierta pero no aparece, puede estar "
+                "corriendo como administrador: un proceso no elevado no puede "
+                "verla ni controlarla)"
+                if type(exc).__name__ == "ProcessNotFoundError"
+                else ""
+            )
             raise PortError(
                 f"no se encontró una ventana con title={title!r} process={process!r}: "
-                f"{type(exc).__name__}: {exc}"
+                f"{type(exc).__name__}: {exc}{pista}"
             ) from exc
 
         self._contador += 1
@@ -90,9 +102,35 @@ class PywinautoWindowAdapter:
         return ventana
 
     def click(self, window, control, *, timeout=None):
+        """
+        Clickea `control`.
+
+        Preferí el patrón Invoke de UI Automation (`invoke()`) sobre simular el
+        mouse (`click_input()`, que mueve el cursor físico con `SetCursorPos`):
+        en una máquina con algo que se apropia del cursor -- un KVM por
+        software, un cliente de acceso remoto -- `SetCursorPos` falla para
+        cualquier proceso de esa máquina, Bot incluido (issue #13). Invoke no
+        toca el mouse. Sólo cae a simularlo si el control no expone ese patrón
+        (no todos los controles lo soportan, ej. un campo de texto).
+        """
         ventana = self._resolver(window)
         try:
-            ventana.child_window(title=control).click_input()
+            objetivo = ventana.child_window(title=control)
+        except Exception as exc:
+            raise PortError(
+                f"no se pudo clickear {control!r}: {type(exc).__name__}: {exc}"
+            ) from exc
+
+        invocar = getattr(objetivo, "invoke", None)
+        if callable(invocar):
+            try:
+                invocar()
+                return
+            except Exception:
+                pass  # el control no soporta Invoke: cae a simular el click
+
+        try:
+            objetivo.click_input()
         except Exception as exc:
             raise PortError(
                 f"no se pudo clickear {control!r}: {type(exc).__name__}: {exc}"
@@ -108,6 +146,15 @@ class PywinautoWindowAdapter:
             ) from exc
 
     def read_text(self, window, control=None, *, timeout=None):
+        """
+        El texto de `control`, o -sin `control`- el de la ventana entera.
+
+        "El de la ventana entera" es lo que pywinauto expone como
+        `window_text()` para un top-level: el título de la barra, no el
+        contenido que muestra. Para leer lo que un Notepad tiene escrito, por
+        ejemplo, hay que pedir el control (`Edit`/`Document`, según la app),
+        no la ventana.
+        """
         ventana = self._resolver(window)
         try:
             objetivo = ventana.child_window(title=control) if control else ventana
