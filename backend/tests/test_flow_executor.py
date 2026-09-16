@@ -587,3 +587,143 @@ def test_el_dry_run_tambien_tipa_los_params():
     )
     assert result.failed
     assert "no es un número" in result.trace[0].message
+
+
+# ── Progreso en vivo (issue #15) ────────────────────────────────────────
+
+
+def test_on_step_avisa_cada_nodo_con_su_display_y_su_posicion():
+    """
+    Sin esto, una UI sólo puede decir "está corriendo" y desde cuándo: el run
+    bloquea hasta el final y nadie afuera sabe en qué nodo está.
+    """
+    pasos = []
+    execute_flow(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    UNO["primero § core.log | message=a"]\n'
+        '    DOS["segundo § core.log | message=b"]\n'
+        "    B --> UNO\n"
+        "    UNO --> DOS\n",
+        case_id="0044",
+        registry=_registry(),
+        on_step=lambda node_id, **datos: pasos.append((node_id, datos)),
+    )
+
+    assert [p[0] for p in pasos] == ["UNO", "DOS"]
+    assert pasos[0][1] == {"display": "primero", "index": 1, "total": 2}
+    assert pasos[1][1] == {"display": "segundo", "index": 2, "total": 2}
+
+
+def test_on_step_no_cuenta_el_nodo_de_inicio():
+    """El nodo de inicio no hace nada que se pueda mostrar como un paso."""
+    pasos = []
+    execute_flow(
+        'flowchart TD\n    B(inicio)\n    N["core.log | message=a"]\n    B --> N\n',
+        case_id="0044",
+        registry=_registry(),
+        on_step=lambda node_id, **_: pasos.append(node_id),
+    )
+    assert pasos == ["N"]
+
+
+def test_on_step_cuenta_tambien_las_decisiones():
+    pasos = []
+    execute_flow(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        "    D{¿tipo? § tipo}\n"
+        '    N["core.log | message=a"]\n'
+        "    B --> D\n"
+        "    D -->|x| N\n",
+        case_id="0044",
+        registry=_registry(),
+        row={"tipo": "x"},
+        on_step=lambda node_id, **_: pasos.append(node_id),
+    )
+    assert pasos == ["D", "N"]
+
+
+def test_con_un_bucle_el_indice_supera_al_total():
+    """
+    `index` cuenta visitas, no nodos distintos: con reintentos, el mismo nodo
+    se anuncia varias veces. Quien dibuja la barra lo topa a 100%; el motor no
+    miente sobre cuántas veces pasó de verdad.
+    """
+    intentos = {"n": 0}
+
+    def _a_veces(ctx):
+        intentos["n"] += 1
+        return ToolResult.ok() if intentos["n"] > 2 else ToolResult.again("todavía no")
+
+    pasos = []
+    execute_flow(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    C["chequear § test.chequear"]\n'
+        '    FIN["core.log | message=listo"]\n'
+        "    B --> C\n"
+        "    C -->|loop| C\n"
+        "    C -->|ok| FIN\n",
+        case_id="0044",
+        registry=_registry(_tool("test.chequear", _a_veces)),
+        on_step=lambda node_id, **datos: pasos.append(datos["index"]),
+    )
+
+    assert pasos == [1, 2, 3, 4]
+    assert len(pasos) > 2  # el total del grafo son 2 nodos de acción
+
+
+def test_un_on_step_que_revienta_no_tumba_el_run():
+    """
+    Quien escucha está dibujando una barra: que se caiga dibujando no puede
+    costar la ejecución que ya está a mitad de camino. Mismo criterio que un
+    logger.
+    """
+    def _explota(node_id, **_):
+        raise RuntimeError("la UI se cayó")
+
+    resultado = execute_flow(
+        'flowchart TD\n    B(inicio)\n    N["core.log | message=a"]\n    B --> N\n',
+        case_id="0044",
+        registry=_registry(),
+        on_step=_explota,
+    )
+    assert resultado.status == "ok"
+
+
+def test_sin_on_step_el_comportamiento_es_identico():
+    """El default es None: nada cambia para quien no lo usa."""
+    flujo = 'flowchart TD\n    B(inicio)\n    N["core.log | message=a"]\n    B --> N\n'
+    con = execute_flow(flujo, case_id="0044", registry=_registry(), on_step=lambda *a, **k: None)
+    sin = execute_flow(flujo, case_id="0044", registry=_registry())
+
+    assert con.status == sin.status
+    assert [t.node_id for t in con.trace] == [t.node_id for t in sin.trace]
+
+
+def test_un_subflujo_sigue_contando_sobre_el_mismo_indice():
+    """
+    Para quien mira el progreso es una sola corrida: si el índice se reiniciara
+    al entrar a un subflujo, la barra volvería para atrás.
+    """
+    subflujo = 'flowchart TD\n    B(inicio)\n    S["sub § core.log | message=x"]\n    B --> S\n'
+    pasos = []
+
+    execute_flow(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    UNO["core.log | message=a"]\n'
+        '    SUB["flow.ejecutar | flowName=hijo"]\n'
+        "    B --> UNO\n"
+        "    UNO --> SUB\n",
+        case_id="0044",
+        registry=_registry(),
+        load_flow=lambda nombre: subflujo,
+        on_step=lambda node_id, **datos: pasos.append((node_id, datos["index"], datos["total"])),
+    )
+
+    assert [p[0] for p in pasos] == ["UNO", "SUB", "S"]
+    assert [p[1] for p in pasos] == [1, 2, 3]
+    # El total sigue siendo el del flujo principal, no el del subflujo.
+    assert {p[2] for p in pasos} == {2}

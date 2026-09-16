@@ -171,6 +171,7 @@ class _Run:
         policy,
         dry_run: bool,
         max_visits: int,
+        on_step: Callable[..., None] | None = None,
     ) -> None:
         self.result = RunResult(run_id=run_id, case_id=case_id, dry_run=dry_run)
         self.policy = policy
@@ -182,6 +183,12 @@ class _Run:
         self.resources = resources
         self.dry_run = dry_run
         self.max_visits = max_visits
+        self.on_step = on_step
+        # Pasos ya anunciados y cuántos tiene el flujo principal. Viven en el
+        # run y no en `_walk` porque un subflujo sigue contando sobre el mismo
+        # número: para quien mira la barra, es una sola corrida.
+        self.steps = 0
+        self.total_steps = 0
         self.retry_counters: dict[str, int] = {}
         # Status de la última acción: define qué arista |ok|/|err| se toma.
         self.last_status = STATUS_OK
@@ -191,6 +198,33 @@ class _Run:
         self.result.logs.append(
             LogEntry(t=time.strftime("%H:%M:%S"), message=message, level=level, node_id=node_id)
         )
+
+    def step(self, node_id: str, node) -> None:
+        """
+        Avisa que se va a ejecutar un nodo, y lleva la cuenta.
+
+        Existe porque desde afuera del executor nadie sabía en qué nodo está un
+        run: `Instance.run` bloquea hasta el final, así que una UI sólo podía
+        decir "está corriendo" y desde cuándo, nunca "paso 3 de 10" (issue
+        #15).
+
+        **Una excepción acá no puede tumbar el run.** Quien escucha está
+        dibujando una barra de progreso, y que se caiga dibujando no puede
+        costar una ejecución que ya está a mitad de camino — el mismo criterio
+        con el que se trata a un logger.
+        """
+        self.steps += 1
+        if self.on_step is None:
+            return
+        try:
+            self.on_step(
+                node_id,
+                display=getattr(node, "display", "") or "",
+                index=self.steps,
+                total=self.total_steps,
+            )
+        except Exception:  # noqa: BLE001 - ver docstring
+            pass
 
     def fail(
         self, message: str, node_id: str | None = None, *, error_kind: str | None = None
@@ -228,6 +262,7 @@ def execute_flow(
     policy: "RunPolicy | None" = None,
     dry_run: bool = False,
     max_visits: int = MAX_VISITS,
+    on_step: Callable[..., None] | None = None,
 ) -> RunResult:
     """
     Ejecuta un flujo completo y devuelve su resultado con la traza.
@@ -243,6 +278,12 @@ def execute_flow(
     restricciones, que es el comportamiento de una persona operando su propia
     máquina. El chequeo ocurre **por nodo**, no sólo al empezar: un subflujo
     resuelto en runtime por flow.ejecutar no se puede inspeccionar de antemano.
+
+    on_step(node_id, display=, index=, total=) se llama antes de cada nodo de
+    acción o decisión, para que una UI pueda mostrar en qué paso va mientras
+    el run corre. Es el hermano de `is_cancelled`: el mismo punto del
+    recorrido, en la otra dirección. `index` es 1-based y cuenta nodos
+    visitados, así que con bucles supera a `total` — quien dibuja lo topa.
     """
     from ..users import RunPolicy as _RunPolicy
 
@@ -258,6 +299,7 @@ def execute_flow(
         resources=resources or (lambda _plugin, _collection: []),
         dry_run=dry_run,
         max_visits=max_visits,
+        on_step=on_step,
     )
     run.result.actor = run.policy.actor
 
@@ -295,6 +337,11 @@ def _walk(run: _Run, flow_text: str, *, depth: int, flow_name: str) -> None:
         + (" (dry run)" if run.dry_run else "")
     )
 
+    # El total es el del flujo principal: un subflujo sigue contando sobre el
+    # mismo índice, porque para quien mira el progreso es una sola corrida.
+    if depth == 1:
+        run.total_steps = len(graph.action_nodes())
+
     visits: dict[str, int] = {}
     current: str | None = graph.start_node
 
@@ -305,6 +352,9 @@ def _walk(run: _Run, flow_text: str, *, depth: int, flow_name: str) -> None:
             return
 
         node = graph.nodes[current]
+        # El nodo de inicio no es un paso: no hace nada que se pueda mostrar.
+        if isinstance(node, (ActionNode, DecisionNode)):
+            run.step(current, node)
         visits[current] = visits.get(current, 0) + 1
         if visits[current] > run.max_visits:
             run.fail(

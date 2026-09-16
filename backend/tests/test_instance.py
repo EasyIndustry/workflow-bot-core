@@ -848,3 +848,27 @@ def test_describe_installation_cuenta_los_items_de_cada_coleccion(demo_instance)
     foto = demo_instance.describe_installation()
     demo = next(p for p in foto["plugins"] if p["name"] == "demo")
     assert demo["collections"][0]["items"] == 2
+
+
+def test_instance_run_acepta_on_step_y_lo_propaga(demo_instance):
+    """
+    La webapp mira con `inspect.signature` si `Instance.run` acepta `on_step`
+    antes de pasárselo, así que la firma es parte del contrato (issue #15).
+    """
+    import inspect
+
+    assert "on_step" in inspect.signature(demo_instance.run).parameters
+
+    pasos = []
+    demo_instance.users.create("agente", kind="agent")
+    demo_instance.run(
+        "lineal",
+        "0044",
+        row={"id": "0044"},
+        actor="agente",
+        on_step=lambda node_id, **datos: pasos.append((node_id, datos["index"], datos["total"])),
+    )
+
+    assert pasos
+    assert pasos[0][1] == 1
+    assert all(paso[2] > 0 for paso in pasos)

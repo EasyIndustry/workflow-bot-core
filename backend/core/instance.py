@@ -381,6 +381,7 @@ class Instance:
         actor: str | None = None,
         dry_run: bool = False,
         is_cancelled=None,
+        on_step=None,
         persist: bool = True,
         allow_broken: bool = False,
     ) -> RunResult:
@@ -400,6 +401,11 @@ class Instance:
         trabajo real sin hacer, sin que nada lo señale. Mismo criterio que
         `authorize`: se mira el grafo entero antes de tocar nada, y se dice
         qué nodos. `allow_broken=True` lo saltea, para quien sepa lo que hace.
+
+        `on_step(node_id, display=, index=, total=)` se llama antes de cada
+        nodo, para que quien haya disparado el run pueda mostrar en qué paso
+        va sin esperar a que termine (issue #15). Es el hermano de
+        `is_cancelled`: el mismo punto del recorrido, en la otra dirección.
 
         Los dry-run también se guardan: sirven para ver qué se validó y cuándo.
         """
@@ -435,6 +441,7 @@ class Instance:
             env=self.env_vars(),
             load_flow=self.load_workflow,
             is_cancelled=is_cancelled,
+            on_step=on_step,
             resources=self.resource_items,
             policy=policy,
             dry_run=dry_run,
