@@ -467,6 +467,11 @@ class PluginManifest:
     # en el catálogo la superficie de riesgo real de cada plugin — quién puede
     # salir a la red, quién puede tocar el disco, quién puede correr comandos.
     ports: tuple[str, ...] = ()
+    # Dependencias de cómputo puro, una línea por librería como en un
+    # requirements.txt ("numpy==1.26.0"): nunca de I/O -- eso es un port. La
+    # instalación decide cómo resolverlas (issue #20); el núcleo sólo las
+    # declara y, en el catálogo, dice si están presentes en este intérprete.
+    requires: tuple[str, ...] = ()
     doc: str = ""
     contract: int = CONTRACT_VERSION
 
@@ -515,6 +520,7 @@ class PluginManifest:
             "resources": [r.to_dict() for r in self.resources],
             "actions": [a.to_dict() for a in self.actions],
             "ports": list(self.ports),
+            "requires": list(self.requires),
             "doc": self.doc,
             "contract": self.contract,
         }

@@ -102,7 +102,15 @@ mi_plugin = "mi_paquete:PLUGIN"
 
 Reglas que el núcleo hace cumplir, no sugerencias:
 
-- Un plugin **nunca importa una librería externa**: pide un port.
+- Un plugin **nunca importa una librería que hace I/O** (red, disco,
+  procesos, ventanas, reloj): pide un port. Es lo que el núcleo puede acotar
+  por actor y por `boot.env`, y lo que un test necesita poder fakear.
+- **Cómputo puro** (numpy, un parser, una librería de geometría) no es un
+  port —no hay nada que acotar ni que fakear— y se declara en
+  `PluginManifest.requires`, una línea por librería como en un
+  `requirements.txt`. El plugin la importa adentro del tool, perezosa, con un
+  `ToolResult.err` legible si falta; quién la instala y cómo (versión fija,
+  runtime propio) es decisión de la instalación, no del núcleo (issue #19/#20).
 - Un plugin que pide un port sin adapter **no carga**, y queda reportado.
 - Un tool que usa un port que su manifest no declara **falla**.
 - Toda salida es un `ToolResult`. Una excepción se convierte en `err` con su

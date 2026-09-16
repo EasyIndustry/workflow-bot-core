@@ -501,6 +501,33 @@ def test_el_catalogo_publica_que_ports_usa_cada_plugin():
     assert set(catalogo["ports"]) == {"http", "fs", "process", "clock", "browser", "window"}
 
 
+# ── Dependencias de cómputo puro (issue #20) ─────────────────────────────
+
+
+def test_el_catalogo_dice_si_una_dependencia_declarada_esta_instalada():
+    """
+    Observabilidad, no un instalador (issue #19/#20): el núcleo no resuelve
+    numpy/trimesh, pero un agente que ve "trimesh: falta" sabe qué pasó antes
+    de tropezar con un ImportError a mitad de un tool.
+    """
+    manifest = PluginManifest(
+        name="convertidor", label="Convertidor", requires=("pytest", "no-existe-esta-lib==1.0")
+    )
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("convertidor", "test", Plugin(manifest=manifest))
+
+    requiere = reg.catalog()["plugins"][0]["requires"]
+    assert {"spec": "pytest", "package": "pytest", "present": True} in requiere
+    assert {
+        "spec": "no-existe-esta-lib==1.0", "package": "no-existe-esta-lib", "present": False,
+    } in requiere
+
+
+def test_sin_requires_declarado_el_catalogo_no_inventa_nada():
+    catalogo = _registry().catalog()  # demo_plugin no declara requires
+    assert catalogo["plugins"][0]["requires"] == []
+
+
 # ── Acciones ────────────────────────────────────────────────────────────
 
 

@@ -108,6 +108,9 @@ def cmd_plugins(inst: Instance, args) -> int:
             print(f"   [{r['name']}] {r['label']} ({campos})")
         for a in p["actions"]:
             print(f"   ▸ {a['name']}: {a['label']}")
+        for r in p["requires"]:
+            estado = "ok" if r["present"] else "FALTA"
+            print(f"   · requiere {r['spec']} [{estado}]")
         print()
 
     if catalogo["errors"]:

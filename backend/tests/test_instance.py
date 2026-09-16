@@ -948,3 +948,20 @@ def test_instance_run_acepta_on_step_y_lo_propaga(demo_instance):
     assert pasos
     assert pasos[0][1] == 1
     assert all(paso[2] > 0 for paso in pasos)
+
+
+def test_describe_installation_muestra_dependencias_declaradas_y_si_faltan(instance):
+    """Issue #20: observabilidad de las dependencias de cómputo puro de un plugin."""
+    from backend.core.contract import Plugin, PluginManifest
+
+    manifest = PluginManifest(
+        name="convertidor", label="Convertidor", requires=("pytest", "no-existe-esta-lib")
+    )
+    instance.registry._add_plugin("convertidor", "test", Plugin(manifest=manifest))
+
+    foto = instance.describe_installation()
+
+    conv = next(p for p in foto["plugins"] if p["name"] == "convertidor")
+    assert {"spec": "pytest", "package": "pytest", "present": True} in conv["requires"]
+    assert any(r["package"] == "no-existe-esta-lib" and not r["present"] for r in conv["requires"])
+    assert "convertidor.no-existe-esta-lib" in foto["resumen"]

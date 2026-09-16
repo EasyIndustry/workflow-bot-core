@@ -729,6 +729,7 @@ class Instance:
                 "version": p["version"],
                 "doc": p["doc"],
                 "ports": p["ports"],
+                "requires": p["requires"],
                 "tools": [
                     {"id": tid, "label": tools_por_id[tid]["label"], "doc": tools_por_id[tid]["doc"]}
                     for tid in p["tools"]
@@ -966,6 +967,17 @@ def _resumen_instalacion(datos: dict) -> str:
     ]
     if acciones:
         lineas.append(f"Acciones sueltas: {', '.join(acciones)}.")
+
+    faltantes = [
+        f"{p['name']}.{r['package']}"
+        for p in datos["plugins"]
+        for r in p["requires"]
+        if not r["present"]
+    ]
+    if faltantes:
+        # Issue #20: esto es lo que le ahorra a un agente tropezar con un
+        # ImportError a mitad de un tool -- lo ve antes de correr nada.
+        lineas.append(f"Dependencias declaradas que faltan: {', '.join(faltantes)}.")
 
     for flujo, run in sorted(datos["runs"]["ultimo_por_flujo"].items()):
         lineas.append(f'  último run de "{flujo}": {run["status"]} ({run["run_id"]}).')

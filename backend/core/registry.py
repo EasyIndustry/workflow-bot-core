@@ -30,8 +30,9 @@ from __future__ import annotations
 
 import importlib
 import logging
+import re
 from dataclasses import dataclass
-from importlib.metadata import entry_points
+from importlib.metadata import PackageNotFoundError, entry_points, version
 from typing import Iterable
 
 from .contract import (
@@ -71,6 +72,33 @@ def _module_of(entry_point_value: str) -> object | None:
 def _version_of(module: object | None) -> str:
     """Versión declarada por el plugin; 'desconocida' si no expone __version__."""
     return str(getattr(module, "__version__", "") or "desconocida")
+
+
+# El nombre del paquete es el prefijo de la línea de requirements: todo lo que
+# no sea un caracter válido de nombre (=, <, >, !, ~, [, un espacio) corta el
+# match. No se resuelven marcadores de entorno ni hashes -- ver el nombre y
+# saber si está instalado alcanza para lo que esto existe (issue #20).
+_NOMBRE_DEPENDENCIA = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def _dependencia(spec: str) -> dict:
+    """
+    Una línea de `PluginManifest.requires`, con si está instalada en este
+    intérprete.
+
+    Es observabilidad, no un instalador: el núcleo no resuelve dependencias de
+    cómputo (issue #19/#20, eso lo hace la app contra su runtime versionado),
+    pero un agente que ve "trimesh: falta" sabe qué pasó antes de correr nada
+    en vez de tropezar con un ImportError a mitad de un tool.
+    """
+    coincidencia = _NOMBRE_DEPENDENCIA.match(spec.strip())
+    nombre = coincidencia.group(0) if coincidencia else spec.strip()
+    try:
+        version(nombre)
+        presente = True
+    except PackageNotFoundError:
+        presente = False
+    return {"spec": spec, "package": nombre, "present": presente}
 
 
 @dataclass(frozen=True)
@@ -418,6 +446,7 @@ class ToolRegistry:
                             "settings": [s.to_dict() for s in p.manifest.settings],
                             "resources": [r.to_dict() for r in p.manifest.resources],
                             "actions": [a.to_dict() for a in p.manifest.actions],
+                            "requires": [_dependencia(r) for r in p.manifest.requires],
                             "doc": p.manifest.doc,
                         }
                         if p.manifest
@@ -426,6 +455,7 @@ class ToolRegistry:
                             "settings": [],
                             "resources": [],
                             "actions": [],
+                            "requires": [],
                             "doc": "",
                         }
                     ),
