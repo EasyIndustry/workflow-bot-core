@@ -473,10 +473,22 @@ class Instance:
         mano en cada llamada — "previsualizar" contra una conexión guardada
         con su url/headers/auth, por ejemplo. `params` explícitos pisan lo que
         traiga el item, campo por campo.
+
+        El item entrega **todos** sus campos como base, `key_field` incluido
+        (issue #18): antes se lo excluía a propósito, pensando en que la
+        clave era sólo un identificador de fila y no un dato de negocio. Pero
+        nada en el contrato le impide a una acción declarar un param con el
+        mismo nombre que el `key_field` de su colección -- es exactamente lo
+        que hace `bots.probar(nombre)` sobre la colección `bots`, cuya clave
+        es `nombre` -- y para esa acción la exclusión hacía imposible usar
+        `item` en absoluto, la vía que el propio docstring recomienda. Un
+        `param` explícito sigue ganando, así que nada de esto cambia lo que
+        ya funcionaba.
         """
-        from .contract import ToolContext, ToolResult
+        from .contract import ParamError, ToolContext, ToolResult
 
         base: dict = {}
+        origen_item: tuple[str, str] | None = None
         if item:
             declarada = next(
                 (a for a in self.registry.actions_of(plugin) if a.name == action), None
@@ -503,20 +515,28 @@ class Instance:
                     ToolResult.err(f'no existe "{item}" en {declarada.resource} de {plugin}'),
                     [],
                 )
-            base = {
-                k: v
-                for k, v in encontrado.items()
-                if k != definicion.key_field and not k.startswith("_")
-            }
+            base = {k: v for k, v in encontrado.items() if not k.startswith("_")}
+            origen_item = (item, declarada.resource)
 
         config = self.effective_config()
         registro: list[tuple[str, str]] = []
 
         def ctx_factory(declaracion, ports):
+            crudos = {**base, **(params or {})}
+            try:
+                resueltos = _resolver_action_params(declaracion, crudos, config)
+            except ParamError as exc:
+                if origen_item is None:
+                    raise
+                clave, coleccion = origen_item
+                campos = ", ".join(sorted(base)) or "nada"
+                raise ParamError(
+                    f'{exc} (desde el item "{clave}" de {coleccion} vinieron: {campos})'
+                ) from exc
             return ToolContext(
                 run_id="",
                 case_id="",
-                params=_resolver_action_params(declaracion, {**base, **(params or {})}, config),
+                params=resueltos,
                 config=config,
                 context={},
                 log=lambda mensaje, nivel="info": registro.append((mensaje, nivel)),
@@ -715,6 +735,12 @@ class Instance:
                     if tid in tools_por_id
                 ],
                 "collections": colecciones,
+                # Sin esto (issue #18), un agente que quiere "probar X" no
+                # tenía cómo distinguir una Action de un Tool con el mismo
+                # nombre, ni saber que existe -- run_action con la acción
+                # equivocada, o inexistente, es un tanteo a ciegas que le
+                # costó tres llamadas de más en la sesión que reportó el bug.
+                "actions": p["actions"],
             })
 
         runs_recientes = self.list_runs(limit=20)
@@ -932,6 +958,15 @@ def _resumen_instalacion(datos: dict) -> str:
         f"actor por defecto: {boot['default_actor']}.",
         f"Runs recientes: {datos['runs']['recientes']}, {datos['runs']['fallidos']} fallaron.",
     ]
+
+    acciones = [
+        f"{p['name']}.{a['name']}" + (f" (por item de {a['resource']})" if a["resource"] else "")
+        for p in datos["plugins"]
+        for a in p["actions"]
+    ]
+    if acciones:
+        lineas.append(f"Acciones sueltas: {', '.join(acciones)}.")
+
     for flujo, run in sorted(datos["runs"]["ultimo_por_flujo"].items()):
         lineas.append(f'  último run de "{flujo}": {run["status"]} ({run["run_id"]}).')
     return "\n".join(lineas)

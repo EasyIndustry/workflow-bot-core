@@ -388,6 +388,76 @@ def test_run_action_params_e_item_por_posicion_es_typeerror(demo_instance):
         demo_instance.run_action("demo", "ping", {"url": "https://api.test/ping"})
 
 
+def _plugin_con_accion_atada_al_key_field():
+    """
+    Una acción cuyo único param se llama igual que el `key_field` de su
+    colección -- `bots.probar(nombre)` sobre `bots`, con `key_field="nombre"`
+    -- que es exactamente el caso real reportado en el issue #18.
+    """
+    from backend.core.contract import (
+        Action,
+        Field,
+        FunctionAction,
+        Param,
+        Plugin,
+        PluginManifest,
+        Resource,
+        ToolResult,
+    )
+
+    resource = Resource(name="bots", label="Bots", key_field="nombre", fields=(Field("url"),))
+    manifest = PluginManifest(
+        name="bots",
+        label="Bots",
+        resources=(resource,),
+        actions=(
+            Action(
+                "probar",
+                "Probar",
+                params=(Param("nombre", required=True), Param("token", required=True)),
+                resource="bots",
+            ),
+        ),
+    )
+    return Plugin(
+        manifest=manifest,
+        actions=[
+            FunctionAction(
+                action=manifest.action("probar"), fn=lambda ctx: ToolResult.ok(**ctx.params)
+            )
+        ],
+    )
+
+
+def test_run_action_con_item_entrega_tambien_el_key_field(instance):
+    """
+    Issue #18: antes se excluía a propósito el `key_field` del item al armar
+    los params base, así que una acción cuyo param coincidiera con la clave de
+    su colección no se podía usar por `item` en absoluto -- la vía que el
+    propio docstring de `run_action` recomienda.
+    """
+    instance.registry._add_plugin("bots", "test", _plugin_con_accion_atada_al_key_field())
+    instance.write_resource_item("bots", "bots", "Bot LB-11", {"url": "http://x", "token": "t"})
+
+    resultado, _ = instance.run_action("bots", "probar", item="Bot LB-11")
+
+    assert resultado.status == "ok"
+    assert resultado.outputs["nombre"] == "Bot LB-11"
+
+
+def test_run_action_con_item_y_param_obligatorio_faltante_dice_de_donde_vino(instance):
+    """El mensaje de error dice desde qué item se resolvieron los campos que sí llegaron."""
+    instance.registry._add_plugin("bots", "test", _plugin_con_accion_atada_al_key_field())
+    instance.write_resource_item("bots", "bots", "Bot LB-11", {"url": "http://x"})  # sin token
+
+    resultado, _ = instance.run_action("bots", "probar", item="Bot LB-11")
+
+    assert resultado.status == "err"
+    assert "token" in resultado.message
+    assert 'item "Bot LB-11" de bots' in resultado.message
+    assert "nombre" in resultado.message and "url" in resultado.message
+
+
 def test_los_usos_se_cuentan_sobre_flujos_y_colecciones(demo_instance):
     """
     Contar sólo los flujos daría 0 usos justo para el secreto que más se usa:
@@ -819,6 +889,12 @@ def test_describe_installation_junta_todo_lo_que_hace_falta_para_orientarse(demo
 
     demo = next(p for p in foto["plugins"] if p["name"] == "demo")
     assert demo["collections"] == [{"name": "destinos", "label": "Destinos", "items": 0}]
+    # Issue #18: sin esto, un agente no podía distinguir una Action de un Tool
+    # con el mismo nombre, ni saber que "probar_destino" existe.
+    assert {a["name"] for a in demo["actions"]} == {"ping", "probar_destino"}
+    probar = next(a for a in demo["actions"] if a["name"] == "probar_destino")
+    assert probar["resource"] == "destinos"
+    assert "ping" in foto["resumen"]  # "Acciones sueltas: demo.ping, ..."
 
     assert {a["name"] for a in foto["actors"]} == {"local", "system"}
     assert foto["boot"]["default_actor"] == "local"

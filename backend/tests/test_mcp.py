@@ -132,6 +132,9 @@ def test_describe_installation_es_la_foto_entera_en_una_llamada(raiz):
     assert [c["name"] for c in demo["collections"]] == ["destinos"]
     assert demo["collections"][0]["items"] == 0
     assert "demo.mover" in [t["id"] for t in demo["tools"]]
+    # Issue #18: sin esto, run_action("probar_destino") era un tanteo a
+    # ciegas — el agente no tenía forma de saber que la acción existe.
+    assert {a["name"] for a in demo["actions"]} == {"ping", "probar_destino"}
 
     assert {a["name"] for a in resultado["actors"]} == {"local", "system"}
     # La configuración de arranque: qué puede tocar esta instalación. No sale
