@@ -27,7 +27,9 @@ Es la misma frontera que el contrato ya dibuja entre `Tool` y `Action`.
 
 from __future__ import annotations
 
+import argparse
 import json
+import os
 from typing import Any, Callable
 
 import mcp.types as types
@@ -35,6 +37,17 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
 from . import operations
+
+# Con qué instalación y qué plugins locales arranca el servidor (issue #16).
+#
+# `MCP_` y no `BOT_`, aunque el issue lo proponga así: `BOT_<CLAVE>` ya es el
+# prefijo con el que se pisa un **setting** de un plugin, y cualquier `BOT_*`
+# del entorno entra a `effective_config()`. Un `BOT_ROOT` quedaría además como
+# un setting fantasma llamado "ROOT" en la configuración de la instalación.
+# Es la misma disciplina de nombres que `boot.py` ya documenta para no
+# confundir `BOT_`, `BOOTSTRAP_` y `BOTENV_`.
+ENV_ROOT = "MCP_ROOT"
+ENV_PLUGINS = "MCP_PLUGINS"
 
 # Esquema compartido: cómo se pasan plugins locales a casi toda operación.
 _PLUGINS = {
@@ -519,8 +532,47 @@ def call_tool(
     )
 
 
+def con_defaults(
+    arguments: dict | None,
+    esquema: dict,
+    *,
+    root: str | None = None,
+    plugins: dict[str, str] | None = None,
+) -> dict:
+    """
+    Completa `root` y `plugins` en una llamada, si la tool los acepta y quien
+    llamó no los mandó.
+
+    Es lo que le permite a una instalación arrancar su servidor apuntando a sí
+    misma (issue #16): sin esto, cada tool cae en `backend/` —el checkout— y
+    no ve los plugins que la app registró en memoria, así que un `check_flow`
+    de un flujo perfectamente válido responde "no hay ningún tool X
+    instalado" y el agente sale a arreglar lo que no está roto.
+
+    **Lo que manda el agente gana**, siempre: así puede apuntar a otra
+    instalación o probar su propia versión de un plugin sin instalarla. Con
+    `plugins` no es uno u otro sino un merge, con los del agente arriba: el
+    servidor declara los de la instalación —que el agente no tiene forma de
+    conocer— y el agente igual puede sumar el suyo.
+
+    Qué acepta cada tool sale de su esquema declarado y no de la firma de
+    Python: el esquema es el contrato que se negocia al conectar, y es lo que
+    quien llama ve.
+    """
+    completos = dict(arguments or {})
+    propiedades = esquema.get("properties", {})
+
+    if root and "root" in propiedades and not completos.get("root"):
+        completos["root"] = root
+    if plugins and "plugins" in propiedades:
+        completos["plugins"] = {**plugins, **(completos.get("plugins") or {})}
+    return completos
+
+
 def build_server(
     *,
+    default_root: str | None = None,
+    default_plugins: dict[str, str] | None = None,
     instructions_extra: str = "",
     extra_tools: list[types.Tool] | None = None,
     extra_handlers: dict[str, Callable[..., dict]] | None = None,
@@ -528,23 +580,38 @@ def build_server(
     """
     El servidor, con sus handlers cableados. Separado de `main` para testear.
 
+    `default_root`/`default_plugins` son con qué instalación y qué plugins
+    locales arranca este servidor (issue #16): se completan en cada llamada
+    que los acepte, y lo que mande el agente gana. Incluye `run_flow`, cuyo
+    `root` no tiene default justamente para que nadie ejecute contra
+    producción sin nombrarla -- nombrarla al arrancar el servidor es
+    exactamente eso, un acto explícito de quien lo levanta.
+
     `instructions_extra`/`extra_tools`/`extra_handlers` son la puerta de
     entrada para un envoltorio de una instalación concreta (issue #17, ej. la
-    webapp) que necesita sumar tools propias -- `root`/`plugins` completados,
-    colecciones que sólo esa instalación conoce-- sin reimplementar
-    `on_list_tools`/`on_call_tool` a mano, que es el modo de falla que este
-    archivo existe para evitar: dos caminos al mismo servidor esperando
-    divergir. Sin argumentos, el comportamiento es el de siempre.
+    webapp) que necesita sumar tools propias -- colecciones que sólo esa
+    instalación conoce-- sin reimplementar `on_list_tools`/`on_call_tool` a
+    mano, que es el modo de falla que este archivo existe para evitar: dos
+    caminos al mismo servidor esperando divergir.
+
+    Sin argumentos, el comportamiento es el de siempre.
     """
     tools = [*TOOLS, *(extra_tools or [])]
     handlers = {**HANDLERS, **(extra_handlers or {})}
+    esquemas = {t.name: t.input_schema for t in tools}
     instrucciones = INSTRUCCIONES + (f"\n\n{instructions_extra}" if instructions_extra else "")
 
     async def on_list_tools(_ctx, _params) -> types.ListToolsResult:
         return types.ListToolsResult(tools=tools)
 
     async def on_call_tool(_ctx, params: types.CallToolRequestParams) -> types.CallToolResult:
-        return call_tool(params.name, params.arguments, handlers=handlers)
+        argumentos = con_defaults(
+            params.arguments,
+            esquemas.get(params.name, {}),
+            root=default_root,
+            plugins=default_plugins,
+        )
+        return call_tool(params.name, argumentos, handlers=handlers)
 
     return Server(
         "bot-workflows",
@@ -569,12 +636,16 @@ def _json(valor: Any) -> str:
 
 async def serve(
     *,
+    default_root: str | None = None,
+    default_plugins: dict[str, str] | None = None,
     instructions_extra: str = "",
     extra_tools: list[types.Tool] | None = None,
     extra_handlers: dict[str, Callable[..., dict]] | None = None,
 ) -> None:
-    """El servidor sobre stdio. Los extras son los mismos de `build_server`."""
+    """El servidor sobre stdio. Los argumentos son los mismos de `build_server`."""
     servidor = build_server(
+        default_root=default_root,
+        default_plugins=default_plugins,
         instructions_extra=instructions_extra,
         extra_tools=extra_tools,
         extra_handlers=extra_handlers,
@@ -583,11 +654,69 @@ async def serve(
         await servidor.run(lectura, escritura, servidor.create_initialization_options())
 
 
-def main() -> int:
+def parse_plugins(especificacion: str) -> dict[str, str]:
+    """`"connections=/ruta;otro=/ruta2"` -> `{"connections": "/ruta", ...}`."""
+    plugins: dict[str, str] = {}
+    for parte in (especificacion or "").split(";"):
+        nombre, _, ruta = parte.partition("=")
+        if nombre.strip() and ruta.strip():
+            plugins[nombre.strip()] = ruta.strip()
+    return plugins
+
+
+def parse_args(argv: list[str] | None = None) -> tuple[str | None, dict[str, str]]:
+    """
+    Con qué instalación y qué plugins arranca el servidor: flags, o entorno.
+
+    Los dos caminos existen porque los dos aparecen: una app que lanza el
+    servidor como subproceso arma el argv, y un cliente MCP que sólo deja
+    configurar el comando y el entorno usa las variables.
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m backend.mcp",
+        description="Servidor MCP del motor de workflows.",
+    )
+    parser.add_argument(
+        "--root",
+        default=os.environ.get(ENV_ROOT) or None,
+        help=f"Instalación sobre la que operan las tools (o {ENV_ROOT}).",
+    )
+    parser.add_argument(
+        "--plugin",
+        dest="plugins",
+        action="append",
+        metavar="NOMBRE=RUTA",
+        help=(
+            "Plugin local que el servidor conoce de entrada. Repetible. "
+            f"También {ENV_PLUGINS}=\"nombre=ruta;otro=ruta\"."
+        ),
+    )
+    args = parser.parse_args(argv)
+
+    plugins = parse_plugins(os.environ.get(ENV_PLUGINS, ""))
+    for especificacion in args.plugins or []:
+        plugins.update(parse_plugins(especificacion))
+    return args.root, plugins
+
+
+def main(argv: list[str] | None = None) -> int:
+    import functools
+
     import anyio
 
-    anyio.run(serve)
+    root, plugins = parse_args(argv)
+    anyio.run(functools.partial(serve, default_root=root, default_plugins=plugins))
     return 0
 
 
-__all__ = ["HANDLERS", "TOOLS", "build_server", "call_tool", "main", "serve"]
+__all__ = [
+    "HANDLERS",
+    "TOOLS",
+    "build_server",
+    "call_tool",
+    "con_defaults",
+    "main",
+    "parse_args",
+    "parse_plugins",
+    "serve",
+]

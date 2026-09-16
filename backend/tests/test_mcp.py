@@ -917,3 +917,92 @@ def test_las_instrucciones_documentan_la_ejecucion_real():
 
     for pieza in ("run_flow", "root", "dangerous", "users allow"):
         assert pieza in INSTRUCCIONES, f"falta documentar: {pieza}"
+
+
+# ── Defaults del servidor: root y plugins (issue #16) ───────────────────
+
+
+def test_con_defaults_completa_root_cuando_el_agente_no_lo_manda():
+    from backend.mcp.server import con_defaults
+
+    esquema = {"properties": {"flow": {}, "root": {}, "plugins": {}}}
+    completos = con_defaults({"flow": "x"}, esquema, root="/instalacion")
+    assert completos == {"flow": "x", "root": "/instalacion"}
+
+
+def test_lo_que_manda_el_agente_le_gana_al_default():
+    """Así puede apuntar a otra instalación en vez de a la que sirve la app."""
+    from backend.mcp.server import con_defaults
+
+    esquema = {"properties": {"root": {}}}
+    completos = con_defaults({"root": "/otra"}, esquema, root="/instalacion")
+    assert completos["root"] == "/otra"
+
+
+def test_los_plugins_se_mergean_con_los_del_agente_arriba():
+    """
+    No es uno u otro: el servidor declara los de la instalación —que el agente
+    no puede conocer— y el agente igual puede sumar o pisar el suyo para
+    probar una versión propia sin instalarla.
+    """
+    from backend.mcp.server import con_defaults
+
+    esquema = {"properties": {"plugins": {}}}
+    completos = con_defaults(
+        {"plugins": {"demo": "/mio.py"}},
+        esquema,
+        plugins={"connections": "/app.py", "demo": "/instalado.py"},
+    )
+    assert completos["plugins"] == {"connections": "/app.py", "demo": "/mio.py"}
+
+
+def test_una_tool_que_no_acepta_root_no_lo_recibe():
+    """
+    `list_ports` se responde desde el contrato y no toca la instalación. Si se
+    le colara un `root`, fallaría con "argumentos inválidos".
+    """
+    from backend.mcp.server import TOOLS, con_defaults
+
+    esquema = next(t for t in TOOLS if t.name == "list_ports").input_schema
+    assert con_defaults({}, esquema, root="/instalacion", plugins={"x": "/y"}) == {}
+
+
+def test_parse_args_toma_los_flags():
+    from backend.mcp.server import parse_args
+
+    root, plugins = parse_args(["--root", "/inst", "--plugin", "connections=/c.py"])
+    assert root == "/inst"
+    assert plugins == {"connections": "/c.py"}
+
+
+def test_parse_args_cae_al_entorno(monkeypatch):
+    """Un cliente MCP que sólo deja configurar comando y entorno usa esto."""
+    from backend.mcp.server import ENV_PLUGINS, ENV_ROOT, parse_args
+
+    monkeypatch.setenv(ENV_ROOT, "/desde-el-entorno")
+    monkeypatch.setenv(ENV_PLUGINS, "connections=/c.py;otro=/o.py")
+
+    root, plugins = parse_args([])
+    assert root == "/desde-el-entorno"
+    assert plugins == {"connections": "/c.py", "otro": "/o.py"}
+
+
+def test_el_flag_le_gana_al_entorno(monkeypatch):
+    from backend.mcp.server import ENV_ROOT, parse_args
+
+    monkeypatch.setenv(ENV_ROOT, "/entorno")
+    root, _ = parse_args(["--root", "/flag"])
+    assert root == "/flag"
+
+
+def test_el_prefijo_no_es_BOT_para_no_pisar_un_setting():
+    """
+    `BOT_<CLAVE>` ya es el prefijo con el que se pisa un setting de un plugin:
+    cualquier `BOT_*` del entorno entra a `effective_config()`. Un `BOT_ROOT`
+    dejaría un setting fantasma llamado "ROOT" en toda instalación.
+    """
+    from backend.core.config import ENV_PREFIX
+    from backend.mcp.server import ENV_PLUGINS, ENV_ROOT
+
+    assert not ENV_ROOT.startswith(ENV_PREFIX)
+    assert not ENV_PLUGINS.startswith(ENV_PREFIX)
