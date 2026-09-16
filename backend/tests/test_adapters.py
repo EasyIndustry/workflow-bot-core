@@ -507,11 +507,17 @@ class _FakeControlInvokeFalla:
 
 
 class _FakeVentanaPywinauto:
-    def __init__(self, control):
+    def __init__(self, control, descendientes=()):
         self._control = control
+        self._descendientes = list(descendientes)
+        self.criterios = None
 
-    def child_window(self, *, title):
+    def child_window(self, **criterios):
+        self.criterios = criterios
         return self._control
+
+    def descendants(self, **_criterios):
+        return self._descendientes
 
     def window_text(self):
         return "ventana"
@@ -578,6 +584,98 @@ def test_window_pywinauto_sugiere_proceso_elevado_cuando_no_se_encuentra(monkeyp
 
     with pytest.raises(PortError, match="administrador"):
         adapter.find_window(title="Export")
+
+
+# ── Issue #14: selector de control con tipo ─────────────────────────────
+
+
+def test_selector_sin_tipo_es_solo_titulo_como_siempre():
+    from backend.adapters.window_pywinauto import _criterios
+
+    assert _criterios("Seleccionar carpeta") == {"title": "Seleccionar carpeta"}
+
+
+def test_selector_con_tipo_agrega_control_type():
+    from backend.adapters.window_pywinauto import _criterios
+
+    assert _criterios("Button:Seleccionar carpeta") == {
+        "control_type": "Button",
+        "title": "Seleccionar carpeta",
+    }
+
+
+def test_selector_con_tipo_y_sin_titulo_busca_solo_por_tipo():
+    """`"Document:"` es el editor de un Notepad, que no tiene título propio."""
+    from backend.adapters.window_pywinauto import _criterios
+
+    assert _criterios("Document:") == {"control_type": "Document"}
+
+
+def test_un_titulo_que_termina_en_dos_puntos_sigue_siendo_un_titulo():
+    """
+    El caso que obliga a que la lista de tipos sea cerrada: `"Carpeta:"` es un
+    rótulo real de un diálogo de Windows, y tratarlo como tipo rompería lo que
+    ya funcionaba.
+    """
+    from backend.adapters.window_pywinauto import _criterios
+
+    assert _criterios("Carpeta:") == {"title": "Carpeta:"}
+    # Y con el tipo delante, el título conserva sus propios ":".
+    assert _criterios("Edit:Carpeta:") == {"control_type": "Edit", "title": "Carpeta:"}
+
+
+def test_window_pywinauto_pasa_el_tipo_del_selector_a_child_window():
+    adapter = PywinautoWindowAdapter()
+    ventana = _FakeVentanaPywinauto(_FakeControlConInvoke())
+    adapter._ventanas["1"] = ventana
+
+    adapter.click(WindowInfo(handle="1", title="x"), "Button:Seleccionar carpeta")
+
+    assert ventana.criterios == {"control_type": "Button", "title": "Seleccionar carpeta"}
+
+
+def test_window_pywinauto_explica_un_selector_ambiguo_en_vez_de_repetir_el_error_crudo():
+    """
+    Issue #14: en un diálogo estándar `"Carpeta:"` matchea el rótulo y el
+    campo. `ElementAmbiguousError: There are 2 elements…` no dice qué hacer;
+    la salida es agregarle el tipo al selector, así que el mensaje lo dice.
+    """
+
+    class ElementAmbiguousError(Exception):
+        pass
+
+    class _ControlAmbiguo:
+        def set_text(self, texto):
+            raise ElementAmbiguousError("There are 2 elements that match")
+
+    class _Candidato:
+        def __init__(self, tipo):
+            self.element_info = type("info", (), {"control_type": tipo})()
+
+    adapter = PywinautoWindowAdapter()
+    adapter._ventanas["1"] = _FakeVentanaPywinauto(
+        _ControlAmbiguo(), descendientes=[_Candidato("Edit"), _Candidato("Text")]
+    )
+
+    with pytest.raises(PortError) as exc:
+        adapter.type_text(WindowInfo(handle="1", title="x"), "Carpeta:", "/ruta")
+
+    mensaje = str(exc.value)
+    assert "2 controles matchean" in mensaje
+    assert "Edit, Text" in mensaje
+    assert '"Edit:Carpeta:"' in mensaje
+
+
+def test_window_atspi_mapea_el_tipo_al_rol_de_accesibilidad():
+    """El mismo selector, traducido al vocabulario del árbol de accesibilidad."""
+    from backend.adapters.window_atspi import _selector
+
+    assert _selector("Button:Guardar") == ("push button", "Guardar")
+    assert _selector("Edit:Carpeta:") == ("text", "Carpeta:")
+    assert _selector("Document:") == ("document frame", "")
+    # Sin tipo conocido delante, todo es título -- como siempre.
+    assert _selector("Guardar") == (None, "Guardar")
+    assert _selector("Carpeta:") == (None, "Carpeta:")
 
 
 def test_window_unsupported_en_un_sistema_operativo_sin_adapter():

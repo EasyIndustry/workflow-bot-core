@@ -20,6 +20,52 @@ from backend.core.ports import PortError, WindowInfo
 
 DEFAULT_TIMEOUT = 30.0
 
+# El selector de un control admite un tipo delante del título, separado por
+# ":" (issue #14). Los nombres son los de UI Automation -- los que muestra
+# cualquier inspector de Windows, y los que el port documenta-- y acá se
+# mapean al rol equivalente del árbol de accesibilidad. Un prefijo que no esté
+# en esta tabla se trata como parte del título, igual que siempre.
+_ROLES = {
+    "Button": "push button",
+    "CheckBox": "check box",
+    "ComboBox": "combo box",
+    "Document": "document frame",
+    "Edit": "text",
+    "Group": "panel",
+    "Hyperlink": "link",
+    "Image": "image",
+    "List": "list",
+    "ListItem": "list item",
+    "Menu": "menu",
+    "MenuBar": "menu bar",
+    "MenuItem": "menu item",
+    "ProgressBar": "progress bar",
+    "RadioButton": "radio button",
+    "Slider": "slider",
+    "StatusBar": "status bar",
+    "Tab": "page tab list",
+    "TabItem": "page tab",
+    "Table": "table",
+    "Text": "label",
+    "ToolBar": "tool bar",
+    "Tree": "tree",
+    "TreeItem": "tree item",
+    "Window": "frame",
+}
+
+
+def _selector(control: str) -> tuple[str | None, str]:
+    """
+    `"Button:Guardar"` -> ("push button", "Guardar"); `"Guardar"` -> (None, "Guardar").
+
+    El corte es en el PRIMER ":": un título puede tener los suyos, el nombre
+    de un tipo no.
+    """
+    tipo, separador, titulo = control.partition(":")
+    if not separador or tipo not in _ROLES:
+        return None, control
+    return _ROLES[tipo], titulo
+
 
 class AtspiWindowAdapter:
     """
@@ -99,10 +145,23 @@ class AtspiWindowAdapter:
         return ventana
 
     def _buscar_control(self, ventana, control: str):
+        """
+        El control por título y -si el selector lo dice- por rol.
+
+        Un título sin rol alcanza en la mayoría de las apps, pero en un
+        diálogo estándar el mismo texto aparece dos veces (el rótulo y el
+        campo que rotula), y sin el rol se toma el primero que aparezca
+        (issue #14).
+        """
         pyatspi = self._registry()
-        encontrado = pyatspi.utils.findDescendant(
-            ventana, lambda acc: acc.name == control, breadth_first=True
-        )
+        rol, titulo = _selector(control)
+
+        def coincide(acc) -> bool:
+            if titulo and (acc.name or "") != titulo:
+                return False
+            return rol is None or acc.getRoleName() == rol
+
+        encontrado = pyatspi.utils.findDescendant(ventana, coincide, breadth_first=True)
         if encontrado is None:
             raise PortError(f"no se encontró el control {control!r}")
         return encontrado

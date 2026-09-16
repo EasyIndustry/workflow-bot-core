@@ -367,6 +367,21 @@ class WindowPort(Protocol):
     que `BrowserPort` no resuelve sesión, este port no resuelve qué pasa si
     dos automatizaciones compiten por la misma ventana. Eso es decisión de
     quien lo use.
+
+    **Cómo se nombra un control.** Por su título, y opcionalmente con un tipo
+    delante separado por `:`, que el adapter traduce a lo que su plataforma
+    entienda por "tipo de control"::
+
+        "Guardar"           el primer control titulado así, sea lo que sea
+        "Button:Guardar"    sólo si además es un botón
+        "Document:"         un control de ese tipo, sin título
+
+    El tipo es opcional porque casi nunca hace falta: un botón con un título
+    propio se encuentra solo. Se vuelve necesario en los diálogos estándar
+    del sistema, donde el mismo texto titula dos controles distintos -- el
+    rótulo "Carpeta:" y el campo que rotula-- y sin el tipo no hay forma de
+    decir a cuál de los dos se le quiere escribir. El corte es en el primer
+    `:`, así que un título puede contener los suyos (`"Edit:Carpeta:"`).
     """
 
     def find_window(

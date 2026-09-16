@@ -19,6 +19,40 @@ from backend.core.ports import PortError, WindowInfo
 
 DEFAULT_TIMEOUT = 30.0
 
+# Los tipos de UI Automation que un selector puede nombrar delante del título,
+# separados por ":" -- `"Button:Seleccionar carpeta"` (issue #14).
+#
+# Es una lista cerrada porque UIA la define cerrada, y porque es lo único que
+# permite distinguir un tipo de un título que termina en ":": `"Carpeta:"` es
+# el título de un rótulo real de Windows, y `"Document:"` es un tipo sin
+# título. Un prefijo que no esté acá se trata como parte del título, que es el
+# comportamiento de siempre.
+_TIPOS_UIA = frozenset({
+    "Button", "Calendar", "CheckBox", "ComboBox", "Custom", "DataGrid", "DataItem",
+    "Document", "Edit", "Group", "Header", "HeaderItem", "Hyperlink", "Image", "List",
+    "ListItem", "Menu", "MenuBar", "MenuItem", "Pane", "ProgressBar", "RadioButton",
+    "ScrollBar", "Separator", "Slider", "Spinner", "SplitButton", "StatusBar", "Tab",
+    "TabItem", "Table", "Text", "Thumb", "TitleBar", "ToolBar", "ToolTip", "Tree",
+    "TreeItem", "Window",
+})
+
+
+def _criterios(control: str) -> dict:
+    """
+    El selector de un control, como los criterios que `child_window` espera.
+
+        "Seleccionar carpeta"        -> title
+        "Button:Seleccionar carpeta" -> title + control_type
+        "Document:"                  -> sólo control_type (un control sin título)
+
+    El corte es en el PRIMER ":": un título puede tener los suyos
+    ("Carpeta:"), el nombre de un tipo no.
+    """
+    tipo, separador, titulo = control.partition(":")
+    if not separador or tipo not in _TIPOS_UIA:
+        return {"title": control}
+    return {"control_type": tipo, **({"title": titulo} if titulo else {})}
+
 
 class PywinautoWindowAdapter:
     """
@@ -101,6 +135,32 @@ class PywinautoWindowAdapter:
             )
         return ventana
 
+    def _detalle(self, ventana, control: str, exc: Exception) -> str:
+        """
+        Qué salió mal, y -si el selector matcheó más de un control- cuántos y
+        de qué tipo.
+
+        `ElementAmbiguousError` crudo ("There are 2 elements that match…") no
+        dice qué hacer, y en un diálogo estándar de Windows es el caso más
+        común: `"Carpeta:"` matchea el rótulo y el campo (issue #14). La
+        salida casi siempre es agregarle el tipo al selector, así que el
+        mensaje lo dice. Enumerar es otra llamada a una UI que ya se está
+        portando raro: si falla, vuelve el mensaje original en vez de tapar
+        el error real.
+        """
+        if type(exc).__name__ != "ElementAmbiguousError":
+            return f"{type(exc).__name__}: {exc}"
+        try:
+            candidatos = ventana.descendants(**_criterios(control))
+            tipos = sorted({c.element_info.control_type for c in candidatos})
+        except Exception:
+            return f"{type(exc).__name__}: {exc}"
+
+        detalle = f"{len(candidatos)} controles matchean (de tipo: {', '.join(tipos)})"
+        if "control_type" not in _criterios(control) and tipos:
+            detalle += f'. Agregá el tipo al selector, por ejemplo "{tipos[0]}:{control}"'
+        return detalle
+
     def click(self, window, control, *, timeout=None):
         """
         Clickea `control`.
@@ -114,35 +174,37 @@ class PywinautoWindowAdapter:
         (no todos los controles lo soportan, ej. un campo de texto).
         """
         ventana = self._resolver(window)
-        try:
-            objetivo = ventana.child_window(title=control)
-        except Exception as exc:
-            raise PortError(
-                f"no se pudo clickear {control!r}: {type(exc).__name__}: {exc}"
-            ) from exc
+        objetivo = ventana.child_window(**_criterios(control))
 
         invocar = getattr(objetivo, "invoke", None)
         if callable(invocar):
             try:
                 invocar()
                 return
-            except Exception:
-                pass  # el control no soporta Invoke: cae a simular el click
+            except Exception as exc:
+                # Un selector ambiguo falla igual con click_input, y con un
+                # mensaje peor: se corta acá, con el que explica qué hacer.
+                if type(exc).__name__ == "ElementAmbiguousError":
+                    raise PortError(
+                        f"no se pudo clickear {control!r}: "
+                        f"{self._detalle(ventana, control, exc)}"
+                    ) from exc
+                # Cualquier otra cosa: el control no soporta Invoke, cae al mouse.
 
         try:
             objetivo.click_input()
         except Exception as exc:
             raise PortError(
-                f"no se pudo clickear {control!r}: {type(exc).__name__}: {exc}"
+                f"no se pudo clickear {control!r}: {self._detalle(ventana, control, exc)}"
             ) from exc
 
     def type_text(self, window, control, text, *, timeout=None):
         ventana = self._resolver(window)
         try:
-            ventana.child_window(title=control).set_text(text)
+            ventana.child_window(**_criterios(control)).set_text(text)
         except Exception as exc:
             raise PortError(
-                f"no se pudo escribir en {control!r}: {type(exc).__name__}: {exc}"
+                f"no se pudo escribir en {control!r}: {self._detalle(ventana, control, exc)}"
             ) from exc
 
     def read_text(self, window, control=None, *, timeout=None):
@@ -152,16 +214,16 @@ class PywinautoWindowAdapter:
         "El de la ventana entera" es lo que pywinauto expone como
         `window_text()` para un top-level: el título de la barra, no el
         contenido que muestra. Para leer lo que un Notepad tiene escrito, por
-        ejemplo, hay que pedir el control (`Edit`/`Document`, según la app),
-        no la ventana.
+        ejemplo, hay que pedir el control (`"Edit:"`/`"Document:"`, según la
+        app), no la ventana.
         """
         ventana = self._resolver(window)
         try:
-            objetivo = ventana.child_window(title=control) if control else ventana
+            objetivo = ventana.child_window(**_criterios(control)) if control else ventana
             return (objetivo.window_text() or "").strip()
         except Exception as exc:
             raise PortError(
-                f"no se pudo leer {control!r}: {type(exc).__name__}: {exc}"
+                f"no se pudo leer {control!r}: {self._detalle(ventana, control or '', exc)}"
             ) from exc
 
 
