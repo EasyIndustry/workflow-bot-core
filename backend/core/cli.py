@@ -34,6 +34,7 @@ from . import boot
 from .doctor import format_text, run_checks
 from .flow.parser import Severity, parse_flow
 from .instance import Instance, WorkflowNotFound
+from .resources import ResourceError
 from .users import KINDS, UserError
 
 # La raíz de la instalación es `backend/`: ahí vive `data/`.
@@ -119,6 +120,10 @@ def cmd_plugins(inst: Instance, args) -> int:
 
 def cmd_workflows(inst: Instance, args) -> int:
     flujos = inst.list_workflows()
+    if args.json:
+        print(json.dumps(flujos, indent=2, ensure_ascii=False))
+        return 0
+
     if not flujos:
         print("No hay flujos guardados. Agregá uno con: python -m backend.core add archivo.mmd")
         return 0
@@ -128,6 +133,105 @@ def cmd_workflows(inst: Instance, args) -> int:
         print(f"{carpeta}{w['name']}{estado}")
         if w.get("description"):
             print(f"  {w['description']}")
+    return 0
+
+
+def cmd_flow(inst: Instance, args) -> int:
+    """El .mmd guardado con sus diagnósticos, en una sola llamada (issue #17)."""
+    detalle = inst.get_flow(args.name)
+    if detalle is None:
+        mensaje = f'No existe el flujo "{args.name}"'
+        if args.json:
+            print(json.dumps({"error": mensaje}, ensure_ascii=False))
+        else:
+            print(mensaje, file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(detalle, indent=2, ensure_ascii=False))
+        return 0 if detalle["runnable"] else 1
+
+    print(f"{detalle['name']}: {'ok' if detalle['runnable'] else 'con errores'}")
+    for d in detalle["diagnostics"]:
+        etiqueta = "ERROR" if d["severity"] == "error" else "aviso"
+        print(f"  {etiqueta}: {d['message']}")
+    return 0 if detalle["runnable"] else 1
+
+
+def cmd_runs(inst: Instance, args) -> int:
+    """Runs ya ejecutados, resumidos (issue #17): "qué corrió y cómo terminó"."""
+    runs = inst.list_runs(
+        case_id=args.case,
+        source=args.source,
+        only_failed=args.only_failed,
+        limit=args.limit,
+    )
+    if args.json:
+        print(json.dumps(runs, indent=2, ensure_ascii=False))
+        return 0
+
+    if not runs:
+        print("No hay runs.")
+        return 0
+    for r in runs:
+        print(f"{r['run_id']}  {r['flow']}  {r['status']}  case={r['case_id']}")
+    return 0
+
+
+def cmd_case_log(inst: Instance, args) -> int:
+    """El registro de una fila, cruzando todos sus runs (issue #17)."""
+    registro = inst.case_log(args.case_id, limit=args.limit)
+    if args.json:
+        print(json.dumps(registro, indent=2, ensure_ascii=False))
+        return 0
+
+    for entrada in registro["entries"]:
+        marca = {"info": " ", "warning": "!", "error": "×"}.get(entrada.get("level"), " ")
+        print(f"{entrada.get('t', '')} {marca} {entrada.get('message', '')}")
+    if registro["truncated"]:
+        print(f"... ({registro['total']} líneas en total)")
+    return 0
+
+
+def cmd_resource_item(inst: Instance, args) -> int:
+    """Escribe o borra un item de una colección de un plugin (issue #17)."""
+    try:
+        if args.delete:
+            inst.delete_resource_item(args.plugin, args.resource, args.key)
+            resultado = {"ok": True, "deleted": args.key}
+        else:
+            try:
+                item = json.loads(args.data) if args.data else {}
+            except json.JSONDecodeError as exc:
+                print(f"--data no es JSON válido: {exc}", file=sys.stderr)
+                return 2
+            if not isinstance(item, dict):
+                print("--data tiene que ser un objeto JSON", file=sys.stderr)
+                return 2
+            resultado = {"ok": True, "item": inst.write_resource_item(
+                args.plugin, args.resource, args.key, item
+            )}
+    except ResourceError as exc:
+        if args.json:
+            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+            return 2
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(resultado, indent=2, ensure_ascii=False))
+        return 0
+    print(resultado)
+    return 0
+
+
+def cmd_describe(inst: Instance, args) -> int:
+    """La foto de la instalación en una llamada (issue #17)."""
+    datos = inst.describe_installation()
+    if args.json:
+        print(json.dumps(datos, indent=2, ensure_ascii=False))
+        return 0
+    print(datos["resumen"])
     return 0
 
 
@@ -596,7 +700,42 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(fn=cmd_plugins)
 
     p = sub.add_parser("workflows", help="Flujos guardados.")
+    p.add_argument("--json", action="store_true", help="Lista estructurada.")
     p.set_defaults(fn=cmd_workflows)
+
+    p = sub.add_parser("flow", help="Un flujo guardado, con contenido y diagnósticos.")
+    p.add_argument("name")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_flow)
+
+    p = sub.add_parser("runs", help="Runs ya ejecutados, resumidos.")
+    p.add_argument("--case", help="Filtra por case_id.")
+    p.add_argument("--source", help="Filtra por origen del run.")
+    p.add_argument("--only-failed", action="store_true", help="Sólo los que fallaron.")
+    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_runs)
+
+    p = sub.add_parser("case-log", help="El registro de una fila, cruzando todos sus runs.")
+    p.add_argument("case_id")
+    p.add_argument("--limit", type=int, default=500)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_case_log)
+
+    p = sub.add_parser(
+        "resource-item", help="Escribe o borra un item de una colección de un plugin."
+    )
+    p.add_argument("plugin")
+    p.add_argument("resource")
+    p.add_argument("key")
+    p.add_argument("--data", help='El item, como JSON: \'{"campo": "valor"}\'')
+    p.add_argument("--delete", action="store_true", help="Borra en vez de escribir.")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_resource_item)
+
+    p = sub.add_parser("describe", help="La foto de la instalación en una llamada.")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_describe)
 
     p = sub.add_parser("add", help="Guarda un .mmd en la instalación.")
     p.add_argument("file")

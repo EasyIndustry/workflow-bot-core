@@ -108,6 +108,156 @@ def test_check_flow_de_algo_inexistente_levanta(raiz):
         ops.check_flow("no-existe-ni-como-archivo", root=raiz)
 
 
+# ── Orientación (issue #17) ─────────────────────────────────────────────
+
+
+def test_describe_installation_es_la_foto_entera_en_una_llamada(raiz):
+    """
+    Un agente que no conoce la instalación necesita saber qué hay ANTES de
+    elegir qué tool usar. Hasta el #17, armar esta foto era pedir cinco cosas
+    sueltas y cruzarlas a mano — que es justamente lo que no puede hacer
+    quien no sabe que hay cinco cosas que pedir.
+    """
+    ops.save_flow(str(FLOWS / "mundo.mmd"), root=raiz)
+
+    resultado = ops.describe_installation(plugins={"demo": DEMO}, root=raiz)
+
+    flujo = next(f for f in resultado["flows"] if f["name"] == "mundo")
+    assert flujo["enabled"] is True
+    # Qué tools usa cada flujo, que es lo que liga un flujo con los plugins
+    # que necesita tener instalados.
+    assert "demo.mover" in flujo["tools"]
+
+    demo = next(p for p in resultado["plugins"] if p["name"] == "demo")
+    assert [c["name"] for c in demo["collections"]] == ["destinos"]
+    assert demo["collections"][0]["items"] == 0
+    assert "demo.mover" in [t["id"] for t in demo["tools"]]
+
+    assert {a["name"] for a in resultado["actors"]} == {"local", "system"}
+    # La configuración de arranque: qué puede tocar esta instalación. No sale
+    # de `effective_config` (que son los settings de los plugins).
+    assert resultado["boot"]["default_actor"] == "local"
+    assert "fs_root" in resultado["boot"]
+    assert "window" in resultado["ports_disponibles"]
+    assert resultado["runs"] == {"recientes": 0, "fallidos": 0, "ultimo_por_flujo": {}}
+
+
+def test_describe_installation_trae_un_resumen_en_texto_plano(raiz):
+    """Para un cliente que sólo pueda mostrar texto, el JSON no sirve de nada."""
+    resumen = ops.describe_installation(root=raiz)["resumen"]
+    assert "flujo(s) guardado(s)" in resumen
+    assert "Actores:" in resumen
+    assert "actor por defecto: local" in resumen
+
+
+def test_list_flows_y_get_flow_evitan_adivinar_la_ruta_del_mmd(raiz):
+    ops.save_flow(str(FLOWS / "mundo.mmd"), root=raiz)
+
+    assert [f["name"] for f in ops.list_flows(root=raiz)["flows"]] == ["mundo"]
+
+    detalle = ops.get_flow("mundo", plugins={"demo": DEMO}, root=raiz)
+    assert detalle["runnable"] is True
+    assert detalle["diagnostics"] == []
+    assert "demo.mover" in detalle["content"]
+
+
+def test_get_flow_cruza_los_diagnosticos_contra_lo_instalado(raiz):
+    """
+    El mismo flujo es ejecutable o no según qué plugins haya: sin `demo`, sus
+    nodos apuntan a tools que no existen. Por eso el diagnóstico va con el
+    contenido y no aparte.
+    """
+    ops.save_flow(str(FLOWS / "mundo.mmd"), root=raiz)
+
+    detalle = ops.get_flow("mundo", root=raiz)
+    assert detalle["runnable"] is False
+    assert any("demo.mover" in d["message"] for d in detalle["diagnostics"])
+
+
+def test_get_flow_de_uno_que_no_existe_lo_dice(raiz):
+    assert "no-existe" in ops.get_flow("no-existe", root=raiz)["error"]
+
+
+def test_list_runs_y_get_run_responden_que_corrio_y_por_que_fallo(raiz):
+    _alta(raiz)
+    ejecutado = ops.run_flow(str(FLOWS / "lineal.mmd"), root=raiz, row={"id": "0044"})
+
+    runs = ops.list_runs(root=raiz)["runs"]
+    assert [r["run_id"] for r in runs] == [ejecutado["run_id"]]
+    assert runs[0]["case_id"] == "0044"
+
+    detalle = ops.get_run(ejecutado["run_id"], root=raiz)
+    assert detalle["run_id"] == ejecutado["run_id"]
+    # La traza nodo por nodo, que es lo que `list_runs` deliberadamente no trae.
+    assert detalle["trace"]
+
+
+def test_list_runs_filtra_por_caso_y_por_fallidos(raiz):
+    _alta(raiz)
+    ops.run_flow(str(FLOWS / "lineal.mmd"), root=raiz, row={"id": "0044"})
+
+    assert ops.list_runs(case_id="0044", root=raiz)["runs"]
+    assert ops.list_runs(case_id="otro", root=raiz)["runs"] == []
+    assert ops.list_runs(only_failed=True, root=raiz)["runs"] == []
+
+
+def test_get_case_log_cruza_todos_los_runs_de_una_fila(raiz):
+    _alta(raiz)
+    ops.run_flow(str(FLOWS / "lineal.mmd"), root=raiz, row={"id": "0044"})
+    ops.run_flow(str(FLOWS / "lineal.mmd"), root=raiz, row={"id": "0044"})
+
+    registro = ops.get_case_log("0044", root=raiz)
+    assert registro["case_id"] == "0044"
+    # Dos corridas de la misma fila: el registro de la fila las acumula, que es
+    # justamente lo que un run suelto no muestra.
+    assert sum("procesando 0044" in e["message"] for e in registro["entries"]) == 2
+
+
+def test_write_y_delete_resource_item_completan_una_coleccion(raiz):
+    """
+    `list_resource_items` sólo leía: un agente podía ver qué conexiones hay
+    pero no dar de alta una.
+    """
+    escrito = ops.write_resource_item(
+        "demo", "destinos", "ARCHIVO", {"ruta": "/archivo"}, plugins={"demo": DEMO}, root=raiz
+    )
+    assert escrito["ok"] is True
+    assert escrito["item"]["ruta"] == "/archivo"
+
+    items = ops.list_resource_items("demo", "destinos", plugins={"demo": DEMO}, root=raiz)["items"]
+    assert [i["name"] for i in items] == ["ARCHIVO"]
+
+    ops.delete_resource_item("demo", "destinos", "ARCHIVO", plugins={"demo": DEMO}, root=raiz)
+    vacio = ops.list_resource_items("demo", "destinos", plugins={"demo": DEMO}, root=raiz)
+    assert vacio["items"] == []
+
+
+def test_write_resource_item_no_devuelve_el_secreto_ni_al_guardarlo(raiz):
+    """
+    `TableStore.write` sí se lo devuelve a quien lo escribió —pensado para una
+    UI donde la misma persona lo tipeó—. Por este camino quien escribe puede
+    ser un agente, así que se aplica el criterio de `resource_items_masked`.
+    """
+    escrito = ops.write_resource_item(
+        "demo",
+        "destinos",
+        "CON-TOKEN",
+        {"ruta": "/archivo", "token": "no-debe-volver"},
+        plugins={"demo": DEMO},
+        root=raiz,
+    )
+    assert escrito["item"]["token"] is None
+    assert "no-debe-volver" not in json.dumps(escrito)
+
+
+def test_write_resource_item_rechaza_una_coleccion_que_no_existe(raiz):
+    resultado = ops.write_resource_item(
+        "demo", "no-existe", "K", {}, plugins={"demo": DEMO}, root=raiz
+    )
+    assert resultado["ok"] is False
+    assert "no-existe" in resultado["error"]
+
+
 # ── Dry run ─────────────────────────────────────────────────────────────
 
 
@@ -531,11 +681,19 @@ def test_la_lista_de_tools_no_crece_con_los_plugins():
     from backend.mcp.server import TOOLS
 
     assert {t.name for t in TOOLS} == {
+        "describe_installation",
         "list_tools",
         "list_plugins",
         "list_resource_items",
         "list_ports",
         "list_users",
+        "list_flows",
+        "get_flow",
+        "list_runs",
+        "get_run",
+        "get_case_log",
+        "write_resource_item",
+        "delete_resource_item",
         "check_flow",
         "dry_run_flow",
         "load_plugin",

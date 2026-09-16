@@ -732,3 +732,119 @@ def test_close_cierra_los_adapters_que_lo_declaran(instance, adapters):
     instance.close()
 
     assert adapters["browser"].cerrado is True
+
+
+# ── Orientación (issue #17) ─────────────────────────────────────────────
+
+
+def test_get_flow_trae_contenido_y_diagnosticos_juntos(demo_instance):
+    """
+    Quien pregunta "¿por qué no anda este flujo?" necesita las dos cosas a la
+    vez: el texto y qué está mal en él, cruzado contra lo instalado.
+    """
+    detalle = demo_instance.get_flow("mundo")
+
+    assert detalle["name"] == "mundo"
+    assert "demo.mover" in detalle["content"]
+    assert detalle["runnable"] is True
+    assert detalle["diagnostics"] == []
+
+
+def test_get_flow_marca_no_runnable_cuando_falta_un_tool(instance):
+    """Sin el plugin demo instalado, el mismo flujo deja de ser ejecutable."""
+    instance.workflows.save_mmd(
+        "roto", 'flowchart TD\n    B(inicio)\n    N["falta.tool"]\n    B --> N\n'
+    )
+
+    detalle = instance.get_flow("roto")
+    assert detalle["runnable"] is False
+    assert any(d["severity"] == "error" for d in detalle["diagnostics"])
+
+
+def test_get_flow_de_uno_inexistente_es_none(instance):
+    assert instance.get_flow("no-existe") is None
+
+
+def test_list_runs_resume_lo_que_corrio(demo_instance):
+    demo_instance.users.create("agente", kind="agent")
+    demo_instance.run("lineal", "0044", row={"id": "0044"}, actor="agente")
+
+    runs = demo_instance.list_runs()
+    assert len(runs) == 1
+    assert runs[0]["case_id"] == "0044"
+    assert runs[0]["flow"] == "lineal"
+    # El resumen no trae la traza: para eso está `run_detail`.
+    assert "trace" not in runs[0]
+
+
+def test_write_resource_item_tapa_los_secretos_al_devolverlos(demo_instance):
+    """
+    `TableStore.write` devuelve en claro lo que se acaba de escribir, pensado
+    para una UI donde la misma persona lo tipeó. Por esta puerta puede entrar
+    un agente, así que rige el criterio de `resource_items_masked`.
+    """
+    guardado = demo_instance.write_resource_item(
+        "demo", "destinos", "D1", {"ruta": "/x", "token": "secreto"}
+    )
+
+    assert guardado["ruta"] == "/x"
+    assert guardado["token"] is None
+    # Pero se guardó de verdad: el plugin sí lo ve al ejecutar.
+    item = next(i for i in demo_instance.resource_items("demo", "destinos"))
+    assert item["token"] == "secreto"
+
+
+def test_delete_resource_item_borra(demo_instance):
+    demo_instance.write_resource_item("demo", "destinos", "D1", {"ruta": "/x"})
+    demo_instance.delete_resource_item("demo", "destinos", "D1")
+
+    assert demo_instance.resource_items_masked("demo", "destinos") == []
+
+
+def test_escribir_en_una_coleccion_que_no_existe_levanta(demo_instance):
+    from backend.core.resources import ResourceError
+
+    with pytest.raises(ResourceError):
+        demo_instance.write_resource_item("demo", "no-existe", "D1", {})
+    with pytest.raises(ResourceError):
+        demo_instance.delete_resource_item("demo", "no-existe", "D1")
+
+
+def test_describe_installation_junta_todo_lo_que_hace_falta_para_orientarse(demo_instance):
+    foto = demo_instance.describe_installation()
+
+    assert {f["name"] for f in foto["flows"]} >= {"mundo", "lineal"}
+    mundo = next(f for f in foto["flows"] if f["name"] == "mundo")
+    assert "demo.mover" in mundo["tools"]
+
+    demo = next(p for p in foto["plugins"] if p["name"] == "demo")
+    assert demo["collections"] == [{"name": "destinos", "label": "Destinos", "items": 0}]
+
+    assert {a["name"] for a in foto["actors"]} == {"local", "system"}
+    assert foto["boot"]["default_actor"] == "local"
+    assert foto["effective_config"]["demoBase"] == "/casos"
+    assert foto["runs"]["recientes"] == 0
+    assert foto["resumen"].startswith(f"{len(foto['flows'])} flujo(s) guardado(s)")
+
+
+def test_describe_installation_cuenta_los_runs_fallidos(demo_instance):
+    demo_instance.users.create("agente", kind="agent")
+    demo_instance.workflows.save_mmd(
+        "falla", 'flowchart TD\n    B(inicio)\n    N["core.set_status | status=err"]\n    B --> N\n'
+    )
+    demo_instance.run("falla", "0044", actor="agente")
+
+    foto = demo_instance.describe_installation()
+    assert foto["runs"]["recientes"] == 1
+    assert foto["runs"]["fallidos"] == 1
+    assert foto["runs"]["ultimo_por_flujo"]["falla"]["status"] == "err"
+    assert 'último run de "falla": err' in foto["resumen"]
+
+
+def test_describe_installation_cuenta_los_items_de_cada_coleccion(demo_instance):
+    demo_instance.write_resource_item("demo", "destinos", "D1", {"ruta": "/x"})
+    demo_instance.write_resource_item("demo", "destinos", "D2", {"ruta": "/y"})
+
+    foto = demo_instance.describe_installation()
+    demo = next(p for p in foto["plugins"] if p["name"] == "demo")
+    assert demo["collections"][0]["items"] == 2

@@ -314,6 +314,91 @@ def save_flow(flow: str, name: str | None = None, root: str | None = None) -> di
     return _cli(*argv, root=root)
 
 
+def describe_installation(plugins: dict | None = None, root: str | None = None) -> dict:
+    """
+    La foto de la instalación en una llamada: flujos, plugins, actores,
+    configuración efectiva, ports y un resumen de runs recientes.
+
+    Es lo primero que conviene llamar cuando no se conoce la instalación
+    (issue #17) -- antes de esto, armar esta foto significaba pedir varias
+    cosas sueltas y cruzarlas a mano. Incluye un campo `resumen` en texto
+    plano para un cliente que sólo pueda mostrar texto.
+    """
+    return _cli("describe", "--json", root=root, plugins=plugins)
+
+
+def list_flows(plugins: dict | None = None, root: str | None = None) -> dict:
+    """Los flujos guardados: nombre, carpeta, estado y qué tools usa cada uno."""
+    return {"flows": _cli("workflows", "--json", root=root, plugins=plugins)}
+
+
+def get_flow(name: str, plugins: dict | None = None, root: str | None = None) -> dict:
+    """
+    Un flujo guardado, con su contenido y sus diagnósticos ya cruzados contra
+    lo instalado -- sin tener que adivinar en qué ruta vive el `.mmd`.
+    """
+    return _cli("flow", name, "--json", root=root, plugins=plugins)
+
+
+def list_runs(
+    case_id: str | None = None,
+    source: str | None = None,
+    only_failed: bool = False,
+    limit: int = 50,
+    root: str | None = None,
+) -> dict:
+    """Runs ya ejecutados, resumidos: qué corrió y cómo terminó cada uno."""
+    argv = ["runs", "--json", "--limit", str(limit)]
+    if case_id:
+        argv += ["--case", case_id]
+    if source:
+        argv += ["--source", source]
+    if only_failed:
+        argv.append("--only-failed")
+    return {"runs": _cli(*argv, root=root)}
+
+
+def get_run(run_id: str, root: str | None = None) -> dict:
+    """La traza completa de un run ya ejecutado, nodo por nodo, con sus params resueltos."""
+    return _cli("trace", run_id, "--json", root=root)
+
+
+def get_case_log(case_id: str, limit: int = 500, root: str | None = None) -> dict:
+    """Todo el registro de una fila, cruzando todos sus runs -- responde "por qué falló"."""
+    return _cli("case-log", case_id, "--limit", str(limit), "--json", root=root)
+
+
+def write_resource_item(
+    plugin: str,
+    resource: str,
+    key: str,
+    item: dict,
+    plugins: dict | None = None,
+    root: str | None = None,
+) -> dict:
+    """
+    Escribe (crea o reemplaza) un item de una colección de un plugin.
+
+    Mismas reglas que `list_resource_items`: un campo declarado `secret`
+    nunca vuelve en claro, ni siquiera al toque de guardarlo (issue #17, ver
+    también #8).
+    """
+    return _cli(
+        "resource-item", plugin, resource, key,
+        "--data", json.dumps(item, ensure_ascii=False), "--json",
+        root=root, plugins=plugins,
+    )
+
+
+def delete_resource_item(
+    plugin: str, resource: str, key: str, plugins: dict | None = None, root: str | None = None
+) -> dict:
+    """Borra un item de una colección de un plugin."""
+    return _cli(
+        "resource-item", plugin, resource, key, "--delete", "--json", root=root, plugins=plugins
+    )
+
+
 def list_users(root: str | None = None) -> dict:
     """
     Los actores registrados y qué puede cada uno.
@@ -642,13 +727,24 @@ PLUGIN = build_plugin()
 __all__ = [
     "OperationError",
     "check_flow",
+    "delete_resource_item",
+    "describe_installation",
     "dry_run_flow",
+    "get_case_log",
+    "get_flow",
+    "get_run",
     "install_plugin",
+    "list_flows",
     "list_plugins",
     "list_ports",
+    "list_resource_items",
+    "list_runs",
     "list_tools",
+    "list_users",
     "load_plugin",
     "plugin_template",
     "run_action",
+    "run_flow",
     "save_flow",
+    "write_resource_item",
 ]

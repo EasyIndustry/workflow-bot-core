@@ -33,7 +33,7 @@ from .jsonio import dumps
 from .log_store import MODO_EXPIRACION, LogStore
 from .ports import CryptoPort, StoragePort
 from .registry import ToolRegistry
-from .resources import TableStore, store_for
+from .resources import ResourceError, TableStore, store_for
 from .schema import MIGRATIONS, SCHEMA
 from .stores import RunStore, StoreError, WorkflowStore
 from .users import RunPolicy, UserError, UserStore
@@ -150,6 +150,29 @@ class Instance:
         """
         graph = self.parse(name)
         return graph, self.check_graph(graph)
+
+    def get_flow(self, name: str) -> dict | None:
+        """
+        Un flujo guardado, con su contenido y sus diagnósticos ya cruzados
+        contra lo instalado. None si no existe.
+
+        Es lo que responde "¿por qué no anda?" sin que quien pregunta tenga
+        que adivinar en qué ruta de `workspace/` vive el `.mmd` (issue #17):
+        `diagnose()` ya cruza parser + registro, esto sólo le agrega el
+        contenido y lo empaqueta junto a los metadatos del flujo.
+        """
+        wf = self.workflows.get(name)
+        if wf is None:
+            return None
+        graph, extra = self.diagnose(name)
+        diagnosticos = sorted(
+            list(graph.errors) + list(graph.warnings) + extra, key=lambda d: (d.line or 0)
+        )
+        return {
+            **wf.to_dict(with_content=True),
+            "runnable": not any(d.severity is Severity.ERROR for d in diagnosticos),
+            "diagnostics": [d.to_dict() for d in diagnosticos],
+        }
 
     def check_graph(self, graph: FlowGraph) -> list[Diagnostic]:
         """Diagnósticos de un grafo contra los tools realmente instalados."""
@@ -275,6 +298,31 @@ class Instance:
             {clave: (None if clave in secretos else valor) for clave, valor in item.items()}
             for item in items
         ]
+
+    def write_resource_item(self, plugin: str, collection: str, key: str, item: dict) -> dict:
+        """
+        Escribe (crea o reemplaza) un item, y devuelve lo guardado con los
+        campos `secret` tapados.
+
+        `TableStore.write` le devuelve el item en claro a quien lo escribió,
+        pensado para una UI donde la misma persona lo acaba de tipear. Acá
+        quien escribe puede ser un agente vía MCP (issue #17), así que se
+        aplica el mismo criterio que `resource_items_masked`: un secreto
+        nunca vuelve en claro por este camino, ni siquiera al toque de
+        guardarlo (mismo espíritu que el #8).
+        """
+        definicion = self.resource_definition(plugin, collection)
+        if definicion is None:
+            raise ResourceError(f'no hay una colección "{collection}" en el plugin "{plugin}"')
+        guardado = self.resource_store(plugin, definicion).write(key, item)
+        secretos = {f.name for f in definicion.fields if f.secret}
+        return {clave: (None if clave in secretos else valor) for clave, valor in guardado.items()}
+
+    def delete_resource_item(self, plugin: str, collection: str, key: str) -> None:
+        definicion = self.resource_definition(plugin, collection)
+        if definicion is None:
+            raise ResourceError(f'no hay una colección "{collection}" en el plugin "{plugin}"')
+        self.resource_store(plugin, definicion).delete(key)
 
     # ── Ejecución ───────────────────────────────────────────────────────
 
@@ -500,6 +548,27 @@ class Instance:
 
         return borradas
 
+    def list_runs(
+        self,
+        *,
+        case_id: str | None = None,
+        limit: int = 50,
+        only_failed: bool = False,
+        source: str | None = None,
+        actor: str | None = None,
+        include_dry: bool = True,
+    ) -> list[dict]:
+        """Runs ya ejecutados, resumidos -- "qué corrió y cómo terminó" sin abrir cada traza."""
+        resumenes = self.runs.list(
+            case_id=case_id,
+            limit=limit,
+            only_failed=only_failed,
+            source=source,
+            actor=actor,
+            include_dry=include_dry,
+        )
+        return [r.to_dict() for r in resumenes]
+
     def run_detail(self, run_id: str) -> dict | None:
         """
         Un run con su log pegado de vuelta.
@@ -587,6 +656,81 @@ class Instance:
                 "undeclared": True,
             })
         return filas
+
+    # ── Orientación ─────────────────────────────────────────────────────
+
+    def describe_installation(self) -> dict:
+        """
+        La foto de la instalación en una llamada.
+
+        Antes de esto, saber "qué hay acá" significaba pedir cinco cosas
+        sueltas (flujos, plugins, actores, config de arranque, runs
+        recientes) y cruzarlas a mano -- exactamente lo que un agente que no
+        conoce la instalación no puede hacer solo (issue #17). Es lo que se
+        lee ANTES de decidir qué otro tool usar, no un reemplazo de ellos:
+        `get_flow`/`list_runs`/etc. siguen siendo el camino para el detalle.
+        """
+        from .contract import STATUS_OK
+
+        catalogo = self.registry.catalog()
+        tools_por_id = {t["id"]: t for t in catalogo["tools"]}
+
+        flujos = []
+        for wf in self.workflows.list():
+            graph = parse_flow(wf.content, with_meta=False)
+            flujos.append({
+                "name": wf.name,
+                "folder": wf.folder,
+                "enabled": wf.state != "disabled",
+                "description": wf.description,
+                "tools": sorted({node.fn for _, node in graph.action_nodes()}),
+            })
+
+        plugins = []
+        for p in catalogo["plugins"]:
+            colecciones = []
+            for r in p["resources"]:
+                definicion = self.resource_definition(p["name"], r["name"])
+                cantidad = (
+                    len(self.resource_store(p["name"], definicion).list_keys())
+                    if definicion is not None
+                    else 0
+                )
+                colecciones.append({"name": r["name"], "label": r["label"], "items": cantidad})
+            plugins.append({
+                "name": p["name"],
+                "version": p["version"],
+                "doc": p["doc"],
+                "ports": p["ports"],
+                "tools": [
+                    {"id": tid, "label": tools_por_id[tid]["label"], "doc": tools_por_id[tid]["doc"]}
+                    for tid in p["tools"]
+                    if tid in tools_por_id
+                ],
+                "collections": colecciones,
+            })
+
+        runs_recientes = self.list_runs(limit=20)
+        ultimo_por_flujo: dict[str, dict] = {}
+        for r in runs_recientes:
+            ultimo_por_flujo.setdefault(r["flow"], r)
+
+        resultado = {
+            "flows": flujos,
+            "plugins": plugins,
+            "plugin_errors": catalogo["errors"],
+            "actors": [u.to_dict() for u in self.users.list()],
+            "boot": self.boot.to_dict(),
+            "effective_config": self.effective_config(),
+            "ports_disponibles": catalogo["ports"],
+            "runs": {
+                "recientes": len(runs_recientes),
+                "fallidos": sum(1 for r in runs_recientes if r["status"] != STATUS_OK),
+                "ultimo_por_flujo": ultimo_por_flujo,
+            },
+        }
+        resultado["resumen"] = _resumen_instalacion(resultado)
+        return resultado
 
     # ── Diagnóstico ─────────────────────────────────────────────────────
 
@@ -761,6 +905,29 @@ def _resolver_action_params(accion, crudos: dict, config: dict) -> dict:
         params=accion.params,
     )
     return manifest.resolve_params(crudos, config)
+
+
+def _resumen_instalacion(datos: dict) -> str:
+    """Diez líneas de texto plano, para un cliente que sólo puede mostrar texto."""
+    habilitados = sum(1 for f in datos["flows"] if f["enabled"])
+    actores = ", ".join(f"{a['name']} ({a['kind']})" for a in datos["actors"]) or "ninguno"
+    boot = datos["boot"]
+
+    lineas = [
+        f"{len(datos['flows'])} flujo(s) guardado(s), {habilitados} habilitado(s).",
+        f"{len(datos['plugins'])} plugin(s) instalado(s)"
+        + (f", {len(datos['plugin_errors'])} con error al cargar" if datos["plugin_errors"] else "")
+        + ".",
+        f"Actores: {actores}.",
+        f"Ports disponibles: {', '.join(datos['ports_disponibles']) or 'ninguno'}.",
+        f"fs_root: {boot['fs_root'] or 'todo el disco'} · "
+        f"process_allowlist: {boot['process_allowlist'] if boot['process_allowlist'] is not None else 'cualquiera'} · "
+        f"actor por defecto: {boot['default_actor']}.",
+        f"Runs recientes: {datos['runs']['recientes']}, {datos['runs']['fallidos']} fallaron.",
+    ]
+    for flujo, run in sorted(datos["runs"]["ultimo_por_flujo"].items()):
+        lineas.append(f'  último run de "{flujo}": {run["status"]} ({run["run_id"]}).')
+    return "\n".join(lineas)
 
 
 def _parecidos(nombre: str, disponibles: list[str], maximo: int = 2) -> list[str]:
