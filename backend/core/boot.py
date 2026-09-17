@@ -77,6 +77,12 @@ class BootConfig:
     plugins_dir: Path | None = None
     # Acota el filesystem a un subárbol. Vacío = todo el disco.
     fs_root: str | None = None
+    # Varias raíces con alias, para cuando una sola no alcanza -un workspace
+    # local y un share de red a la vez (issue #23)-. `None` es el caso normal
+    # de una sola raíz, que sigue resolviendo por `fs_root`; con `fs_roots`
+    # declarado, la primera entrada es la raíz por defecto (a la que resuelve
+    # una ruta relativa) y el resto son alcanzables por alias (`origen:...`).
+    fs_roots: dict[str, str] | None = None
     # Ejecutables permitidos. None = cualquiera; () = ninguno.
     process_allowlist: tuple[str, ...] | None = None
     http_timeout: float | None = None
@@ -104,6 +110,23 @@ class BootConfig:
     def efimera(self) -> bool:
         return self.storage_path == EN_MEMORIA
 
+    @property
+    def fs_roots_efectivos(self) -> dict[str, str]:
+        """
+        La(s) raíz(es) de verdad para el port `fs`, en una sola forma.
+
+        `fs_roots` gana si está declarado —su primera entrada es la raíz por
+        defecto, a la que resuelve una ruta relativa—; si no, `fs_root`
+        singular se expresa como una única raíz sin alias (`""`), que es
+        exactamente el caso que ya andaba. Vacío si no se declaró ninguno de
+        los dos: todo el disco, sin acotar.
+        """
+        if self.fs_roots:
+            return dict(self.fs_roots)
+        if self.fs_root:
+            return {"": self.fs_root}
+        return {}
+
     def to_dict(self) -> dict:
         return {
             "root": str(self.root),
@@ -111,6 +134,7 @@ class BootConfig:
             "ephemeral": self.efimera,
             "plugins_dir": str(self.plugins_dir) if self.plugins_dir else None,
             "fs_root": self.fs_root,
+            "fs_roots": dict(self.fs_roots) if self.fs_roots else None,
             "process_allowlist": (
                 list(self.process_allowlist) if self.process_allowlist is not None else None
             ),
@@ -127,6 +151,7 @@ _CLAVES = {
     "storage": "str",
     "plugins_dir": "path",
     "fs_root": "str",
+    "fs_roots": "dict",
     "process_allowlist": "list",
     "http_timeout": "float",
     "default_actor": "str",
@@ -174,6 +199,7 @@ def load(root: Path | str, entorno: dict | None = None) -> BootConfig:
         # instalación; que dependiera del cwd haría que el mismo `boot.env`
         # diera una caja distinta según desde dónde se lo levante.
         fs_root=_texto_ruta(valores.get("fs_root"), raiz),
+        fs_roots=_fs_roots(valores.get("fs_roots"), raiz),
         process_allowlist=_lista(valores.get("process_allowlist")),
         http_timeout=_flotante(valores.get("http_timeout")),
         default_actor=_texto(valores.get("default_actor")) or "local",
@@ -237,26 +263,37 @@ def _diagnosticar(config: BootConfig) -> list[tuple[str, bool]]:
                 (f"storage: no se va a poder escribir la base en {destino.parent}", False)
             )
 
-    for clave, carpeta in (("plugins_dir", config.plugins_dir), ("fs_root", config.fs_root)):
-        if carpeta is None:
-            continue
-        ruta = Path(carpeta)
+    if config.plugins_dir is not None:
+        ruta = Path(config.plugins_dir)
         if not ruta.exists():
-            mensaje = f"{clave}: {ruta} no existe"
-            if (pista := _pista_unc_sin_share(crudo.get(clave))):
+            problemas.append((f"plugins_dir: {ruta} no existe", True))
+        elif not ruta.is_dir():
+            problemas.append((f"plugins_dir: {ruta} no es una carpeta", True))
+
+    # Cada raíz declarada (issue #23: puede ser más de una) tiene que resolver
+    # a una carpeta real, y ninguna puede solaparse con `plugins_dir` — la
+    # regla que sostiene la separación vale para cada una, no sólo la primera.
+    for alias, cruda in config.fs_roots_efectivos.items():
+        etiqueta = "fs_root" if not alias else f"fs_roots[{alias}]"
+        ruta = Path(cruda)
+        if not ruta.exists():
+            mensaje = f"{etiqueta}: {ruta} no existe"
+            if (pista := _pista_unc_sin_share(_texto_original_de_raiz(crudo, alias))):
                 mensaje = f"{mensaje} — {pista}"
             problemas.append((mensaje, True))
-        elif not ruta.is_dir():
-            problemas.append((f"{clave}: {ruta} no es una carpeta", True))
+            continue
+        if not ruta.is_dir():
+            problemas.append((f"{etiqueta}: {ruta} no es una carpeta", True))
+            continue
 
-    if config.plugins_dir and config.fs_root:
-        plugins, fs = Path(config.plugins_dir).resolve(), Path(config.fs_root).resolve()
-        if plugins == fs or plugins in fs.parents or fs in plugins.parents:
-            problemas.append((
-                "plugins_dir y fs_root se solapan: un flujo con el port fs "
-                "podría escribir o leer donde vive el código que se carga",
-                True,
-            ))
+        if config.plugins_dir is not None:
+            plugins, fs = Path(config.plugins_dir).resolve(), ruta.resolve()
+            if plugins == fs or plugins in fs.parents or fs in plugins.parents:
+                problemas.append((
+                    f"plugins_dir y {etiqueta} se solapan: un flujo con el port fs "
+                    "podría escribir o leer donde vive el código que se carga",
+                    True,
+                ))
 
     for nombre in config.process_allowlist or ():
         if shutil.which(nombre) is None:
@@ -310,6 +347,22 @@ def fatal(config: BootConfig) -> list[str]:
     return [mensaje for mensaje, es_fatal in _diagnosticar(config) if es_fatal]
 
 
+def _texto_original_de_raiz(crudo: dict, alias: str) -> str | None:
+    """
+    El texto tal como se escribió para una raíz, antes de resolverla contra
+    la raíz de la instalación — lo que necesita `_pista_unc_sin_share` para
+    reconocer un UNC sin share. Sin alias (`""`), es `fs_root` singular;
+    con alias, hay que volver a partir `fs_roots` para encontrar el suyo.
+    """
+    if not alias:
+        return crudo.get("fs_root")
+    for par in _texto(crudo.get("fs_roots")).split(","):
+        clave, _, ruta = par.strip().partition("=")
+        if clave.strip() == alias:
+            return ruta.strip()
+    return None
+
+
 def _pista_unc_sin_share(crudo: str | None) -> str | None:
     """
     Detecta un UNC que declaró sólo el host (`\\\\server-nuevo`), sin el share
@@ -347,6 +400,11 @@ def render(config: BootConfig) -> str:
         "storage": "Dónde vive la base. ':memory:' para una instalación efímera.",
         "plugins_dir": "Carpeta de plugins de desarrollo. En producción: entry points.",
         "fs_root": "Acota el filesystem a este subárbol. Vacío = todo el disco.",
+        "fs_roots": (
+            "Varias raíces con alias, para cuando fs_root no alcanza (un workspace "
+            "local y un share de red a la vez): alias=ruta, alias2=ruta2. La primera "
+            "es la raíz por defecto. Si está presente, gana sobre fs_root."
+        ),
         "process_allowlist": (
             "Ejecutables permitidos, separados por coma. Sin la clave = cualquiera; "
             "la clave presente y vacía = ninguno."
@@ -362,6 +420,9 @@ def render(config: BootConfig) -> str:
         "storage": config.storage or None,
         "plugins_dir": str(config.plugins_dir) if config.plugins_dir else None,
         "fs_root": config.fs_root or None,
+        "fs_roots": (
+            ",".join(f"{a}={r}" for a, r in config.fs_roots.items()) if config.fs_roots else None
+        ),
         "process_allowlist": (
             ",".join(config.process_allowlist) if config.process_allowlist is not None else None
         ),
@@ -486,6 +547,30 @@ def _ruta(valor, raiz: Path) -> Path | None:
 def _texto_ruta(valor, raiz: Path) -> str | None:
     destino = _ruta(valor, raiz)
     return str(destino) if destino is not None else None
+
+
+def _fs_roots(valor, raiz: Path) -> dict[str, str] | None:
+    """
+    `alias=ruta, alias2=ruta2` — issue #23. Cada ruta se resuelve igual que
+    `fs_root`/`plugins_dir`: relativa contra la raíz de la instalación, no
+    contra el cwd. Un par sin `=` o sin alias se descarta en silencio acá —no
+    hay un lugar mejor para señalarlo que `validar()`/`fatal()`, que ya
+    reportan cualquier raíz que no exista—, así que uno mal escrito termina
+    viéndose como una raíz faltante y no como algo ignorado sin dejar rastro.
+    """
+    texto = _texto(valor)
+    if not texto:
+        return None
+    resultado: dict[str, str] = {}
+    for par in texto.split(","):
+        alias, sep, ruta = par.strip().partition("=")
+        alias = alias.strip()
+        if not sep or not alias:
+            continue
+        destino = _texto_ruta(ruta.strip(), raiz)
+        if destino is not None:
+            resultado[alias] = destino
+    return resultado or None
 
 
 def _lista(valor) -> tuple[str, ...] | None:

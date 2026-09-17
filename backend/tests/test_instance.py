@@ -221,6 +221,33 @@ def test_una_degradacion_de_boot_no_impide_arrancar(tmp_path, adapters):
     inst.close()
 
 
+def test_fs_roots_del_boot_llegan_al_adapter_por_defecto(tmp_path):
+    """
+    Issue #23: sin adapters inyectados -el camino real de una instalación-,
+    `fs_roots` del boot config tiene que llegar armado al `LocalFsAdapter`
+    que arma la instancia, con sus alias y sin perder ninguno.
+    """
+    from backend.adapters.storage_sqlite import IN_MEMORY, SqliteStorageAdapter
+    from backend.core import boot as bootstrap
+
+    casa = tmp_path / "workspace"
+    origen = tmp_path / "casos"
+    casa.mkdir()
+    origen.mkdir()
+    (origen / "pieza.stl").write_text("x")
+
+    cfg = bootstrap.BootConfig(
+        root=tmp_path, fs_roots={"casa": str(casa), "origen": str(origen)}
+    )
+    inst = Instance(tmp_path, storage=SqliteStorageAdapter(IN_MEMORY), boot=cfg)
+    try:
+        fs = inst.adapters["fs"]
+        assert set(fs.roots) == {"casa", "origen"}
+        assert fs.read_text("origen:pieza.stl") == "x"
+    finally:
+        inst.close()
+
+
 def test_la_instancia_arma_registro_ports_y_stores(instance):
     """
     Una instalación sin ningún plugin instalado es válida y funcional: quedan

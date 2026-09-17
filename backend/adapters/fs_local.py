@@ -29,24 +29,84 @@ class LocalFsAdapter:
     con él, salirse levanta `PortError` antes de tocar nada. Es opcional porque
     una instalación legítima puede necesitar todo el disco, pero un test o un
     entorno acotado debería usarlo siempre.
+
+    `roots` es la forma general (issue #23): varias raíces con alias, para
+    cuando una sola no alcanza —un workspace local y un share de red a la
+    vez—. La primera es la raíz por defecto, a la que resuelve una ruta
+    relativa y cualquier ruta absoluta sin alias que caiga adentro; el resto
+    se alcanzan con `alias:resto` (`origen:MODELOS/pieza.stl`). `root` sigue
+    siendo el atajo para el caso de una sola raíz —de hecho, es exactamente
+    `roots={"": root}`— y los dos son mutuamente excluyentes.
     """
 
-    def __init__(self, root: str | Path | None = None) -> None:
-        self.root = Path(root).resolve() if root else None
+    def __init__(
+        self,
+        root: str | Path | None = None,
+        *,
+        roots: dict[str, str | Path] | None = None,
+    ) -> None:
+        if roots:
+            self.roots: dict[str, Path] = {
+                alias: Path(ruta).resolve() for alias, ruta in roots.items()
+            }
+        elif root:
+            self.roots = {"": Path(root).resolve()}
+        else:
+            self.roots = {}
+        # Compatibilidad: código que ya leía `.root` (un adapter con una sola
+        # raíz, con o sin alias) sigue viendo la de por defecto.
+        self.root = next(iter(self.roots.values()), None)
 
     # ── Resolución de rutas ─────────────────────────────────────────────
+
+    def _alias_y_resto(self, crudo: str) -> tuple[str | None, str]:
+        """
+        `alias:resto` sólo si `alias` es una de las raíces declaradas —nunca
+        una letra de unidad de Windows (`C:\\...`), que no es un alias que
+        nadie haya declarado y tiene que seguir resolviendo como ruta
+        absoluta de siempre.
+        """
+        if ":" in crudo:
+            posible, resto = crudo.split(":", 1)
+            posible = posible.strip()
+            if posible in self.roots:
+                return posible, resto.lstrip("\\/")
+        return None, crudo
 
     def _p(self, path: str) -> Path:
         crudo = str(path or "").strip()
         if not crudo:
             raise PortError("ruta vacía")
-        resuelta = Path(crudo).expanduser()
-        if self.root is not None:
-            absoluta = (self.root / resuelta).resolve() if not resuelta.is_absolute() else resuelta.resolve()
-            if not _dentro(absoluta, self.root):
-                raise PortError(f"ruta fuera del árbol permitido: {crudo}")
+        if not self.roots:
+            return Path(crudo).expanduser()
+
+        alias, resto = self._alias_y_resto(crudo)
+        resuelta = Path(resto).expanduser()
+
+        if alias is not None:
+            base = self.roots[alias]
+            absoluta = (base / resuelta).resolve() if not resuelta.is_absolute() else resuelta.resolve()
+            if not _dentro(absoluta, base):
+                raise PortError(f"ruta fuera del árbol permitido de '{alias}': {crudo}")
             return absoluta
-        return resuelta
+
+        if resuelta.is_absolute():
+            absoluta = resuelta.resolve()
+            if not any(_dentro(absoluta, base) for base in self.roots.values()):
+                nombres = ", ".join(str(b) for b in self.roots.values())
+                raise PortError(f"ruta fuera del árbol permitido ({nombres}): {crudo}")
+            return absoluta
+
+        # Relativa, sin alias: resuelve contra la raíz por defecto — la
+        # primera declarada, ya sea `root` o la primera de `roots`. Se
+        # revalida igual que la absoluta: un "../../etc" también tiene que
+        # quedar adentro después de resolver los ".." — el chequeo no es
+        # sólo para lo que llega ya absoluto.
+        base_default = next(iter(self.roots.values()))
+        absoluta = (base_default / resuelta).resolve()
+        if not _dentro(absoluta, base_default):
+            raise PortError(f"ruta fuera del árbol permitido: {crudo}")
+        return absoluta
 
     # ── Consulta ────────────────────────────────────────────────────────
 

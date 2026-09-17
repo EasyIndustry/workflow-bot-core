@@ -184,6 +184,75 @@ def test_fs_con_raiz_no_deja_salir_del_arbol(tmp_path):
         fs.read_text("/etc/passwd")
 
 
+# ── Múltiples raíces con alias (issue #23) ───────────────────────────────
+
+
+def test_fs_con_varias_raices_alcanza_las_dos_por_alias(tmp_path):
+    """Un workspace local y un share de red, a la vez -- lo que motivó el issue."""
+    casa = tmp_path / "workspace"
+    origen = tmp_path / "server-nuevo" / "CASOS TERMINADOS"
+    casa.mkdir()
+    origen.mkdir(parents=True)
+    (origen / "pieza.stl").write_text("x")
+
+    fs = LocalFsAdapter(roots={"casa": casa, "origen": origen})
+
+    fs.write_text("intermedio.txt", "ok")  # relativa: raíz por defecto (casa)
+    assert (casa / "intermedio.txt").read_text() == "ok"
+
+    assert fs.read_text("origen:pieza.stl") == "x"
+
+
+def test_fs_con_varias_raices_una_no_alcanza_a_la_otra(tmp_path):
+    casa = tmp_path / "workspace"
+    origen = tmp_path / "server-nuevo"
+    casa.mkdir()
+    origen.mkdir()
+    fs = LocalFsAdapter(roots={"casa": casa, "origen": origen})
+
+    with pytest.raises(PortError, match="fuera del árbol permitido de 'casa'"):
+        fs.read_text("casa:../server-nuevo/x")
+
+
+def test_fs_dos_puntos_sin_alias_declarado_no_se_interpreta_como_alias(tmp_path):
+    """
+    Un ':' en la ruta sólo separa un alias si ESE alias está declarado --
+    nunca una letra de unidad de Windows (`C:\\...`), que no es un alias que
+    ninguna instalación declara. Se prueba contra `_alias_y_resto` en vez de
+    contra una ruta absoluta real: `Path("C:\\...").is_absolute()` sólo es
+    cierto en Windows, y la propiedad que importa -que "C" no se confunda con
+    un alias- no depende del SO.
+    """
+    fs = LocalFsAdapter(roots={"casa": tmp_path})
+
+    assert fs._alias_y_resto(r"C:\Windows\System32") == (None, r"C:\Windows\System32")
+    assert fs._alias_y_resto("casa:pieza.stl") == ("casa", "pieza.stl")
+
+
+def test_fs_ruta_absoluta_bajo_cualquier_raiz_declarada_entra(tmp_path):
+    """Una ruta absoluta no necesita el alias si cae bajo alguna de las raíces."""
+    casa = tmp_path / "workspace"
+    origen = tmp_path / "server-nuevo"
+    casa.mkdir()
+    origen.mkdir()
+    (origen / "pieza.stl").write_text("x")
+    fs = LocalFsAdapter(roots={"casa": casa, "origen": origen})
+
+    assert fs.read_text(str(origen / "pieza.stl")) == "x"
+
+
+def test_fs_una_sola_raiz_via_roots_se_comporta_como_root(tmp_path):
+    """`roots={"": ruta}` es lo mismo que `root=ruta` -- el caso de siempre."""
+    encierro = tmp_path / "permitido"
+    encierro.mkdir()
+    fs = LocalFsAdapter(roots={"": encierro})
+
+    fs.write_text("adentro.txt", "ok")
+    assert (encierro / "adentro.txt").read_text() == "ok"
+    with pytest.raises(PortError, match="fuera del árbol"):
+        fs.read_text("/etc/passwd")
+
+
 def test_fs_renombrar_no_acepta_separadores(tmp_path):
     """Un separador acá sería un `move` encubierto, y con eso una fuga del árbol."""
     (tmp_path / "a.txt").write_text("x")
