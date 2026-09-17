@@ -429,6 +429,72 @@ def test_dry_run_reporta_variables_sin_resolver():
     assert "noExiste" in result.trace[0].message
 
 
+def test_dry_run_no_rechaza_un_param_json_que_depende_de_un_output_no_producido():
+    """
+    Issue #24: `rutas={rutas}` -donde `rutas` es el output de un nodo
+    anterior que el dry run no ejecuta- no tiene todavía nada que juzgar.
+    Antes esto fallaba en el dry run y andaba en la corrida real, porque el
+    placeholder sin resolver ('{rutas}') llegaba tal cual a `_coerce(JSON)`.
+    """
+    productor = _tool(
+        "test.produce_lista",
+        lambda ctx: ToolResult.ok(rutas=["a.stl", "b.stl"]),
+        outputs=[Output("rutas", ParamType.JSON)],
+    )
+    consumidor = _tool(
+        "test.consume_json",
+        lambda ctx: ToolResult.ok(),
+        params=[Param("rutas", ParamType.JSON, required=True)],
+    )
+    result = _run(
+        "flowchart TD\n"
+        "    B(inicio)\n"
+        '    N1["test.produce_lista"]\n'
+        '    N2["test.consume_json | rutas={rutas}"]\n'
+        "    B --> N1 --> N2\n",
+        registry=_registry(productor, consumidor),
+        dry_run=True,
+    )
+    assert result.status == "ok"
+    assert not result.failed
+    n2 = result.trace[-1]
+    assert n2.status == "ok"
+    assert n2.params["rutas"] == "{rutas}"  # sin tipar: nada que juzgar todavía
+    assert "rutas" in n2.message  # sigue avisando que quedó sin resolver
+
+
+def test_dry_run_sigue_rechazando_un_literal_mal_escrito_a_mano():
+    """El caso que el comentario original defiende: un valor concreto y mal tipado sigue fallando."""
+    tool = _tool(
+        "test.espera",
+        lambda ctx: ToolResult.ok(),
+        params=[Param("seconds", ParamType.INT, required=True)],
+    )
+    result = _run(
+        'flowchart TD\n    B(inicio)\n    N["test.espera | seconds=abc"]\n    B --> N\n',
+        registry=_registry(tool),
+        dry_run=True,
+    )
+    assert result.failed
+    assert "no es un entero" in result.message
+
+
+def test_dry_run_no_rechaza_json_valido_ya_resuelto():
+    """Un literal JSON válido en el .mmd, o un output ya conocido, se sigue tipando como siempre."""
+    tool = _tool(
+        "test.consume_json",
+        lambda ctx: ToolResult.ok(),
+        params=[Param("items", ParamType.JSON, required=True)],
+    )
+    result = _run(
+        'flowchart TD\n    B(inicio)\n    N["test.consume_json | items="[1, 2, 3]""]\n    B --> N\n',
+        registry=_registry(tool),
+        dry_run=True,
+    )
+    assert result.status == "ok"
+    assert result.trace[-1].params["items"] == [1, 2, 3]
+
+
 def test_dry_run_detecta_tool_inexistente():
     result = _run(
         'flowchart TD\n    B(inicio)\n    X["plugin.no_instalado"]\n    B --> X\n',
