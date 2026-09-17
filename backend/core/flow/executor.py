@@ -26,7 +26,7 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
 from ..contract import STATUS_ERR, STATUS_OK, ParamError, ToolContext, ToolResult
 from ..registry import ToolRegistry
@@ -587,7 +587,7 @@ def _run_action(
 
 def _resolve_raw_params(run: _Run, node: ActionNode) -> tuple[dict, list[str]]:
     """Resuelve los `{var}` de los params crudos y reporta los que quedaron."""
-    resueltos: dict[str, str] = {}
+    resueltos: dict[str, Any] = {}
     pendientes: list[str] = []
     for key, raw in node.params.items():
         resueltos[key] = run.context.resolve(raw)

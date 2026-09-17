@@ -90,6 +90,29 @@ def test_variable_sin_resolver_queda_literal_y_se_reporta():
     assert ctx.unresolved("a {noExiste} b {tampoco}") == ["noExiste", "tampoco"]
 
 
+def test_placeholder_unico_devuelve_lista_o_dict_sin_convertir_a_str():
+    ctx = RunContext(vars={"rutas": ["a.stl", "b.stl"], "info": {"n": 3}})
+    assert ctx.resolve("{rutas}") == ["a.stl", "b.stl"]
+    assert ctx.resolve("{info}") == {"n": 3}
+
+
+def test_placeholder_con_texto_alrededor_sigue_interpolando_como_string():
+    ctx = RunContext(vars={"rutas": ["a.stl", "b.stl"]})
+    assert ctx.resolve("hay {rutas} archivos") == "hay ['a.stl', 'b.stl'] archivos"
+
+
+def test_traversal_a_lista_o_dict_solo_pasa_por_placeholder_unico():
+    ctx = RunContext(vars={"parseo": {"secciones": {"inf_00": [1, 2, 3]}}})
+    assert ctx.resolve("{parseo.secciones}") == {"inf_00": [1, 2, 3]}
+    # embebido en texto, no hay forma de interpolar una colección como string útil
+    assert ctx.resolve("ver {parseo.secciones}") == "ver {parseo.secciones}"
+
+
+def test_placeholder_de_coleccion_no_se_reporta_como_sin_resolver():
+    ctx = RunContext(vars={"rutas": ["a.stl"]})
+    assert ctx.unresolved("{rutas}") == []
+
+
 def test_decision_prioriza_el_row():
     """el motor anterior miraba context antes que state; se preserva."""
     ctx = RunContext(row={"referencia": "CNC4"}, vars={"referencia": "CNC2"})

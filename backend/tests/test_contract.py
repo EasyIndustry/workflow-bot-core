@@ -359,6 +359,35 @@ def test_int_invalido_da_param_error():
         assert "no es un entero" in str(exc)
 
 
+def test_json_literal_desde_el_mmd_parsea_a_objeto():
+    manifest = ToolManifest(
+        id="t.x", label="x", category="X", params=(Param("items", ParamType.JSON),)
+    )
+    resolved = manifest.resolve_params({"items": "[1, 2, 3]"}, {})
+    assert resolved == {"items": [1, 2, 3]}
+
+
+def test_json_ya_estructurado_pasa_directo():
+    """Viene así desde resolve() cuando el template era un único {placeholder}
+    apuntando a una lista/dict, o desde el store de configuración."""
+    manifest = ToolManifest(
+        id="t.x", label="x", category="X", params=(Param("items", ParamType.JSON),)
+    )
+    resolved = manifest.resolve_params({"items": ["a.stl", "b.stl"]}, {})
+    assert resolved == {"items": ["a.stl", "b.stl"]}
+
+
+def test_json_invalido_da_param_error():
+    manifest = ToolManifest(
+        id="t.x", label="x", category="X", params=(Param("items", ParamType.JSON),)
+    )
+    try:
+        manifest.resolve_params({"items": "no es json"}, {})
+        raise AssertionError("debió rechazar texto no-JSON")
+    except ParamError as exc:
+        assert "no es JSON válido" in str(exc)
+
+
 def test_enum_invalido_da_param_error():
     manifest = ToolManifest(
         id="t.x",
