@@ -457,7 +457,12 @@ def main() -> int:
 
     from .instance import Instance
 
-    instancia = Instance(root)
+    try:
+        instancia = Instance(root)
+    except bootstrap.BootError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
     try:
         report = run_checks(
             root=root,

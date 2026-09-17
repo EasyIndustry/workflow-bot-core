@@ -203,6 +203,82 @@ def desconocidas(root: Path | str, entorno: dict | None = None) -> list[str]:
     return sorted(vistas)
 
 
+class BootError(RuntimeError):
+    """
+    Un valor de arranque no permite construir la instancia.
+
+    Sólo lo levanta lo que **construye** (`Instance.__init__`); `validar()` y
+    `fatal()` siguen siendo puro reporte (issue #22). Trae en el mensaje la
+    lista completa de problemas fatales, uno por línea, para que el primer
+    lugar donde se lee ya diga qué corregir.
+    """
+
+
+def _diagnosticar(config: BootConfig) -> list[tuple[str, bool]]:
+    """
+    Valores presentes que no van a hacer lo que dicen, con si cada uno es
+    **fatal** (la instalación no puede arrancar así) o sólo una degradación
+    (arranca, pero con menos de lo declarado).
+
+    Fatal es lo que deja inutilizable un límite de seguridad de la
+    instalación: `fs_root`/`plugins_dir` que no resuelven a una carpeta real,
+    y el solapamiento entre ambos. Todo lo demás —un ejecutable ausente en el
+    `process_allowlist`, un `http_timeout` inválido, un `default_actor` mal
+    formado— es una degradación: se ignora el valor y se sigue con el
+    default, y eso ya lo dice el propio `validar()` de siempre.
+    """
+    problemas: list[tuple[str, bool]] = []
+    crudo = config.crudos
+
+    if not config.efimera:
+        destino = Path(config.storage_path)
+        if not escribible(destino.parent):
+            problemas.append(
+                (f"storage: no se va a poder escribir la base en {destino.parent}", False)
+            )
+
+    for clave, carpeta in (("plugins_dir", config.plugins_dir), ("fs_root", config.fs_root)):
+        if carpeta is None:
+            continue
+        ruta = Path(carpeta)
+        if not ruta.exists():
+            mensaje = f"{clave}: {ruta} no existe"
+            if (pista := _pista_unc_sin_share(crudo.get(clave))):
+                mensaje = f"{mensaje} — {pista}"
+            problemas.append((mensaje, True))
+        elif not ruta.is_dir():
+            problemas.append((f"{clave}: {ruta} no es una carpeta", True))
+
+    if config.plugins_dir and config.fs_root:
+        plugins, fs = Path(config.plugins_dir).resolve(), Path(config.fs_root).resolve()
+        if plugins == fs or plugins in fs.parents or fs in plugins.parents:
+            problemas.append((
+                "plugins_dir y fs_root se solapan: un flujo con el port fs "
+                "podría escribir o leer donde vive el código que se carga",
+                True,
+            ))
+
+    for nombre in config.process_allowlist or ():
+        if shutil.which(nombre) is None:
+            problemas.append(
+                (f"process_allowlist: no se encontró '{nombre}' en esta máquina", False)
+            )
+
+    if (texto := _texto(crudo.get("http_timeout"))):
+        try:
+            if float(texto) <= 0:
+                problemas.append((f"http_timeout: {texto} no es un tiempo de espera", False))
+        except ValueError:
+            problemas.append((f"http_timeout: '{texto}' no es un número; se ignora", False))
+
+    if not _NOMBRE_ACTOR.match(config.default_actor):
+        problemas.append((
+            f"default_actor: '{config.default_actor}' no es un nombre de actor válido", False
+        ))
+
+    return problemas
+
+
 def validar(config: BootConfig) -> list[str]:
     """
     Valores presentes que no van a hacer lo que dicen.
@@ -215,55 +291,43 @@ def validar(config: BootConfig) -> list[str]:
 
     Reporta, no levanta —y no toca nada—: es lo que le permite a `doctor`
     mostrarlo y a un instalador revisar los valores **antes** de escribir
-    `boot.env`. Una instalación con un valor dudoso tiene que poder arrancar
-    igual y decirlo, no negarse a arrancar.
+    `boot.env`. La lista completa, fatal y degradación por igual: quien
+    construye una instancia sólo necesita `fatal()`, más abajo.
     """
-    problemas: list[str] = []
-    crudo = config.crudos
+    return [mensaje for mensaje, _ in _diagnosticar(config)]
 
-    if not config.efimera:
-        destino = Path(config.storage_path)
-        if not escribible(destino.parent):
-            problemas.append(
-                f"storage: no se va a poder escribir la base en {destino.parent}"
-            )
 
-    for clave, carpeta in (("plugins_dir", config.plugins_dir), ("fs_root", config.fs_root)):
-        if carpeta is None:
-            continue
-        ruta = Path(carpeta)
-        if not ruta.exists():
-            problemas.append(f"{clave}: {ruta} no existe")
-        elif not ruta.is_dir():
-            problemas.append(f"{clave}: {ruta} no es una carpeta")
+def fatal(config: BootConfig) -> list[str]:
+    """
+    El subconjunto de `validar()` que no puede arrancar así (issue #22).
 
-    if config.plugins_dir and config.fs_root:
-        plugins, fs = Path(config.plugins_dir).resolve(), Path(config.fs_root).resolve()
-        if plugins == fs or plugins in fs.parents or fs in plugins.parents:
-            problemas.append(
-                "plugins_dir y fs_root se solapan: un flujo con el port fs "
-                "podría escribir o leer donde vive el código que se carga"
-            )
+    Es lo que `Instance.__init__` levanta como `BootError`: un `fs_root` o un
+    `plugins_dir` declarados que no resuelven a una carpeta real dejan
+    inutilizable un límite de seguridad de la instalación, así que no tiene
+    sentido arrancar y fallar recién adentro de un run, con un mensaje que
+    apunta al flujo en vez de a la configuración.
+    """
+    return [mensaje for mensaje, es_fatal in _diagnosticar(config) if es_fatal]
 
-    for nombre in config.process_allowlist or ():
-        if shutil.which(nombre) is None:
-            problemas.append(
-                f"process_allowlist: no se encontró '{nombre}' en esta máquina"
-            )
 
-    if (texto := _texto(crudo.get("http_timeout"))):
-        try:
-            if float(texto) <= 0:
-                problemas.append(f"http_timeout: {texto} no es un tiempo de espera")
-        except ValueError:
-            problemas.append(f"http_timeout: '{texto}' no es un número; se ignora")
-
-    if not _NOMBRE_ACTOR.match(config.default_actor):
-        problemas.append(
-            f"default_actor: '{config.default_actor}' no es un nombre de actor válido"
+def _pista_unc_sin_share(crudo: str | None) -> str | None:
+    """
+    Detecta un UNC que declaró sólo el host (`\\\\server-nuevo`), sin el share
+    (`\\\\server-nuevo\\share`). Es una ruta bien formada que nunca va a
+    existir, y "no existe" a secas manda a revisar el flujo en vez del
+    `boot.env` (issue #22).
+    """
+    if not crudo:
+        return None
+    texto = crudo.strip()
+    if not (texto.startswith("\\\\") or texto.startswith("//")):
+        return None
+    segmentos = [s for s in re.split(r"[\\/]+", texto[2:].strip("\\/")) if s]
+    if len(segmentos) < 2:
+        return (
+            "una ruta UNC tiene que incluir el share (\\\\servidor\\share), no sólo el host"
         )
-
-    return problemas
+    return None
 
 
 def render(config: BootConfig) -> str:
@@ -452,8 +516,10 @@ __all__ = [
     "EN_MEMORIA",
     "PREFIJO",
     "BootConfig",
+    "BootError",
     "desconocidas",
     "escribible",
+    "fatal",
     "load",
     "render",
     "validar",

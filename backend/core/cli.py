@@ -837,7 +837,12 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
-    instancia = Instance(args.root, local_plugins=locales)
+    try:
+        instancia = Instance(args.root, local_plugins=locales)
+    except boot.BootError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
     try:
         return args.fn(instancia, args)
     finally:

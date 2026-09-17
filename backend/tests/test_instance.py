@@ -186,6 +186,41 @@ def test_prune_deja_los_mas_recientes(db):
 # ── Armado de la instancia ──────────────────────────────────────────────
 
 
+def test_fs_root_inexistente_no_deja_arrancar_la_instancia(tmp_path, adapters):
+    """
+    Issue #22: antes, esto sólo lo detectaba `doctor`. Una instalación con
+    `boot.env` editado a mano (el único camino para cambiar `fs_root`) pasaba
+    de largo y el `PortError` aparecía recién adentro de un run, apuntando al
+    flujo en vez de a la configuración.
+    """
+    from backend.adapters.storage_sqlite import IN_MEMORY, SqliteStorageAdapter
+    from backend.core import boot as bootstrap
+
+    cfg = bootstrap.BootConfig(root=tmp_path, fs_root=str(tmp_path / "no-existe"))
+    with pytest.raises(bootstrap.BootError, match="fs_root"):
+        Instance(
+            tmp_path,
+            storage=SqliteStorageAdapter(IN_MEMORY),
+            adapters=adapters,
+            boot=cfg,
+        )
+
+
+def test_una_degradacion_de_boot_no_impide_arrancar(tmp_path, adapters):
+    """`process_allowlist` con un ejecutable ausente es una degradación, no un motivo para no arrancar."""
+    from backend.adapters.storage_sqlite import IN_MEMORY, SqliteStorageAdapter
+    from backend.core import boot as bootstrap
+
+    cfg = bootstrap.BootConfig(root=tmp_path, process_allowlist=("no-existe-este-programa",))
+    inst = Instance(
+        tmp_path,
+        storage=SqliteStorageAdapter(IN_MEMORY),
+        adapters=adapters,
+        boot=cfg,
+    )
+    inst.close()
+
+
 def test_la_instancia_arma_registro_ports_y_stores(instance):
     """
     Una instalación sin ningún plugin instalado es válida y funcional: quedan
