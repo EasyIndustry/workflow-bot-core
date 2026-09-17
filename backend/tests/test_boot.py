@@ -468,14 +468,49 @@ def test_fs_roots_unc_sin_share_tambien_suma_la_pista(tmp_path):
     assert any("fs_roots[origen]" in p and "share" in p for p in problemas)
 
 
-def test_un_par_sin_igual_o_sin_alias_se_descarta(tmp_path):
-    """Se descarta en silencio -- termina viéndose como una raíz faltante, no como algo ignorado."""
+def test_un_par_sin_igual_se_descarta(tmp_path):
+    """Sin '=' no hay ruta que resolver -- se descarta en silencio, termina viéndose como una raíz faltante."""
     casa = tmp_path / "workspace"
     casa.mkdir()
     c = boot.load(tmp_path, entorno={
-        f"{boot.PREFIJO}fs_roots": f"casa={casa}, sin-alias-ni-igual, ={tmp_path}",
+        f"{boot.PREFIJO}fs_roots": f"casa={casa}, sin-alias-ni-igual",
     })
     assert c.fs_roots == {"casa": str(casa)}
+
+
+def test_un_alias_vacio_es_la_raiz_por_defecto_sin_nombre(tmp_path):
+    """
+    QA sobre v0.3.1-beta.3: `render()` escribe la raíz sin alias de un
+    `fs_roots` con varias como `=ruta` (mismo alias `""` que usa
+    `fs_roots_efectivos` para un `fs_root` singular). Antes, `_fs_roots`
+    descartaba ese par por no tener alias, y el viaje de ida y vuelta perdía
+    esa raíz -- convirtiendo silenciosamente a `origen` en la raíz por
+    defecto, con `validar()` en verde.
+    """
+    casa = tmp_path / "workspace"
+    origen = tmp_path / "casos"
+    casa.mkdir()
+    origen.mkdir()
+    c = boot.load(tmp_path, entorno={
+        f"{boot.PREFIJO}fs_roots": f"={casa}, origen={origen}",
+    })
+    assert c.fs_roots == {"": str(casa), "origen": str(origen)}
+    assert c.fs_roots_efectivos == {"": str(casa), "origen": str(origen)}
+    assert boot.fatal(c) == []
+
+
+def test_render_de_fs_roots_con_raiz_por_defecto_sobrevive_al_viaje_de_ida_y_vuelta(tmp_path):
+    """El caso exacto que reportó QA: un `BootConfig.fs_roots` con un alias vacío no pierde esa raíz al releer."""
+    casa = tmp_path / "workspace"
+    origen = tmp_path / "casos"
+    casa.mkdir()
+    origen.mkdir()
+    original = boot.BootConfig(root=tmp_path, fs_roots={"": str(casa), "origen": str(origen)})
+    _escribir(tmp_path, boot.render(original))
+
+    releido = boot.load(tmp_path)
+    assert releido.fs_roots == {"": str(casa), "origen": str(origen)}
+    assert boot.validar(releido) == []
 
 
 def test_render_documenta_fs_roots_y_se_puede_releer(tmp_path):
