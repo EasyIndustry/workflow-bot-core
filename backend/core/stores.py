@@ -116,11 +116,46 @@ class WorkflowStore:
         )
         return self.get(name)  # type: ignore[return-value]
 
-    def save_mmd(self, name: str, raw: str) -> Workflow:
-        """Guarda un `.mmd` crudo, tomando folder/state/description de su cabecera."""
-        meta, contenido = parse_meta(raw)
+    def save_mmd(
+        self,
+        name: str,
+        raw: str,
+        *,
+        folder: str | None = None,
+        state: str | None = None,
+        description: str | None = None,
+    ) -> Workflow:
+        """
+        Guarda un `.mmd` crudo, tomando folder/state/description de su cabecera.
+
+        Una clave ausente de la cabecera **no** se pisa con el default: se
+        conserva la que el flujo ya tenía guardado, si existe. Sin esto,
+        volver a guardar un flujo existente con un `.mmd` que no repite su
+        cabecera completa —el caso de `save_flow` por MCP, cuyo `.mmd` viene
+        del editor y no de un archivo con `%%` propio— resetea folder/state/
+        description a su default en cada guardado, silenciosamente.
+
+        `folder`/`state`/`description` explícitos (no `None`) ganan sobre
+        cualquiera de las dos fuentes anteriores — es lo que le permite a un
+        llamador (la CLI, `save_flow`) fijar o cambiar el valor sin tener que
+        escribirlo adentro del `.mmd`.
+        """
+        meta, contenido, explicitas = parse_meta(raw)
+        previo = self.get(name)
+
+        def _resolver(clave: str, del_meta: str, override: str | None, default: str) -> str:
+            if override is not None:
+                return override
+            if clave in explicitas:
+                return del_meta
+            return getattr(previo, clave) if previo is not None else default
+
         return self.save(
-            name, contenido, folder=meta.folder, state=meta.state, description=meta.description
+            name,
+            contenido,
+            folder=_resolver("folder", meta.folder, folder, ""),
+            state=_resolver("state", meta.state, state, "enabled"),
+            description=_resolver("description", meta.description, description, ""),
         )
 
     def delete(self, name: str) -> bool:

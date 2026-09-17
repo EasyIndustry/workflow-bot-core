@@ -248,7 +248,13 @@ def cmd_add(inst: Instance, args) -> int:
         print(mensaje, file=sys.stderr)
         return 2
 
-    wf = inst.workflows.save_mmd(args.name or path.stem, path.read_text(encoding="utf-8"))
+    wf = inst.workflows.save_mmd(
+        args.name or path.stem,
+        path.read_text(encoding="utf-8"),
+        folder=args.folder,
+        state=args.state,
+        description=args.description,
+    )
     if args.json:
         print(json.dumps({
             "ok": True,
@@ -743,6 +749,20 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("add", help="Guarda un .mmd en la instalación.")
     p.add_argument("file")
     p.add_argument("--name", help="Nombre con el que guardarlo (default: el del archivo).")
+    p.add_argument(
+        "--folder",
+        help="Carpeta del flujo. Sin esta opción: la de la cabecera %% del "
+             "archivo si la trae, o si no la que el flujo ya tenía guardado.",
+    )
+    p.add_argument(
+        "--state",
+        choices=("enabled", "disabled"),
+        help="Estado del flujo. Misma regla de default que --folder.",
+    )
+    p.add_argument(
+        "--description",
+        help="Descripción del flujo. Misma regla de default que --folder.",
+    )
     p.add_argument("--json", action="store_true", help="Resultado estructurado.")
     p.set_defaults(fn=cmd_add)
 

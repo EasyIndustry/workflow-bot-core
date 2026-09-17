@@ -195,14 +195,22 @@ _INLINE_SHAPES = (
 )
 
 
-def parse_meta(raw: str) -> tuple[FlowMeta, str]:
+def parse_meta(raw: str) -> tuple[FlowMeta, str, frozenset[str]]:
     """
     Separa la cabecera `%% key: value` del contenido Mermaid.
 
     La cabecera es parte del DSL, así
     que su parseo pertenece al núcleo y no a la capa HTTP.
+
+    El tercer elemento son las claves que de verdad aparecieron en la
+    cabecera, para distinguir "no la trajo" de "la trajo vacía" — un `.mmd`
+    sin `%% folder:` no es lo mismo que uno con `%% folder:` a secas, y quien
+    guarda de nuevo un flujo existente sin repetir su cabecera completa
+    necesita poder conservar lo que ya tenía en vez de que se le pise con el
+    default (ver `WorkflowStore.save_mmd`).
     """
     values = {"folder": "", "state": "enabled", "description": ""}
+    explicitas: set[str] = set()
     lines = raw.splitlines()
     i = 0
     while i < len(lines):
@@ -212,8 +220,9 @@ def parse_meta(raw: str) -> tuple[FlowMeta, str]:
         key, val = m.group(1).lower(), m.group(2).strip()
         if key in values:
             values[key] = val
+            explicitas.add(key)
         i += 1
-    return FlowMeta(**values), "\n".join(lines[i:]).lstrip("\n")
+    return FlowMeta(**values), "\n".join(lines[i:]).lstrip("\n"), frozenset(explicitas)
 
 
 def _split_display(label: str) -> tuple[str, str]:
@@ -375,7 +384,7 @@ def parse_flow(text: str, *, with_meta: bool = True) -> FlowGraph:
     """
     meta = FlowMeta()
     if with_meta:
-        meta, text = parse_meta(text)
+        meta, text, _ = parse_meta(text)
 
     b = _Builder()
 

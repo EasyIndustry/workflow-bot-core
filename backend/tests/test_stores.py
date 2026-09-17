@@ -114,6 +114,46 @@ def test_ida_y_vuelta_a_mmd_conserva_la_cabecera(db):
     assert store.get("vuelta").content == store.get("ida").content
 
 
+def test_guardar_de_nuevo_sin_cabecera_conserva_folder_y_state(db):
+    """
+    Reproduce lo que veía `save_flow` por MCP: un `.mmd` sin cabecera propia
+    -viene del editor, no de un archivo con `%%`- reseteaba folder/state/
+    description a su default en cada guardado, en silencio.
+    """
+    store = WorkflowStore(db)
+    store.save_mmd("agrupado", "%% folder: 3D\n%% description: conversor\n" + FLUJO)
+    assert store.get("agrupado").folder == "3D"
+
+    # Se vuelve a guardar el mismo flujo, esta vez sin ninguna cabecera.
+    store.save_mmd("agrupado", FLUJO)
+    wf = store.get("agrupado")
+    assert wf.folder == "3D"          # no se pisó con ""
+    assert wf.description == "conversor"
+    assert wf.state == "enabled"
+
+
+def test_guardar_de_nuevo_con_cabecera_explicita_si_pisa(db):
+    """Una cabecera que sí trae la clave -aunque sea vacía- gana sobre lo guardado."""
+    store = WorkflowStore(db)
+    store.save_mmd("agrupado", "%% folder: 3D\n" + FLUJO)
+    store.save_mmd("agrupado", "%% folder: \n" + FLUJO)
+    assert store.get("agrupado").folder == ""
+
+
+def test_override_explicito_de_save_mmd_gana_sobre_todo(db):
+    """El parámetro explícito (CLI --folder, MCP save_flow(folder=...)) es la máxima prioridad."""
+    store = WorkflowStore(db)
+    store.save_mmd("agrupado", "%% folder: 3D\n" + FLUJO)
+    store.save_mmd("agrupado", FLUJO, folder="OTRA")
+    assert store.get("agrupado").folder == "OTRA"
+
+
+def test_flujo_nuevo_sin_cabecera_ni_override_usa_los_defaults(db):
+    store = WorkflowStore(db)
+    wf = store.save_mmd("nuevo", FLUJO)
+    assert (wf.folder, wf.state, wf.description) == ("", "enabled", "")
+
+
 def test_importar_y_exportar_una_carpeta(db, tmp_path):
     esperados = len(list(FLOWS.glob("*.mmd")))
     store = WorkflowStore(db)

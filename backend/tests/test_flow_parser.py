@@ -35,18 +35,20 @@ def _errors(graph) -> list[str]:
 
 
 def test_parse_meta_extrae_la_cabecera():
-    meta, content = parse_meta(
+    meta, content, explicitas = parse_meta(
         "%% folder: FORM\n%% state: disabled\n%% description: hola\nflowchart TD\n    A(inicio)"
     )
     assert (meta.folder, meta.state, meta.description) == ("FORM", "disabled", "hola")
     assert meta.enabled is False
     assert content.startswith("flowchart TD")
+    assert explicitas == {"folder", "state", "description"}
 
 
 def test_meta_por_defecto_es_enabled():
-    meta, _ = parse_meta("flowchart TD\n    A(inicio)")
+    meta, _, explicitas = parse_meta("flowchart TD\n    A(inicio)")
     assert meta.enabled is True
     assert meta.folder == ""
+    assert explicitas == frozenset()
 
 
 # ── Tipos de nodo ───────────────────────────────────────────────────────

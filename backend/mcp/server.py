@@ -203,6 +203,23 @@ TOOLS: list[types.Tool] = [
                 "type": "string",
                 "description": "Nombre con el que guardarlo. Por defecto, el del archivo.",
             },
+            "folder": {
+                "type": "string",
+                "description": (
+                    "Carpeta del flujo. Sin esto: la de la cabecera %% del .mmd si "
+                    "la trae, o si no la que el flujo ya tenía guardado — nunca se "
+                    "resetea en silencio por guardar de nuevo sin repetir la cabecera."
+                ),
+            },
+            "state": {
+                "type": "string",
+                "enum": ["enabled", "disabled"],
+                "description": "Estado del flujo. Misma regla de default que folder.",
+            },
+            "description": {
+                "type": "string",
+                "description": "Descripción del flujo. Misma regla de default que folder.",
+            },
             "root": _ROOT,
         },
         ["flow"],
