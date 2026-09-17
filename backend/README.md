@@ -59,11 +59,21 @@ entre corridas inyecta su propio `PlaywrightBrowserAdapter(user_data_dir=...)`
 vía `Instance(root, adapters={...})`.
 
 `window` maneja una ventana nativa de escritorio (encontrarla, clickear,
-tipear, leer un control) y se declara una sola vez: `build_default_adapters()`
-enruta al adapter del sistema operativo donde corre la instalación —
-`pywinauto` en Windows, AT-SPI en Linux— así el plugin no sabe, ni le importa,
-cuál de los dos hay detrás. En un sistema sin adapter propio, `available` es
-False y usarlo levanta un error explícito en vez de fallar a ciegas.
+tipear, leer un control o su estado tildado/destildado) y se declara una sola
+vez: `build_default_adapters()` enruta al adapter del sistema operativo donde
+corre la instalación — `pywinauto` en Windows, AT-SPI en Linux— así el plugin
+no sabe, ni le importa, cuál de los dos hay detrás. En un sistema sin adapter
+propio, `available` es False y usarlo levanta un error explícito en vez de
+fallar a ciegas.
+
+`click` acepta `button` (`"left"` por defecto): un click distinto del
+principal no siempre tiene un patrón de accesibilidad propio —un menú
+contextual es un evento de mouse, no una acción del control—, así que en
+Windows cae a simular el mouse (con la misma exposición a `SetCursorPos` que
+el click de siempre evita) y en Linux directamente no está disponible, porque
+AT-SPI no tiene noción de qué botón. `read_state` es aparte de `read_text`
+porque en UI Automation son cosas distintas: el estado de un checkbox vive en
+`TogglePattern`, no en su nombre accesible.
 
 `storage` y `crypto` son del núcleo: un plugin no los puede pedir. Uno con
 acceso al almacenamiento elegiría dónde persisten sus datos —exactamente lo que

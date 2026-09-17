@@ -398,8 +398,22 @@ class WindowPort(Protocol):
         """
         ...
 
-    def click(self, window: WindowInfo, control: str, *, timeout: float | None = None) -> None:
-        """Clickea el control identificado por `control` dentro de la ventana. `PortError` si no aparece a tiempo."""
+    def click(
+        self,
+        window: WindowInfo,
+        control: str,
+        *,
+        button: str = "left",
+        timeout: float | None = None,
+    ) -> None:
+        """
+        Clickea el control identificado por `control` dentro de la ventana.
+        `PortError` si no aparece a tiempo, o si el adapter no puede hacer
+        click con `button` en esta plataforma (issue #25): un click distinto
+        del principal no siempre tiene un patrón de accesibilidad equivalente
+        a Invoke, y ahí depende de simular el mouse -- lo que #13 evitó para
+        el click de siempre-- o directamente no está disponible.
+        """
         ...
 
     def type_text(
@@ -412,6 +426,23 @@ class WindowPort(Protocol):
         self, window: WindowInfo, control: str | None = None, *, timeout: float | None = None
     ) -> str:
         """El texto de `control`, o de la ventana entera si no se da `control`."""
+        ...
+
+    def read_state(
+        self, window: WindowInfo, control: str, *, timeout: float | None = None
+    ) -> str | None:
+        """
+        `"on"` / `"off"` / `"indeterminate"` para un control con estado
+        (checkbox, radio, toggle) -- issue #25. `None` si el control no tiene
+        estado (un botón, una etiqueta): distinto de `PortError`, porque
+        preguntarle a un control que no es un toggle no es un fallo, es una
+        pregunta sin respuesta.
+
+        Existe aparte de `read_text` porque en UI Automation son cosas
+        distintas: el estado de un checkbox vive en `TogglePattern`, no en su
+        `Name` -- `read_text` seguiría devolviendo la etiqueta ("Lip Flat"),
+        tildado o no.
+        """
         ...
 
     @property

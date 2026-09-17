@@ -32,13 +32,16 @@ class UnsupportedWindowAdapter:
     def find_window(self, *, title=None, process=None, timeout=None):
         self._no_soportado()
 
-    def click(self, window, control, *, timeout=None):
+    def click(self, window, control, *, button="left", timeout=None):
         self._no_soportado()
 
     def type_text(self, window, control, text, *, timeout=None):
         self._no_soportado()
 
     def read_text(self, window, control=None, *, timeout=None):
+        self._no_soportado()
+
+    def read_state(self, window, control, *, timeout=None):
         self._no_soportado()
 
 

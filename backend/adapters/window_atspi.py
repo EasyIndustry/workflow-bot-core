@@ -166,13 +166,26 @@ class AtspiWindowAdapter:
             raise PortError(f"no se encontró el control {control!r}")
         return encontrado
 
-    def click(self, window, control, *, timeout=None):
+    def click(self, window, control, *, button="left", timeout=None):
         """
         Clickea `control` disparando su acción de accesibilidad
         (`queryAction().doAction(0)`), no moviendo el mouse: no hay
         `SetCursorPos` que romperse en una máquina con algo que se apropia del
         cursor (issue #13, visto en el adapter de Windows).
+
+        Sólo el click principal (issue #25): la interfaz de acción de AT-SPI
+        dispara la acción por defecto del control -- lo que un lector de
+        pantalla activaría con Enter --, no un evento de mouse con un botón
+        particular. No hay un "click derecho" que disparar por acá: a
+        diferencia del adapter de Windows, que puede caer a `click_input`
+        moviendo el mouse, acá no existe ese camino en absoluto.
         """
+        if button != "left":
+            raise PortError(
+                f"este adapter no puede hacer {button} click: AT-SPI dispara la "
+                "acción por defecto del control, no un evento de mouse con un "
+                "botón particular"
+            )
         objetivo = self._buscar_control(self._resolver(window), control)
         try:
             objetivo.queryAction().doAction(0)
@@ -189,6 +202,33 @@ class AtspiWindowAdapter:
             raise PortError(
                 f"no se pudo escribir en {control!r}: {type(exc).__name__}: {exc}"
             ) from exc
+
+    # Roles con noción de estado tildado -- el resto (un botón, una etiqueta)
+    # no tiene nada que `read_state` pueda contestar (issue #25).
+    _ROLES_CON_ESTADO = frozenset({"check box", "radio button", "toggle button", "check menu item"})
+
+    def read_state(self, window, control, *, timeout=None):
+        """
+        `"on"`/`"off"`/`"indeterminate"` de un control con estado, `None` si
+        no tiene (issue #25).
+
+        El estado vive en el state set del elemento (`STATE_CHECKED`/
+        `STATE_INDETERMINATE`), no en su nombre accesible -- que es lo que
+        `read_text` devuelve y no cambia si el checkbox se tilda o no.
+        """
+        pyatspi = self._registry()
+        objetivo = self._buscar_control(self._resolver(window), control)
+        if objetivo.getRoleName() not in self._ROLES_CON_ESTADO:
+            return None
+        try:
+            estados = objetivo.getState()
+        except Exception as exc:
+            raise PortError(
+                f"no se pudo leer el estado de {control!r}: {type(exc).__name__}: {exc}"
+            ) from exc
+        if estados.contains(pyatspi.STATE_INDETERMINATE):
+            return "indeterminate"
+        return "on" if estados.contains(pyatspi.STATE_CHECKED) else "off"
 
     def read_text(self, window, control=None, *, timeout=None):
         ventana = self._resolver(window)

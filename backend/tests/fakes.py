@@ -353,8 +353,14 @@ class FakeWindow:
     levanta `PortError`.
     """
 
-    def __init__(self, windows: dict | None = None) -> None:
+    def __init__(self, windows: dict | None = None, states: dict | None = None) -> None:
         self.windows = {clave: dict(controles) for clave, controles in (windows or {}).items()}
+        # `states` (issue #25): igual forma que `windows`, pero para
+        # `read_state` -- {titulo: {control: "on"/"off"/"indeterminate"/None}}.
+        # `None` es un valor guionado válido (el control no tiene estado); un
+        # control ausente del dict es "nadie lo guionó", y eso sí es error,
+        # igual que en `read_text`.
+        self.states = {clave: dict(estados) for clave, estados in (states or {}).items()}
         self.calls: list[dict] = []
         self._contador = 0
         self._abiertas: dict[str, str] = {}
@@ -379,8 +385,10 @@ class FakeWindow:
             raise PortError("FakeWindow: operación sin haber buscado la ventana antes")
         return clave
 
-    def click(self, window, control, *, timeout=None):
-        self.calls.append({"op": "click", "handle": window.handle, "control": control})
+    def click(self, window, control, *, button="left", timeout=None):
+        self.calls.append(
+            {"op": "click", "handle": window.handle, "control": control, "button": button}
+        )
         self._clave(window)
 
     def type_text(self, window, control, text, *, timeout=None):
@@ -395,6 +403,13 @@ class FakeWindow:
         if control not in controles:
             raise PortError(f"FakeWindow: nadie guionó el control {control!r}")
         return controles[control]
+
+    def read_state(self, window, control, *, timeout=None):
+        self.calls.append({"op": "read_state", "handle": window.handle, "control": control})
+        estados = self.states.get(self._clave(window), {})
+        if control not in estados:
+            raise PortError(f"FakeWindow: nadie guionó el estado de {control!r}")
+        return estados[control]
 
 
 def fake_adapters(**overrides) -> dict:
