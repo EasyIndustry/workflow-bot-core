@@ -476,7 +476,7 @@ def _run_action(
 
     # Params con sus `{variables}` sustituidas. Todavía son texto: el tipado lo
     # aplica el manifest más abajo, y la traza se actualiza con el resultado.
-    resueltos, pendientes = _resolve_raw_params(run, node)
+    resueltos, pendientes, claves_sin_resolver = _resolve_raw_params(run, node)
     trace.params = resueltos
     if pendientes:
         trace.message = f"variables sin resolver: {', '.join(pendientes)}"
@@ -518,10 +518,20 @@ def _run_action(
         # Los params se tipan igual que en una corrida real. Un `seconds=abc`
         # tiene que salir acá y no reventar recién en producción: un dry run que
         # pasa sobre una entrada que el run real rechaza no sirve de nada.
+        #
+        # Salvo el que todavía es un placeholder sin resolver (issue #24): el
+        # nodo que lo produce no corrió -es la situación normal de un dry
+        # run, no la excepcional-, así que `{rutas}` no tiene nada que
+        # juzgar todavía. Tipar ese texto literal es indistinguible de un
+        # valor mal escrito a mano, y por eso `rutas={rutas}` -el caso que el
+        # #21 vino a habilitar- fallaba en el dry run y andaba en la corrida
+        # real.
         manifest = run.registry.manifest(node.fn)
         if manifest is not None:
             try:
-                trace.params = manifest.resolve_params(resueltos, run.context.config)
+                trace.params = manifest.resolve_params(
+                    resueltos, run.context.config, sin_resolver=claves_sin_resolver
+                )
             except ParamError as exc:
                 trace.status = STATUS_ERR
                 trace.message = str(exc)
@@ -585,14 +595,27 @@ def _run_action(
 
 
 
-def _resolve_raw_params(run: _Run, node: ActionNode) -> tuple[dict, list[str]]:
-    """Resuelve los `{var}` de los params crudos y reporta los que quedaron."""
+def _resolve_raw_params(run: _Run, node: ActionNode) -> tuple[dict, list[str], frozenset[str]]:
+    """
+    Resuelve los `{var}` de los params crudos y reporta los que quedaron.
+
+    El tercer elemento son las **claves de param** (no las variables) que
+    todavía tienen algo sin resolver adentro — lo que necesita el dry run
+    (issue #24) para no tipar un param cuyo valor de verdad depende de un
+    output que este recorrido en seco no produce: `pendientes` da los
+    nombres de variable para el mensaje, pero no dice a qué param
+    pertenecen.
+    """
     resueltos: dict[str, Any] = {}
     pendientes: list[str] = []
+    claves_sin_resolver: set[str] = set()
     for key, raw in node.params.items():
         resueltos[key] = run.context.resolve(raw)
-        pendientes.extend(run.context.unresolved(raw))
-    return resueltos, pendientes
+        sin_resolver_de_este = run.context.unresolved(raw)
+        pendientes.extend(sin_resolver_de_este)
+        if sin_resolver_de_este:
+            claves_sin_resolver.add(key)
+    return resueltos, pendientes, frozenset(claves_sin_resolver)
 
 
 def _invoke_tool(

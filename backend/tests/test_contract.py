@@ -359,6 +359,44 @@ def test_int_invalido_da_param_error():
         assert "no es un entero" in str(exc)
 
 
+def test_sin_resolver_no_tipa_el_valor_y_lo_deja_crudo():
+    """
+    Issue #24: un param JSON cuyo valor todavía es `{placeholder}` sin
+    resolver -el nodo que lo produce no corrió, el caso normal de un dry
+    run- no tiene nada que juzgar. Se salta `_coerce` para esa clave.
+    """
+    manifest = ToolManifest(
+        id="t.x", label="x", category="X", params=(Param("items", ParamType.JSON, required=True),)
+    )
+    resolved = manifest.resolve_params({"items": "{rutas}"}, {}, sin_resolver=frozenset({"items"}))
+    assert resolved == {"items": "{rutas}"}
+
+
+def test_sin_resolver_no_afecta_a_otras_claves():
+    manifest = ToolManifest(
+        id="t.x",
+        label="x",
+        category="X",
+        params=(Param("items", ParamType.JSON), Param("n", ParamType.INT)),
+    )
+    resolved = manifest.resolve_params(
+        {"items": "{rutas}", "n": "60"}, {}, sin_resolver=frozenset({"items"})
+    )
+    assert resolved == {"items": "{rutas}", "n": 60}
+
+
+def test_sin_resolver_no_disculpa_un_literal_mal_escrito():
+    """Sólo se salta el tipado de las claves que están en `sin_resolver`; el resto sigue como siempre."""
+    manifest = ToolManifest(
+        id="t.x", label="x", category="X", params=(Param("n", ParamType.INT),)
+    )
+    try:
+        manifest.resolve_params({"n": "sesenta"}, {}, sin_resolver=frozenset({"otra_clave"}))
+        raise AssertionError("debió rechazar 'sesenta'")
+    except ParamError as exc:
+        assert "no es un entero" in str(exc)
+
+
 def test_json_literal_desde_el_mmd_parsea_a_objeto():
     manifest = ToolManifest(
         id="t.x", label="x", category="X", params=(Param("items", ParamType.JSON),)

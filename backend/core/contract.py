@@ -265,7 +265,9 @@ class ToolManifest:
         extras = {k: v for k, v in node_params.items() if k not in conocidos}
         return declarados, extras
 
-    def resolve_params(self, node_params: dict, config: dict) -> dict:
+    def resolve_params(
+        self, node_params: dict, config: dict, *, sin_resolver: frozenset[str] = frozenset()
+    ) -> dict:
         """
         Aplica el orden de precedencia del contrato y convierte tipos:
             param del nodo  →  config de la instancia  →  default del manifest
@@ -273,11 +275,22 @@ class ToolManifest:
         Levanta ParamError si falta un obligatorio o si un valor no convierte.
         Los params no declarados en el manifest se descartan: sin eso, un param
         sobrante de un nodo se filtraría al siguiente.
+
+        `sin_resolver` son las claves del nodo (issue #24) cuyo valor todavía
+        es un `{placeholder}` sin resolver -el dry run, cuando el nodo que lo
+        produce no corrió-: para esas se salta `_coerce` y se deja el texto
+        crudo tal cual, en vez de tiparlo como si fuera un valor final. Un
+        `seconds=abc` escrito a mano sigue fallando -no está en
+        `sin_resolver`, nadie dijo que dependiera de nada-; `rutas={rutas}`
+        no, porque no hay nada que juzgar todavía.
         """
         resolved: dict = {}
         for p in self.params:
             if p.present_in(node_params):
                 raw = p.read_from(node_params)
+                if p.name in sin_resolver or any(a in sin_resolver for a in p.aliases):
+                    resolved[p.name] = raw
+                    continue
             elif p.config_key and p.config_key in config:
                 raw = config[p.config_key]
             else:
