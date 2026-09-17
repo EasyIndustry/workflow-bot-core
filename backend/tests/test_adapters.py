@@ -649,6 +649,79 @@ def test_window_pywinauto_click_cae_a_simular_el_mouse_si_invoke_falla():
     assert control.clicked is True
 
 
+# ── Issue #25: click con botón, y read_state ─────────────────────────────
+
+
+class _FakeControlConBoton:
+    def __init__(self):
+        self.clicked_con = None
+
+    def invoke(self):
+        raise AssertionError("un click distinto de left no debería pasar por Invoke")
+
+    def click_input(self, button="left"):
+        self.clicked_con = button
+
+
+def test_window_pywinauto_click_derecho_no_pasa_por_invoke_y_usa_el_mouse():
+    """
+    Issue #25: un click derecho no tiene patrón de UIA equivalente a Invoke
+    -- un menú contextual es un evento de mouse --, así que sale directo por
+    `click_input(button="right")`, sin intentar Invoke primero.
+    """
+    adapter = PywinautoWindowAdapter()
+    control = _FakeControlConBoton()
+    adapter._ventanas["1"] = _FakeVentanaPywinauto(control)
+
+    adapter.click(WindowInfo(handle="1", title="x"), "Export", button="right")
+
+    assert control.clicked_con == "right"
+
+
+class _FakeControlToggle:
+    def __init__(self, estado: int):
+        self._estado = estado
+
+    def get_toggle_state(self):
+        return self._estado
+
+
+class _FakeControlSeleccionable:
+    def __init__(self, seleccionado: bool):
+        self._seleccionado = seleccionado
+
+    def is_selected(self):
+        return self._seleccionado
+
+
+class _FakeControlSinEstado:
+    pass
+
+
+@pytest.mark.parametrize("crudo,esperado", [(0, "off"), (1, "on"), (2, "indeterminate")])
+def test_window_pywinauto_read_state_de_un_checkbox(crudo, esperado):
+    adapter = PywinautoWindowAdapter()
+    adapter._ventanas["1"] = _FakeVentanaPywinauto(_FakeControlToggle(crudo))
+
+    assert adapter.read_state(WindowInfo(handle="1", title="x"), "Lip Flat") == esperado
+
+
+@pytest.mark.parametrize("seleccionado,esperado", [(True, "on"), (False, "off")])
+def test_window_pywinauto_read_state_de_un_radio(seleccionado, esperado):
+    adapter = PywinautoWindowAdapter()
+    adapter._ventanas["1"] = _FakeVentanaPywinauto(_FakeControlSeleccionable(seleccionado))
+
+    assert adapter.read_state(WindowInfo(handle="1", title="x"), "Metric") == esperado
+
+
+def test_window_pywinauto_read_state_de_un_control_sin_estado_es_none():
+    """Un botón o una etiqueta no tienen estado: `None`, no `PortError`."""
+    adapter = PywinautoWindowAdapter()
+    adapter._ventanas["1"] = _FakeVentanaPywinauto(_FakeControlSinEstado())
+
+    assert adapter.read_state(WindowInfo(handle="1", title="x"), "Aceptar") is None
+
+
 def test_window_pywinauto_sugiere_proceso_elevado_cuando_no_se_encuentra(monkeypatch):
     """
     Issue #13: un proceso corriendo como administrador no lo puede abrir un
@@ -754,6 +827,80 @@ def test_window_pywinauto_explica_un_selector_ambiguo_en_vez_de_repetir_el_error
     assert '"Edit:Carpeta:"' in mensaje
 
 
+def test_window_atspi_click_derecho_no_soportado():
+    """
+    Issue #25: AT-SPI dispara la acción por defecto del control, no un evento
+    de mouse -- no hay un "right click" que pedirle, ni siquiera cayendo a
+    simular el mouse como hace el adapter de Windows.
+    """
+    adapter = AtspiWindowAdapter()
+    with pytest.raises(PortError, match="right click"):
+        adapter.click(WindowInfo(handle="1", title="x"), "Guardar", button="right")
+
+
+class _FakeEstadoSet:
+    def __init__(self, estados: frozenset):
+        self._estados = estados
+
+    def contains(self, estado):
+        return estado in self._estados
+
+
+class _FakeAccesibleConEstado:
+    def __init__(self, role: str, estados: frozenset = frozenset()):
+        self._role = role
+        self._estados = estados
+
+    def getRoleName(self):
+        return self._role
+
+    def getState(self):
+        return _FakeEstadoSet(self._estados)
+
+
+class _FakePyatspiModulo:
+    STATE_CHECKED = "checked"
+    STATE_INDETERMINATE = "indeterminate"
+
+
+def _adapter_atspi_con_control(monkeypatch, control):
+    """Un `AtspiWindowAdapter` que resuelve cualquier `read_state` a `control`, sin tocar pyatspi de verdad."""
+    adapter = AtspiWindowAdapter()
+    adapter._ventanas["1"] = object()
+    monkeypatch.setattr(adapter, "_registry", lambda: _FakePyatspiModulo)
+    monkeypatch.setattr(adapter, "_buscar_control", lambda ventana, sel: control)
+    return adapter
+
+
+def test_window_atspi_read_state_checkbox_tildado(monkeypatch):
+    control = _FakeAccesibleConEstado("check box", frozenset({"checked"}))
+    adapter = _adapter_atspi_con_control(monkeypatch, control)
+
+    assert adapter.read_state(WindowInfo(handle="1", title="x"), "Lip Flat") == "on"
+
+
+def test_window_atspi_read_state_checkbox_destildado(monkeypatch):
+    control = _FakeAccesibleConEstado("check box", frozenset())
+    adapter = _adapter_atspi_con_control(monkeypatch, control)
+
+    assert adapter.read_state(WindowInfo(handle="1", title="x"), "Lip Flat") == "off"
+
+
+def test_window_atspi_read_state_indeterminado(monkeypatch):
+    control = _FakeAccesibleConEstado("check box", frozenset({"indeterminate"}))
+    adapter = _adapter_atspi_con_control(monkeypatch, control)
+
+    assert adapter.read_state(WindowInfo(handle="1", title="x"), "Lip Flat") == "indeterminate"
+
+
+def test_window_atspi_read_state_de_un_control_sin_estado_es_none(monkeypatch):
+    """Un botón no tiene el rol de nada "con estado": `None`, no `PortError`."""
+    control = _FakeAccesibleConEstado("push button")
+    adapter = _adapter_atspi_con_control(monkeypatch, control)
+
+    assert adapter.read_state(WindowInfo(handle="1", title="x"), "Aceptar") is None
+
+
 def test_window_atspi_mapea_el_tipo_al_rol_de_accesibilidad():
     """El mismo selector, traducido al vocabulario del árbol de accesibilidad."""
     from backend.adapters.window_atspi import _selector
@@ -780,3 +927,5 @@ def test_window_unsupported_en_un_sistema_operativo_sin_adapter():
         adapter.type_text(ventana, "campo", "texto")
     with pytest.raises(PortError, match="Darwin"):
         adapter.read_text(ventana)
+    with pytest.raises(PortError, match="Darwin"):
+        adapter.read_state(ventana, "checkbox")

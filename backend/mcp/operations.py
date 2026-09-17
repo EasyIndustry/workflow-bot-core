@@ -177,8 +177,10 @@ def list_ports(**_) -> dict:
         p.PROCESS: "run(command: Sequence[str], cwd, timeout, env) -> ProcessResult",
         p.CLOCK: "now(), monotonic(), sleep(seconds, is_cancelled)",
         p.BROWSER: "goto(url), click(selector), leer_texto(selector), screenshot() -> bytes",
-        p.WINDOW: "find_window(title|process) -> WindowInfo, click(window, control), "
-                  "type_text(window, control, text), read_text(window, control=None)",
+        p.WINDOW: "find_window(title|process) -> WindowInfo, "
+                  "click(window, control, button='left'), "
+                  "type_text(window, control, text), read_text(window, control=None), "
+                  "read_state(window, control) -> 'on'/'off'/'indeterminate'/None",
     }
     return {
         "pedibles_por_un_plugin": [

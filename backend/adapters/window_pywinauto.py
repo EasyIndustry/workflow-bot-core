@@ -161,7 +161,7 @@ class PywinautoWindowAdapter:
             detalle += f'. Agregá el tipo al selector, por ejemplo "{tipos[0]}:{control}"'
         return detalle
 
-    def click(self, window, control, *, timeout=None):
+    def click(self, window, control, *, button="left", timeout=None):
         """
         Clickea `control`.
 
@@ -172,9 +172,26 @@ class PywinautoWindowAdapter:
         cualquier proceso de esa máquina, Bot incluido (issue #13). Invoke no
         toca el mouse. Sólo cae a simularlo si el control no expone ese patrón
         (no todos los controles lo soportan, ej. un campo de texto).
+
+        `button` distinto de `"left"` (issue #25) no tiene patrón de UIA
+        equivalente a Invoke -- un menú contextual es un evento de mouse, no
+        una acción del control -- así que sale directo por `click_input`, con
+        la misma exposición a `SetCursorPos` que Invoke existe para evitar en
+        el caso de siempre. No hay forma de rodearlo: documentado a propósito,
+        no un descuido.
         """
         ventana = self._resolver(window)
         objetivo = ventana.child_window(**_criterios(control))
+
+        if button != "left":
+            try:
+                objetivo.click_input(button=button)
+            except Exception as exc:
+                raise PortError(
+                    f"no se pudo hacer {button} click en {control!r}: "
+                    f"{self._detalle(ventana, control, exc)}"
+                ) from exc
+            return
 
         invocar = getattr(objetivo, "invoke", None)
         if callable(invocar):
@@ -206,6 +223,50 @@ class PywinautoWindowAdapter:
             raise PortError(
                 f"no se pudo escribir en {control!r}: {self._detalle(ventana, control, exc)}"
             ) from exc
+
+    # 0/1/2 es lo que UI Automation define para `TogglePattern.ToggleState`
+    # (`ToggleState_Off`/`On`/`Indeterminate`), y lo que `get_toggle_state()`
+    # de pywinauto devuelve tal cual (issue #25).
+    _ESTADOS_TOGGLE = {0: "off", 1: "on", 2: "indeterminate"}
+
+    def read_state(self, window, control, *, timeout=None):
+        """
+        `"on"`/`"off"`/`"indeterminate"` de un control con estado, `None` si
+        no tiene (issue #25).
+
+        Un checkbox expone `TogglePattern` (`get_toggle_state()` en el
+        wrapper de pywinauto); un radio button no tiene toggle -- expone
+        `is_selected()` en cambio. Ninguno de los dos existe en un control
+        sin estado (un botón, una etiqueta), y ahí no hay nada raro que
+        reportar: se devuelve `None`, no `PortError`.
+        """
+        ventana = self._resolver(window)
+        try:
+            objetivo = ventana.child_window(**_criterios(control))
+        except Exception as exc:
+            raise PortError(
+                f"no se pudo leer el estado de {control!r}: {self._detalle(ventana, control, exc)}"
+            ) from exc
+
+        obtener_toggle = getattr(objetivo, "get_toggle_state", None)
+        if callable(obtener_toggle):
+            try:
+                return self._ESTADOS_TOGGLE.get(obtener_toggle())
+            except Exception as exc:
+                raise PortError(
+                    f"no se pudo leer el estado de {control!r}: {type(exc).__name__}: {exc}"
+                ) from exc
+
+        es_seleccionado = getattr(objetivo, "is_selected", None)
+        if callable(es_seleccionado):
+            try:
+                return "on" if es_seleccionado() else "off"
+            except Exception as exc:
+                raise PortError(
+                    f"no se pudo leer el estado de {control!r}: {type(exc).__name__}: {exc}"
+                ) from exc
+
+        return None
 
     def read_text(self, window, control=None, *, timeout=None):
         """
