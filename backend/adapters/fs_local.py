@@ -65,13 +65,28 @@ class LocalFsAdapter:
         una letra de unidad de Windows (`C:\\...`), que no es un alias que
         nadie haya declarado y tiene que seguir resolviendo como ruta
         absoluta de siempre.
+
+        Un alias mal escrito (`origne:pieza.stl`) levanta `PortError` en vez
+        de tratarse en silencio como una ruta relativa a la raíz por
+        defecto: sin esto, un typo escribe donde no debía sin que nada avise
+        —en Linux crea el archivo `origne:pieza.stl` adentro del workspace;
+        sólo en Windows falla, y por el SO, no por el port— (issue #23,
+        verificado en QA sobre v0.3.1-beta.3). Se distingue de una letra de
+        unidad por longitud: ninguna es de una sola letra, y una ruta que de
+        casualidad tenga un ":" en medio de un segmento (no al principio) ni
+        siquiera llega a candidata, porque ya trae una barra antes.
         """
-        if ":" in crudo:
-            posible, resto = crudo.split(":", 1)
-            posible = posible.strip()
-            if posible in self.roots:
-                return posible, resto.lstrip("\\/")
-        return None, crudo
+        if ":" not in crudo:
+            return None, crudo
+        posible, resto = crudo.split(":", 1)
+        posible = posible.strip()
+        if posible in self.roots:
+            return posible, resto.lstrip("\\/")
+        if not posible or len(posible) == 1 or "/" in posible or "\\" in posible:
+            return None, crudo
+        alias_declarados = [a for a in self.roots if a]
+        detalle = ", ".join(alias_declarados) if alias_declarados else "ninguno (sólo la raíz por defecto)"
+        raise PortError(f"raíz desconocida: '{posible}'. Alias declarados: {detalle}")
 
     def _p(self, path: str) -> Path:
         crudo = str(path or "").strip()

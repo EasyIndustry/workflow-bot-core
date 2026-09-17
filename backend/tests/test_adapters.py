@@ -229,6 +229,25 @@ def test_fs_dos_puntos_sin_alias_declarado_no_se_interpreta_como_alias(tmp_path)
     assert fs._alias_y_resto("casa:pieza.stl") == ("casa", "pieza.stl")
 
 
+def test_fs_un_alias_con_typo_es_error_y_no_una_escritura_silenciosa(tmp_path):
+    """
+    QA sobre v0.3.1-beta.3: `origne:pieza.stl` (typo de `origen`) no daba
+    error -- se trataba como una ruta relativa a la raíz por defecto. En
+    Linux eso escribe un archivo llamado literalmente "origne:pieza.stl"
+    adentro del workspace, sin ningún aviso; sólo en Windows fallaba, y por
+    el SO (":" no es válido en un nombre de archivo), no por el port.
+    """
+    casa = tmp_path / "workspace"
+    origen = tmp_path / "casos"
+    casa.mkdir()
+    origen.mkdir()
+    fs = LocalFsAdapter(roots={"casa": casa, "origen": origen})
+
+    with pytest.raises(PortError, match="raíz desconocida: 'origne'"):
+        fs.write_text("origne:pieza.stl", "x")
+    assert not (casa / "origne:pieza.stl").exists()
+
+
 def test_fs_ruta_absoluta_bajo_cualquier_raiz_declarada_entra(tmp_path):
     """Una ruta absoluta no necesita el alias si cae bajo alguna de las raíces."""
     casa = tmp_path / "workspace"

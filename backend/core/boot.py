@@ -351,15 +351,22 @@ def _texto_original_de_raiz(crudo: dict, alias: str) -> str | None:
     """
     El texto tal como se escribió para una raíz, antes de resolverla contra
     la raíz de la instalación — lo que necesita `_pista_unc_sin_share` para
-    reconocer un UNC sin share. Sin alias (`""`), es `fs_root` singular;
-    con alias, hay que volver a partir `fs_roots` para encontrar el suyo.
+    reconocer un UNC sin share.
+
+    Se busca primero en `fs_roots` —que también puede traer un alias vacío
+    (`=ruta`), la misma raíz por defecto de un `fs_roots` con varias— y sólo
+    si no hay `fs_roots` declarado se cae a `fs_root` singular; buscar en el
+    orden inverso perdía la pista cuando la raíz sin alias venía de
+    `fs_roots` y no de `fs_root`.
     """
+    if _texto(crudo.get("fs_roots")):
+        for par in _texto(crudo.get("fs_roots")).split(","):
+            clave, sep, ruta = par.strip().partition("=")
+            if sep and clave.strip() == alias:
+                return ruta.strip()
+        return None
     if not alias:
         return crudo.get("fs_root")
-    for par in _texto(crudo.get("fs_roots")).split(","):
-        clave, _, ruta = par.strip().partition("=")
-        if clave.strip() == alias:
-            return ruta.strip()
     return None
 
 
@@ -553,23 +560,34 @@ def _fs_roots(valor, raiz: Path) -> dict[str, str] | None:
     """
     `alias=ruta, alias2=ruta2` — issue #23. Cada ruta se resuelve igual que
     `fs_root`/`plugins_dir`: relativa contra la raíz de la instalación, no
-    contra el cwd. Un par sin `=` o sin alias se descarta en silencio acá —no
-    hay un lugar mejor para señalarlo que `validar()`/`fatal()`, que ya
-    reportan cualquier raíz que no exista—, así que uno mal escrito termina
-    viéndose como una raíz faltante y no como algo ignorado sin dejar rastro.
+    contra el cwd.
+
+    Un alias vacío (`=ruta`) es válido: es la misma raíz sin nombre que usa
+    `fs_roots_efectivos` para representar un `fs_root` singular, y es lo que
+    escribe `render()` para la raíz por defecto de un `fs_roots` con varias.
+    Sin aceptarlo acá, ese archivo se releía como si a esa raíz nunca la
+    hubiera declarado nadie —un viaje de ida y vuelta que pierde la raíz por
+    defecto, en silencio, reportado en QA sobre v0.3.1-beta.3.
+
+    Un par sin `=` sí se descarta en silencio —no hay un lugar mejor para
+    señalarlo que `validar()`/`fatal()`, que ya reportan cualquier raíz que
+    no exista—, así que uno mal escrito termina viéndose como una raíz
+    faltante y no como algo ignorado sin dejar rastro.
     """
     texto = _texto(valor)
     if not texto:
         return None
     resultado: dict[str, str] = {}
     for par in texto.split(","):
-        alias, sep, ruta = par.strip().partition("=")
-        alias = alias.strip()
-        if not sep or not alias:
+        par = par.strip()
+        if not par:
+            continue
+        alias, sep, ruta = par.partition("=")
+        if not sep:
             continue
         destino = _texto_ruta(ruta.strip(), raiz)
         if destino is not None:
-            resultado[alias] = destino
+            resultado[alias.strip()] = destino
     return resultado or None
 
 
