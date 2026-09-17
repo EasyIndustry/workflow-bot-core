@@ -272,6 +272,72 @@ def test_fs_una_sola_raiz_via_roots_se_comporta_como_root(tmp_path):
         fs.read_text("/etc/passwd")
 
 
+# ── denied: subárboles que nunca se alcanzan (issue #26) ─────────────────
+
+
+def test_fs_denied_gana_sobre_una_raiz_que_lo_contiene(tmp_path):
+    """
+    El caso del issue: `fs_root=D:\\` con la instalación adentro. La raíz es
+    todo el disco (acá, `tmp_path`), pero la carpeta de la instalación queda
+    afuera del alcance de un flujo.
+    """
+    instalacion = tmp_path / "User" / "Bot"
+    data = instalacion / "data"
+    data.mkdir(parents=True)
+    (data / "bot.db").write_text("secreto", encoding="utf-8")
+    (tmp_path / "afuera.txt").write_text("ok", encoding="utf-8")
+
+    fs = LocalFsAdapter(root=tmp_path, denied=[data])
+
+    assert fs.read_text("afuera.txt") == "ok"
+    with pytest.raises(PortError, match="fuera del alcance de un flujo"):
+        fs.read_text(str(data / "bot.db"))
+
+
+def test_fs_denied_no_se_confunde_con_fuera_del_arbol():
+    """El mensaje se distingue a propósito: agregar una raíz no arregla esto."""
+    fs = LocalFsAdapter(root="/permitido", denied=["/permitido/data"])
+    try:
+        fs._p("/permitido/data/bot.db")
+        raise AssertionError("debió rechazar la ruta negada")
+    except PortError as exc:
+        assert "fuera del alcance de un flujo" in str(exc)
+        assert "fuera del árbol permitido" not in str(exc)
+
+
+def test_fs_denied_gana_con_cualquier_alias(tmp_path):
+    """Ninguna raíz declarada, tenga alias o no, puede alcanzar lo negado."""
+    plugins = tmp_path / "plugins"
+    origen = tmp_path / "casos"
+    plugins.mkdir()
+    origen.mkdir()
+    fs = LocalFsAdapter(roots={"casa": tmp_path, "origen": origen}, denied=[plugins])
+
+    with pytest.raises(PortError, match="fuera del alcance de un flujo"):
+        fs.read_text(str(plugins / "x.py"))          # absoluta, sin alias
+    with pytest.raises(PortError, match="fuera del alcance de un flujo"):
+        fs.read_text("casa:plugins/x.py")             # relativa, con alias
+
+
+def test_fs_denied_gana_incluso_sin_ninguna_raiz_declarada(tmp_path):
+    """`fs_root` vacío es "todo el disco" -- lo negado sigue sin alcanzarse."""
+    secreta = tmp_path / "secreta"
+    secreta.mkdir()
+    fs = LocalFsAdapter(denied=[secreta])
+
+    with pytest.raises(PortError, match="fuera del alcance de un flujo"):
+        fs.read_text(str(secreta / "x"))
+
+
+def test_sin_denied_no_cambia_nada(tmp_path):
+    """Sin declarar nada negado, el comportamiento es exactamente el de siempre."""
+    permitido = tmp_path / "permitido"
+    permitido.mkdir()
+    fs = LocalFsAdapter(root=permitido)
+    fs.write_text("x.txt", "ok")
+    assert (permitido / "x.txt").read_text() == "ok"
+
+
 def test_fs_renombrar_no_acepta_separadores(tmp_path):
     """Un separador acá sería un `move` encubierto, y con eso una fuga del árbol."""
     (tmp_path / "a.txt").write_text("x")

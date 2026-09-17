@@ -860,11 +860,18 @@ def _default_adapters(boot: bootstrap.BootConfig) -> dict:
     Se pasa `fs_roots_efectivos` y no los dos campos crudos: es la propiedad
     de `BootConfig` que ya resolvió la precedencia entre `fs_root` singular y
     `fs_roots` (issue #23), así que acá no hace falta repetirla.
+
+    `fs_denied` (issue #26) se arma acá siempre, no es algo que `boot.env`
+    declare: es lo que le permite a una instalación usar una raíz que la
+    contenga entera (`fs_root=D:\\` con la instalación en `D:\\User\\Bot`) sin
+    exponer su propia carpeta. Una protección que se puede olvidar de
+    configurar no protege.
     """
     from backend.adapters import build_default_adapters
 
     return build_default_adapters(
         fs_roots=boot.fs_roots_efectivos or None,
+        fs_denied=_fs_denied(boot),
         http_timeout=boot.http_timeout,
         # `is not None`: la allowlist vacía es "ningún ejecutable", y colapsarla
         # a `None` acá desharía, en el último tramo, lo que declaró el arranque.
@@ -872,6 +879,20 @@ def _default_adapters(boot: bootstrap.BootConfig) -> dict:
             list(boot.process_allowlist) if boot.process_allowlist is not None else None
         ),
     )
+
+
+def _fs_denied(boot: bootstrap.BootConfig) -> list[str]:
+    """
+    Lo que un flujo con el port `fs` nunca alcanza, sin importar qué raíz
+    declare (issue #26): la base y la llave (`data_dir`), el código que se
+    carga (`plugins_dir`, si está declarado) y `boot.env`, que declara los
+    límites mismos -un flujo que lo alcanzara podría reescribirlos y
+    reiniciar la instalación sin ellos.
+    """
+    denegadas = [str(boot.data_dir), str(boot.root / bootstrap.ARCHIVO)]
+    if boot.plugins_dir is not None:
+        denegadas.append(str(boot.plugins_dir))
+    return denegadas
 
 
 def _default_crypto(data_dir: Path) -> CryptoPort:

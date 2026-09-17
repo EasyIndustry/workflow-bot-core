@@ -248,6 +248,37 @@ def test_fs_roots_del_boot_llegan_al_adapter_por_defecto(tmp_path):
         inst.close()
 
 
+def test_fs_root_que_contiene_la_instalacion_no_expone_su_carpeta(tmp_path):
+    """
+    Issue #26: el caso que motivó el fix. `fs_root` es todo el disco -acá,
+    `tmp_path`- con la instalación adentro; el flujo llega a todo menos a su
+    propia carpeta (`data/`, `plugins/`, `boot.env`), sin que nadie tenga que
+    declarar esa protección aparte.
+    """
+    from backend.adapters.storage_sqlite import IN_MEMORY, SqliteStorageAdapter
+    from backend.core import boot as bootstrap
+    from backend.core.ports import PortError
+
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    (tmp_path / "otros-archivos").mkdir()
+    (tmp_path / "otros-archivos" / "trabajo.txt").write_text("ok", encoding="utf-8")
+
+    cfg = bootstrap.BootConfig(root=tmp_path, fs_root=str(tmp_path), plugins_dir=plugins_dir)
+    inst = Instance(tmp_path, storage=SqliteStorageAdapter(IN_MEMORY), boot=cfg)
+    try:
+        fs = inst.adapters["fs"]
+        assert fs.read_text("otros-archivos/trabajo.txt") == "ok"
+        with pytest.raises(PortError, match="fuera del alcance de un flujo"):
+            fs.read_text("plugins/algo.py")
+        with pytest.raises(PortError, match="fuera del alcance de un flujo"):
+            fs.read_text("data/bot.db")
+        with pytest.raises(PortError, match="fuera del alcance de un flujo"):
+            fs.read_text("boot.env")
+    finally:
+        inst.close()
+
+
 def test_la_instancia_arma_registro_ports_y_stores(instance):
     """
     Una instalación sin ningún plugin instalado es válida y funcional: quedan

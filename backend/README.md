@@ -242,8 +242,19 @@ vez, por ejemplo—, `fs_roots` declara varias con alias
 la raíz por defecto, y el resto se alcanzan con `alias:resto`
 (`origen:MODELOS/pieza.stl`) o con la ruta absoluta si cae bajo alguna de las
 declaradas. Gana sobre `fs_root` singular si los dos están presentes; cada
-raíz se valida y se solapa con `plugins_dir` igual que `fs_root` —la regla
-vale para todas, no sólo la primera.
+raíz se valida igual que `fs_root` —la regla vale para todas, no sólo la
+primera.
+
+**Una raíz puede contener la instalación entera** (`fs_root=D:\` con la
+instalación en `D:\User\Bot`), y eso no expone `data/`, `plugins/` ni
+`boot.env`: `LocalFsAdapter` los niega siempre, sin importar qué raíz se
+declare ni con qué alias se llegue (issue #26). Antes, la única forma de
+proteger esa carpeta era prohibir toda raíz que la contuviera —`validar()`
+lo trataba como fatal—, así que el acotamiento era todo o nada: o la
+instalación vivía en un rincón aparte, o alguien terminaba vaciando `fs_root`
+—"todo el disco"— para poder trabajar. La lista de negadas la arma
+`_default_adapters` sola, de lo que el núcleo ya sabe de sí mismo: no es una
+clave de `boot.env` que alguien tenga que acordarse de poner.
 
 El archivo se lee respetando el BOM que traiga —UTF-8, UTF-16 o UTF-32—, y una
 codificación que no se pueda adivinar se lee igual en vez de tumbar el arranque.

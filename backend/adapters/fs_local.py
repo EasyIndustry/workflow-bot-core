@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
-from typing import Iterator
+from typing import Iterable, Iterator
 
 from backend.core.ports import FileInfo, PortError
 
@@ -37,6 +37,17 @@ class LocalFsAdapter:
     se alcanzan con `alias:resto` (`origen:MODELOS/pieza.stl`). `root` sigue
     siendo el atajo para el caso de una sola raíz —de hecho, es exactamente
     `roots={"": root}`— y los dos son mutuamente excluyentes.
+
+    `denied` (issue #26) son subárboles que nunca se alcanzan, ganen a lo que
+    ganen: ni una raíz que los contenga, ni un alias. Es lo que permite que
+    una raíz sea `D:\\` entero sin exponer la carpeta de la propia instalación
+    —su base, sus secretos, los plugins que el núcleo carga, y `boot.env`,
+    que declara los límites mismos—: sin esto, la única forma de proteger esa
+    carpeta era prohibir toda raíz que la contuviera, y el acotamiento se
+    volvía todo o nada. `quien arma la instalación` (`build_default_adapters`)
+    la arma sola a partir de lo que ya sabe de sí misma; no es algo que un
+    plugin declare ni que dependa de una clave de `boot.env` que alguien se
+    pueda olvidar de poner.
     """
 
     def __init__(
@@ -44,6 +55,7 @@ class LocalFsAdapter:
         root: str | Path | None = None,
         *,
         roots: dict[str, str | Path] | None = None,
+        denied: Iterable[str | Path] | None = None,
     ) -> None:
         if roots:
             self.roots: dict[str, Path] = {
@@ -56,6 +68,7 @@ class LocalFsAdapter:
         # Compatibilidad: código que ya leía `.root` (un adapter con una sola
         # raíz, con o sin alias) sigue viendo la de por defecto.
         self.root = next(iter(self.roots.values()), None)
+        self.denied: list[Path] = [Path(d).resolve() for d in (denied or ())]
 
     # ── Resolución de rutas ─────────────────────────────────────────────
 
@@ -93,7 +106,9 @@ class LocalFsAdapter:
         if not crudo:
             raise PortError("ruta vacía")
         if not self.roots:
-            return Path(crudo).expanduser()
+            candidata = Path(crudo).expanduser()
+            self._chequear_denegada(candidata.resolve(), crudo)
+            return candidata
 
         alias, resto = self._alias_y_resto(crudo)
         resuelta = Path(resto).expanduser()
@@ -103,6 +118,7 @@ class LocalFsAdapter:
             absoluta = (base / resuelta).resolve() if not resuelta.is_absolute() else resuelta.resolve()
             if not _dentro(absoluta, base):
                 raise PortError(f"ruta fuera del árbol permitido de '{alias}': {crudo}")
+            self._chequear_denegada(absoluta, crudo)
             return absoluta
 
         if resuelta.is_absolute():
@@ -110,6 +126,7 @@ class LocalFsAdapter:
             if not any(_dentro(absoluta, base) for base in self.roots.values()):
                 nombres = ", ".join(str(b) for b in self.roots.values())
                 raise PortError(f"ruta fuera del árbol permitido ({nombres}): {crudo}")
+            self._chequear_denegada(absoluta, crudo)
             return absoluta
 
         # Relativa, sin alias: resuelve contra la raíz por defecto — la
@@ -121,7 +138,19 @@ class LocalFsAdapter:
         absoluta = (base_default / resuelta).resolve()
         if not _dentro(absoluta, base_default):
             raise PortError(f"ruta fuera del árbol permitido: {crudo}")
+        self._chequear_denegada(absoluta, crudo)
         return absoluta
+
+    def _chequear_denegada(self, absoluta: Path, crudo: str) -> None:
+        """
+        Issue #26: gana sobre cualquier raíz, sin importar alias ni orden.
+        El mensaje se distingue a propósito de "fuera del árbol permitido":
+        no es que falte una raíz que lo cubra, es que esa carpeta no se da
+        nunca -- agregar una raíz no lo arregla, y el mensaje tiene que
+        decirlo para no mandar a buscar por el lado que no es.
+        """
+        if any(_dentro(absoluta, negada) for negada in self.denied):
+            raise PortError(f"ruta de la instalación, fuera del alcance de un flujo: {crudo}")
 
     # ── Consulta ────────────────────────────────────────────────────────
 

@@ -246,23 +246,14 @@ def test_una_carpeta_que_es_un_archivo_no_pasa(tmp_path):
     assert any("no es una carpeta" in p for p in boot.validar(c))
 
 
-def test_plugins_dir_igual_a_fs_root_se_reporta(tmp_path):
+def test_plugins_dir_dentro_de_fs_root_ya_no_se_reporta(tmp_path):
     """
-    Si un flujo con el port `fs` pudiera escribir donde vive el código que se
-    carga, un flujo comprometido dejaría un plugin listo para el próximo
-    arranque — el mismo agujero que la separación de carpetas existe para
-    cerrar.
+    Issue #26: el solapamiento entre `plugins_dir` y una raíz de `fs` dejó de
+    ser un problema de arranque -- `LocalFsAdapter` niega `plugins_dir` sin
+    importar qué raíz se declare, así que una raíz que lo contenga (`D:\\`
+    entero, por ejemplo) es legítima. La protección real está en
+    `test_adapters.py`, contra el adapter, no acá.
     """
-    compartida = tmp_path / "compartida"
-    compartida.mkdir()
-    c = boot.load(tmp_path, entorno={
-        f"{boot.PREFIJO}plugins_dir": str(compartida),
-        f"{boot.PREFIJO}fs_root": str(compartida),
-    })
-    assert any("se solapan" in p for p in boot.validar(c))
-
-
-def test_plugins_dir_anidado_dentro_de_fs_root_se_reporta(tmp_path):
     fs_root = tmp_path / "workspace"
     plugins_dir = fs_root / "plugins"
     plugins_dir.mkdir(parents=True)
@@ -270,23 +261,7 @@ def test_plugins_dir_anidado_dentro_de_fs_root_se_reporta(tmp_path):
         f"{boot.PREFIJO}plugins_dir": str(plugins_dir),
         f"{boot.PREFIJO}fs_root": str(fs_root),
     })
-    assert any("se solapan" in p for p in boot.validar(c))
-
-
-def test_fs_root_anidado_dentro_de_plugins_dir_se_reporta(tmp_path):
-    """
-    Importa igual en la otra dirección: si `fs_root` quedara dentro de
-    `plugins_dir`, un flujo confinado a `fs_root` alcanzaría el resto de
-    `plugins_dir` por ser su padre.
-    """
-    plugins_dir = tmp_path / "plugins"
-    fs_root = plugins_dir / "workspace"
-    fs_root.mkdir(parents=True)
-    c = boot.load(tmp_path, entorno={
-        f"{boot.PREFIJO}plugins_dir": str(plugins_dir),
-        f"{boot.PREFIJO}fs_root": str(fs_root),
-    })
-    assert any("se solapan" in p for p in boot.validar(c))
+    assert boot.validar(c) == []
 
 
 def test_plugins_dir_y_fs_root_hermanos_no_reportan_nada(tmp_path):
@@ -300,13 +275,6 @@ def test_plugins_dir_y_fs_root_hermanos_no_reportan_nada(tmp_path):
         f"{boot.PREFIJO}fs_root": str(fs_root),
     })
     assert boot.validar(c) == []
-
-
-def test_sin_uno_de_los_dos_no_hay_nada_que_comparar(tmp_path):
-    plugins_dir = tmp_path / "plugins"
-    plugins_dir.mkdir()
-    c = boot.load(tmp_path, entorno={f"{boot.PREFIJO}plugins_dir": str(plugins_dir)})
-    assert not any("se solapan" in p for p in boot.validar(c))
 
 
 def test_un_ejecutable_de_la_allowlist_que_no_esta_se_reporta(tmp_path):
@@ -349,14 +317,15 @@ def test_plugins_dir_inexistente_es_fatal(tmp_path):
     assert any("plugins_dir" in p for p in boot.fatal(c))
 
 
-def test_solapamiento_es_fatal(tmp_path):
+def test_solapamiento_ya_no_es_fatal(tmp_path):
+    """Issue #26: ver `test_plugins_dir_dentro_de_fs_root_ya_no_se_reporta`."""
     compartida = tmp_path / "compartida"
     compartida.mkdir()
     c = boot.load(tmp_path, entorno={
         f"{boot.PREFIJO}plugins_dir": str(compartida),
         f"{boot.PREFIJO}fs_root": str(compartida),
     })
-    assert any("se solapan" in p for p in boot.fatal(c))
+    assert boot.fatal(c) == []
 
 
 def test_allowlist_http_timeout_y_default_actor_no_son_fatales(tmp_path):
@@ -444,7 +413,8 @@ def test_una_raiz_de_fs_roots_inexistente_es_fatal(tmp_path):
     assert not any("fs_roots[casa]" in p for p in problemas)
 
 
-def test_una_raiz_de_fs_roots_solapada_con_plugins_dir_es_fatal(tmp_path):
+def test_una_raiz_de_fs_roots_solapada_con_plugins_dir_ya_no_es_fatal(tmp_path):
+    """Issue #26: idem, para el caso de varias raíces."""
     compartida = tmp_path / "compartida"
     otra = tmp_path / "otra"
     compartida.mkdir()
@@ -453,9 +423,7 @@ def test_una_raiz_de_fs_roots_solapada_con_plugins_dir_es_fatal(tmp_path):
         f"{boot.PREFIJO}plugins_dir": str(compartida),
         f"{boot.PREFIJO}fs_roots": f"casa={otra}, origen={compartida}",
     })
-    problemas = boot.fatal(c)
-    assert any("fs_roots[origen]" in p and "se solapan" in p for p in problemas)
-    assert not any("fs_roots[casa]" in p and "se solapan" in p for p in problemas)
+    assert boot.fatal(c) == []
 
 
 def test_fs_roots_unc_sin_share_tambien_suma_la_pista(tmp_path):

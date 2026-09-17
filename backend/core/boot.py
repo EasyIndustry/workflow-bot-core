@@ -247,11 +247,19 @@ def _diagnosticar(config: BootConfig) -> list[tuple[str, bool]]:
     (arranca, pero con menos de lo declarado).
 
     Fatal es lo que deja inutilizable un límite de seguridad de la
-    instalación: `fs_root`/`plugins_dir` que no resuelven a una carpeta real,
-    y el solapamiento entre ambos. Todo lo demás —un ejecutable ausente en el
-    `process_allowlist`, un `http_timeout` inválido, un `default_actor` mal
-    formado— es una degradación: se ignora el valor y se sigue con el
-    default, y eso ya lo dice el propio `validar()` de siempre.
+    instalación: `fs_root`/`plugins_dir` que no resuelven a una carpeta real.
+    Todo lo demás —un ejecutable ausente en el `process_allowlist`, un
+    `http_timeout` inválido, un `default_actor` mal formado— es una
+    degradación: se ignora el valor y se sigue con el default, y eso ya lo
+    dice el propio `validar()` de siempre.
+
+    El solapamiento entre `plugins_dir` y una raíz de `fs` YA NO se reporta
+    acá (issue #26): antes era fatal —una instalación con `fs_root=D:\\` no
+    podía arrancar si `plugins_dir` quedaba adentro, que es casi siempre—,
+    pero ahora `LocalFsAdapter` niega `plugins_dir` (y `data_dir` y
+    `boot.env`) sin importar qué raíz se declare, así que el solapamiento deja
+    de ser un problema de configuración: queda cubierto por construcción, en
+    el adapter, no en el chequeo de arranque.
     """
     problemas: list[tuple[str, bool]] = []
     crudo = config.crudos
@@ -271,8 +279,10 @@ def _diagnosticar(config: BootConfig) -> list[tuple[str, bool]]:
             problemas.append((f"plugins_dir: {ruta} no es una carpeta", True))
 
     # Cada raíz declarada (issue #23: puede ser más de una) tiene que resolver
-    # a una carpeta real, y ninguna puede solaparse con `plugins_dir` — la
-    # regla que sostiene la separación vale para cada una, no sólo la primera.
+    # a una carpeta real. Ya no se chequea que no se solape con `plugins_dir`
+    # (issue #26): `LocalFsAdapter` lo niega sin importar la raíz, así que una
+    # raíz que contenga la instalación entera —`fs_root=D:\`, por ejemplo— es
+    # legítima, y el solapamiento deja de ser motivo para no arrancar.
     for alias, cruda in config.fs_roots_efectivos.items():
         etiqueta = "fs_root" if not alias else f"fs_roots[{alias}]"
         ruta = Path(cruda)
@@ -281,19 +291,8 @@ def _diagnosticar(config: BootConfig) -> list[tuple[str, bool]]:
             if (pista := _pista_unc_sin_share(_texto_original_de_raiz(crudo, alias))):
                 mensaje = f"{mensaje} — {pista}"
             problemas.append((mensaje, True))
-            continue
-        if not ruta.is_dir():
+        elif not ruta.is_dir():
             problemas.append((f"{etiqueta}: {ruta} no es una carpeta", True))
-            continue
-
-        if config.plugins_dir is not None:
-            plugins, fs = Path(config.plugins_dir).resolve(), ruta.resolve()
-            if plugins == fs or plugins in fs.parents or fs in plugins.parents:
-                problemas.append((
-                    f"plugins_dir y {etiqueta} se solapan: un flujo con el port fs "
-                    "podría escribir o leer donde vive el código que se carga",
-                    True,
-                ))
 
     for nombre in config.process_allowlist or ():
         if shutil.which(nombre) is None:
