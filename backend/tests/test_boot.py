@@ -336,6 +336,66 @@ def test_una_base_en_memoria_no_pide_carpeta_escribible(tmp_path):
     assert boot.validar(c) == []
 
 
+# ── fatal(): el subconjunto que no deja arrancar (issue #22) ────────────
+
+
+def test_fs_root_inexistente_es_fatal(tmp_path):
+    c = boot.load(tmp_path, entorno={f"{boot.PREFIJO}fs_root": "/no/existe"})
+    assert any("fs_root" in p for p in boot.fatal(c))
+
+
+def test_plugins_dir_inexistente_es_fatal(tmp_path):
+    c = boot.load(tmp_path, entorno={f"{boot.PREFIJO}plugins_dir": "/no/existe"})
+    assert any("plugins_dir" in p for p in boot.fatal(c))
+
+
+def test_solapamiento_es_fatal(tmp_path):
+    compartida = tmp_path / "compartida"
+    compartida.mkdir()
+    c = boot.load(tmp_path, entorno={
+        f"{boot.PREFIJO}plugins_dir": str(compartida),
+        f"{boot.PREFIJO}fs_root": str(compartida),
+    })
+    assert any("se solapan" in p for p in boot.fatal(c))
+
+
+def test_allowlist_http_timeout_y_default_actor_no_son_fatales(tmp_path):
+    """
+    Son degradaciones -el valor se ignora y sigue con el default-, no motivo
+    para no arrancar. `validar()` los sigue reportando; `fatal()`, no.
+    """
+    c = boot.load(tmp_path, entorno={
+        f"{boot.PREFIJO}process_allowlist": "no-existe-este-programa",
+        f"{boot.PREFIJO}http_timeout": "treinta",
+        f"{boot.PREFIJO}default_actor": "con espacio",
+    })
+    assert len(boot.validar(c)) == 3
+    assert boot.fatal(c) == []
+
+
+def test_una_instalacion_sana_no_tiene_nada_fatal(tmp_path):
+    assert boot.fatal(boot.load(tmp_path, entorno={})) == []
+
+
+def test_unc_sin_share_suma_una_pista_al_mensaje(tmp_path):
+    """
+    Issue #22, punto 3: un host UNC sin share (`\\server-nuevo`) es una ruta
+    bien formada que nunca va a existir. "no existe" a secas manda a revisar
+    el flujo; el mensaje tiene que decir qué está mal en la configuración.
+    """
+    c = boot.load(tmp_path, entorno={f"{boot.PREFIJO}fs_root": r"\\server-nuevo"})
+    problemas = boot.fatal(c)
+    assert any("no existe" in p and "share" in p for p in problemas)
+
+
+def test_unc_con_share_no_suma_la_pista(tmp_path):
+    """Un UNC bien formado (con share) que no existe es sólo "no existe"."""
+    c = boot.load(tmp_path, entorno={f"{boot.PREFIJO}fs_root": r"\\server-nuevo\casos"})
+    problemas = boot.fatal(c)
+    assert any("no existe" in p for p in problemas)
+    assert not any("UNC" in p for p in problemas)
+
+
 # ── Codificación del archivo ────────────────────────────────────────────
 #
 # `boot.env` se edita a mano, y en Windows —el destino del instalador— las

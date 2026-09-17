@@ -127,6 +127,21 @@ def test_doctor_corre_sin_instalacion_previa(correr):
     assert "Adapters" in salida
 
 
+def test_fs_root_invalido_corta_con_un_mensaje_claro_y_no_un_traceback(correr, tmp_path, capsys):
+    """
+    Issue #22: `boot.env` es el único camino para cambiar `fs_root` en una
+    instalación existente, y editarlo mal antes tenía que arrancar y fallar
+    recién adentro de un run. Acá la CLI entera —cualquier subcomando, no sólo
+    `boot`— corta temprano con el problema explicado, no con una traza.
+    """
+    (tmp_path / "boot.env").write_text("fs_root=/no/existe/de/verdad\n", encoding="utf-8")
+    codigo = cli.main(["--root", str(tmp_path), "tools"])
+    salida = capsys.readouterr()
+    assert codigo == 2
+    assert "fs_root" in salida.err
+    assert "no existe" in salida.err
+
+
 def test_add_y_workflows(correr, tmp_path):
     archivo = tmp_path / "mi-flujo.mmd"
     archivo.write_text(

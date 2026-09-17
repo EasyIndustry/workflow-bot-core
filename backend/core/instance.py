@@ -67,6 +67,22 @@ class Instance:
         """
         self.root = Path(root)
         self.boot = boot if boot is not None else bootstrap.load(self.root)
+
+        # Issue #22: un `fs_root`/`plugins_dir` que no resuelve a una carpeta
+        # real deja inutilizable un límite de seguridad de la instalación.
+        # `bootstrap.validar()` ya lo detecta, pero antes sólo lo consultaban
+        # `doctor` y la CLI — nunca la construcción misma —, así que una
+        # instalación con `boot.env` editado a mano arrancaba a medias y en
+        # silencio, y el error aparecía recién adentro de un run, apuntando al
+        # flujo y no a la configuración. Acá se corta temprano y fuerte.
+        problemas = bootstrap.fatal(self.boot)
+        if problemas:
+            raise bootstrap.BootError(
+                "No se puede arrancar la instancia en "
+                f"{self.root} — configuración de arranque inválida:\n"
+                + "\n".join(f"- {p}" for p in problemas)
+            )
+
         self.data_dir = self.boot.data_dir
 
         self.db = storage if storage is not None else _default_storage(self.boot)

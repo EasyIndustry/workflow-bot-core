@@ -207,6 +207,15 @@ ignorarlas: `desconocidas()` para una **clave** que no existe, y `validar()`
 para un **valor** que no va a hacer lo que dice —una carpeta que no está, un
 timeout que no es un número—. Las dos las muestran `boot` y `doctor`.
 
+De los valores que `validar()` reporta, un subconjunto es fatal —`fatal()`—:
+un `fs_root`/`plugins_dir` que no resuelve a una carpeta real deja inutilizable
+un límite de seguridad de la instalación, así que `Instance.__init__` lo
+levanta como `BootError` en vez de arrancar a medias y fallar recién adentro de
+un run, con un error que apunta al flujo en lugar de a la configuración. El
+resto —un ejecutable ausente en `process_allowlist`, un `http_timeout`
+inválido— es una degradación: se ignora el valor, se sigue con el default, y
+sólo lo avisa `doctor`.
+
 Dos detalles de los límites, que no son cosméticos:
 
 - `process_allowlist` **ausente** es "cualquier ejecutable"; **presente y
