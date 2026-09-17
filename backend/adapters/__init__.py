@@ -53,6 +53,7 @@ def _build_window_adapter():
 def build_default_adapters(
     *,
     fs_root: str | None = None,
+    fs_roots: dict[str, str] | None = None,
     http_timeout: float | None = None,
     process_timeout: float | None = None,
     process_allowlist: list[str] | None = None,
@@ -61,16 +62,21 @@ def build_default_adapters(
     Los adapters que se le dan al registry, por nombre de port.
 
     Los parámetros acotan la superficie de riesgo de una instalación concreta:
-    `fs_root` encierra el filesystem en un subárbol y `process_allowlist` limita
-    qué ejecutables se pueden correr. Los dos son opcionales porque una
-    instalación legítima puede necesitar el disco entero, pero un entorno de
-    test o acotado debería usarlos.
+    `fs_root`/`fs_roots` encierra el filesystem en uno o varios subárboles y
+    `process_allowlist` limita qué ejecutables se pueden correr. Son
+    opcionales porque una instalación legítima puede necesitar el disco
+    entero, pero un entorno de test o acotado debería usarlos.
+
+    `fs_roots` (issue #23: varias raíces con alias) gana sobre `fs_root` si
+    los dos llegan — no debería pasar, `BootConfig.fs_roots_efectivos` ya
+    resuelve esa precedencia antes de llegar acá, pero conviene que esta
+    función sea igual de tolerante si alguien la llama directo.
     """
     return {
         ports.HTTP: UrllibHttpAdapter(
             **({"default_timeout": http_timeout} if http_timeout else {})
         ),
-        ports.FS: LocalFsAdapter(root=fs_root),
+        ports.FS: LocalFsAdapter(root=fs_root, roots=fs_roots),
         ports.PROCESS: SubprocessAdapter(
             **({"default_timeout": process_timeout} if process_timeout else {}),
             allowlist=process_allowlist,

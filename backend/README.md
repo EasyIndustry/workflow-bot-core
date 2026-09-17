@@ -226,6 +226,15 @@ Dos detalles de los límites, que no son cosméticos:
   límite de seguridad, y el mismo `boot.env` tiene que dar la misma caja
   siempre.
 
+Cuando una sola raíz no alcanza —un workspace local y un share de red a la
+vez, por ejemplo—, `fs_roots` declara varias con alias
+(`fs_roots = casa=C:\Bot\workspace, origen=\\servidor\share`): la primera es
+la raíz por defecto, y el resto se alcanzan con `alias:resto`
+(`origen:MODELOS/pieza.stl`) o con la ruta absoluta si cae bajo alguna de las
+declaradas. Gana sobre `fs_root` singular si los dos están presentes; cada
+raíz se valida y se solapa con `plugins_dir` igual que `fs_root` —la regla
+vale para todas, no sólo la primera.
+
 El archivo se lee respetando el BOM que traiga —UTF-8, UTF-16 o UTF-32—, y una
 codificación que no se pueda adivinar se lee igual en vez de tumbar el arranque.
 No es tolerancia gratuita: es un archivo que se edita a mano, y en Windows las
