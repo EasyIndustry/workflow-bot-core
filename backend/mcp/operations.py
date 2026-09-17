@@ -296,7 +296,14 @@ def run_flow(
     return resumen
 
 
-def save_flow(flow: str, name: str | None = None, root: str | None = None) -> dict:
+def save_flow(
+    flow: str,
+    name: str | None = None,
+    folder: str | None = None,
+    state: str | None = None,
+    description: str | None = None,
+    root: str | None = None,
+) -> dict:
     """
     Persiste un `.mmd` en la instalación, sin ejecutar nada.
 
@@ -305,12 +312,23 @@ def save_flow(flow: str, name: str | None = None, root: str | None = None) -> di
     bucle de autoría que `install_plugin` cubre para un plugin. A diferencia
     de `run_flow(..., save=True)`, no toca red, disco ni procesos del lado de
     sus tools, ni pide un actor con permisos: sólo escribe la fila en la base
-    de la instalación, tomando `folder`/`state`/`description` de la cabecera
-    `%%` del archivo si las tiene.
+    de la instalación.
+
+    `folder`/`state`/`description` son opcionales y pisan lo que traiga la
+    cabecera `%%` del archivo. Sin ninguno de los dos —ni parámetro ni
+    cabecera—, se conserva el valor que el flujo ya tenía guardado en vez de
+    resetearlo: volver a guardar un flujo existente sin repetir su cabecera
+    completa no le borra la carpeta ni el estado.
     """
     argv = ["add", flow, "--json"]
     if name:
         argv += ["--name", name]
+    if folder is not None:
+        argv += ["--folder", folder]
+    if state is not None:
+        argv += ["--state", state]
+    if description is not None:
+        argv += ["--description", description]
     return _cli(*argv, root=root)
 
 
