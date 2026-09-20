@@ -1058,3 +1058,134 @@ def test_describe_installation_muestra_dependencias_declaradas_y_si_faltan(insta
     assert {"spec": "pytest", "package": "pytest", "present": True} in conv["requires"]
     assert any(r["package"] == "no-existe-esta-lib" and not r["present"] for r in conv["requires"])
     assert "convertidor.no-existe-esta-lib" in foto["resumen"]
+
+
+# ── describe_extra_params (issue #27) ────────────────────────────────────
+
+
+def _plugin_con_conexiones(describe_extra_params=None):
+    """
+    Un plugin mínimo con un Resource "connections" y un tool
+    `conector.llamar` con `extra_params=True`, opcionalmente con un
+    describer -- el caso exacto del issue (`connections.llamar`).
+    """
+    from backend.core.contract import (
+        FunctionTool,
+        Param,
+        ParamType,
+        Plugin,
+        PluginManifest,
+        Resource,
+        ToolManifest,
+        ToolResult,
+    )
+
+    manifest = PluginManifest(
+        name="conector",
+        label="Conector",
+        resources=(Resource(name="connections", label="Conexiones"),),
+    )
+    tool = FunctionTool(
+        manifest=ToolManifest(
+            id="conector.llamar",
+            label="Llamar",
+            category="X",
+            params=(Param("connection", ParamType.STR, required=True, options_from="connections"),),
+            extra_params=True,
+        ),
+        fn=lambda ctx: ToolResult.ok(),
+        describe_extra_params=describe_extra_params,
+    )
+    return Plugin(manifest=manifest, tools=[tool])
+
+
+def test_describe_extra_params_usa_lo_que_el_nodo_ya_eligio(instance):
+    """
+    El caso del issue: elegida una conexión, el tool describe qué
+    `{placeholders}` tiene sentido ofrecer -- acá, los que trae guardados el
+    item de esa conexión.
+    """
+    def describir(node_params, leer_item):
+        from backend.core.contract import Param
+
+        item = leer_item("connections", node_params.get("connection", ""))
+        if item is None:
+            return ()
+        return tuple(Param(campo, doc="de la conexión") for campo in item.get("placeholders", []))
+
+    instance.registry._add_plugin("conector", "test", _plugin_con_conexiones(describir))
+    instance.write_resource_item(
+        "conector", "connections", "Buscar cliente", {"name": "Buscar cliente", "placeholders": ["id_externo", "pais"]}
+    )
+
+    extras = instance.describe_extra_params("conector.llamar", {"connection": "Buscar cliente"})
+
+    assert [p["name"] for p in extras] == ["id_externo", "pais"]
+
+
+def test_describe_extra_params_nunca_ve_un_secreto(instance):
+    """Issue #27, punto 3: el lector que recibe el describer usa items enmascarados."""
+    from backend.core.contract import Field, ParamType, Plugin, PluginManifest, Resource
+
+    visto = {}
+
+    def describir(node_params, leer_item):
+        nonlocal visto
+        visto = leer_item("connections", node_params.get("connection", ""))
+        return ()
+
+    manifest = PluginManifest(
+        name="conector",
+        label="Conector",
+        resources=(
+            Resource(
+                name="connections",
+                label="Conexiones",
+                fields=(Field("token", ParamType.STR, secret=True),),
+            ),
+        ),
+    )
+    plugin = _plugin_con_conexiones(describir)
+    instance.registry._add_plugin("conector", "test", Plugin(manifest=manifest, tools=plugin.tools))
+    instance.write_resource_item("conector", "connections", "c1", {"name": "c1", "token": "shhh"})
+
+    instance.describe_extra_params("conector.llamar", {"connection": "c1"})
+
+    assert visto["token"] is None  # nunca "shhh"
+
+
+def test_describe_extra_params_vacio_sin_describer(instance):
+    """La mayoría de los tools no lo necesita: sin describer, la lista es vacía, no un error."""
+    instance.registry._add_plugin("conector", "test", _plugin_con_conexiones(describe_extra_params=None))
+    assert instance.describe_extra_params("conector.llamar", {}) == []
+
+
+def test_describe_extra_params_vacio_si_extra_params_es_false(instance):
+    """Describir extras de un tool que los descarta no tendría a dónde ir."""
+    from backend.core.contract import FunctionTool, Param, Plugin, PluginManifest, ToolManifest, ToolResult
+
+    def describir(node_params, leer_item):
+        return (Param("x"),)
+
+    manifest = PluginManifest(name="p", label="P")
+    tool = FunctionTool(
+        manifest=ToolManifest(id="p.hacer", label="h", category="X", extra_params=False),
+        fn=lambda ctx: ToolResult.ok(),
+        describe_extra_params=describir,
+    )
+    instance.registry._add_plugin("p", "test", Plugin(manifest=manifest, tools=[tool]))
+
+    assert instance.describe_extra_params("p.hacer", {}) == []
+
+
+def test_describe_extra_params_de_un_tool_inexistente_es_vacio(instance):
+    assert instance.describe_extra_params("no.existe", {}) == []
+
+
+def test_describe_extra_params_traga_una_excepcion_del_describer(instance):
+    """Corre mientras se edita un flujo, no en un run: un describer roto no tumba la pantalla."""
+    def describir(node_params, leer_item):
+        raise RuntimeError("boom")
+
+    instance.registry._add_plugin("conector", "test", _plugin_con_conexiones(describir))
+    assert instance.describe_extra_params("conector.llamar", {"connection": "x"}) == []

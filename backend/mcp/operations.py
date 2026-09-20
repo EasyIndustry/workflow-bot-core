@@ -161,6 +161,24 @@ def list_resource_items(
     return _cli("resources", plugin, resource, "--json", root=root, plugins=plugins)
 
 
+def describe_extra_params(
+    tool: str, params: dict | None = None, plugins: dict | None = None, root: str | None = None
+) -> dict:
+    """
+    Los params extra que un tool puede ofrecer, dados los que el nodo ya
+    eligió (issue #27) — el caso de `connections.llamar`: elegida una Action,
+    los `{placeholders}` de su url/headers/payload son params concretos con
+    nombre, no algo que haya que adivinar abriendo la pantalla del plugin.
+
+    Vacío (no error) si el tool no describe una forma dinámica -la mayoría
+    no la necesita-, si no existe, o si no acepta params extra.
+    """
+    argv = ["extra-params", tool, "--json"]
+    if params:
+        argv += ["--params", json.dumps(params, ensure_ascii=False)]
+    return _cli(*argv, root=root, plugins=plugins)
+
+
 def list_ports(**_) -> dict:
     """
     Qué puede pedir un plugin en su manifest, y qué le da cada port.

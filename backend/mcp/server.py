@@ -119,6 +119,25 @@ TOOLS: list[types.Tool] = [
         ["plugin", "resource"],
     ),
     _tool(
+        "describe_extra_params",
+        "Los params extra que un tool puede ofrecer, dados los que el nodo ya "
+        "eligió: para un tool que acepta extra_params (ver el tool en "
+        "list_tools), qué otros params tienen sentido según, por ejemplo, la "
+        "conexión ya elegida. Vacío -no error- si el tool no describe una "
+        "forma dinámica; la mayoría no la necesita. No ejecuta nada.",
+        {
+            "tool": {"type": "string"},
+            "params": {
+                "type": "object",
+                "additionalProperties": True,
+                "description": "Los params que el nodo ya trae, tal como están hoy en el .mmd.",
+            },
+            "plugins": _PLUGINS,
+            "root": _ROOT,
+        },
+        ["tool"],
+    ),
+    _tool(
         "list_ports",
         "Qué ports puede declarar un plugin y qué ofrece cada uno. Un plugin "
         "nunca importa una librería: pide un port.",
@@ -389,6 +408,7 @@ HANDLERS: dict[str, Callable[..., dict]] = {
     "list_tools": operations.list_tools,
     "list_plugins": operations.list_plugins,
     "list_resource_items": operations.list_resource_items,
+    "describe_extra_params": operations.describe_extra_params,
     "list_ports": operations.list_ports,
     "check_flow": operations.check_flow,
     "dry_run_flow": operations.dry_run_flow,

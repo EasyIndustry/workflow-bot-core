@@ -139,6 +139,16 @@ class Param:
     # Nombres anteriores del parámetro, para renombrar sin romper flujos.
     aliases: tuple[str, ...] = ()
     doc: str = ""
+    # Nombre de un Resource del mismo plugin cuyos items son los valores
+    # típicos de este param -- "de qué colección lo llena un buscador en vez
+    # de un campo de texto pelado" (`connection` de un `Resource("connections")`,
+    # por ejemplo). A diferencia de `choices`, es puramente informativo: no se
+    # valida contra él acá, porque a diferencia de una lista cerrada un
+    # `{variable}` tiene que poder seguir resolviendo a cualquier valor del
+    # nodo. `registry` sí valida, al cargar el plugin, que el nombre exista
+    # entre los `Resource` que el plugin declara -- un typo acá no debería
+    # verse recién como un buscador vacío en la pantalla.
+    options_from: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -150,6 +160,7 @@ class Param:
             "config_key": self.config_key,
             "aliases": list(self.aliases),
             "doc": self.doc,
+            "options_from": self.options_from,
         }
 
     def read_from(self, node_params: dict) -> Any:
@@ -767,11 +778,36 @@ class Tool(Protocol):
 
     Los plugins exponen una lista de instancias de Tool vía su entry point. El
     núcleo nunca los importa por nombre.
+
+    `describe_extra_params` es opcional (issue #27): un tool con
+    `extra_params=True` puede, además, saber describir esos params según lo
+    que el nodo ya eligió -- para `connections.llamar`, elegida una Action,
+    los `{placeholders}` de su url/headers/payload son params concretos, no
+    texto libre que hay que adivinar. No es parte obligatoria del Protocol
+    (la mayoría de los tools no lo necesita); `registry`/`Instance` lo
+    detectan con `getattr(tool, "describe_extra_params", None)`, mismo
+    criterio que ya usan los adapters de ventana para un método optativo
+    (`invoke` en el adapter de Windows, issue #13).
+
+    La firma, si se implementa: `(node_params: dict, leer_item: ItemReader) ->
+    tuple[Param, ...]`. `leer_item` es de sólo lectura y sólo ve items **con
+    los campos `secret` tapados** -nunca los valores de una colección, sólo
+    sus claves y lo que no sea sensible (issue #27, punto 3)-; devolver
+    `Param`s ya declarados es lo que le permite a quien dibuje el flujo
+    tratarlos con el mismo campo que los declarados, con su `doc` y su
+    `required`.
     """
 
     manifest: ToolManifest
 
     def run(self, ctx: ToolContext) -> ToolResult: ...
+
+
+# `leer_item(coleccion, clave, key_field="name")` -- mismo shape que
+# `ToolContext.resource`, para que sea reconocible, pero de sólo lectura y sin
+# secretos: lo que `Instance.describe_extra_params` liga antes de llamar al
+# tool (issue #27).
+ItemReader = Callable[..., dict | None]
 
 
 @dataclass
@@ -780,10 +816,15 @@ class FunctionTool:
     Adaptador para escribir un tool como una función suelta.
 
         MOVER = FunctionTool(manifest=..., fn=lambda ctx: ToolResult.ok(...))
+
+    `describe_extra_params` es el mismo optativo de `Tool` (issue #27), acá
+    como campo en vez de método porque `FunctionTool` ya se escribe así: una
+    función suelta, no una clase.
     """
 
     manifest: ToolManifest
     fn: Callable[[ToolContext], ToolResult]
+    describe_extra_params: Callable[[dict, ItemReader], tuple[Param, ...]] | None = None
 
     def run(self, ctx: ToolContext) -> ToolResult:
         return self.fn(ctx)

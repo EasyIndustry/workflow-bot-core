@@ -144,6 +144,31 @@ plugin: settings, colecciones con su esquema, acciones y qué ports usa. No hay
 que mantener ninguna lista propia — ese fue el error de la versión anterior, con
 el catálogo escrito a mano en tres archivos distintos.
 
+Un `Param` puede declarar `options_from`: el nombre de un `Resource` del
+mismo plugin cuyos items son sus valores típicos (`Param("connection",
+options_from="connections")`, para un tool que opera sobre una conexión
+guardada). Es sólo un hint para quien dibuje el campo —un buscador contra
+`GET /resources/{plugin}/{resource}` en vez de un texto pelado—, no una
+restricción: a diferencia de `choices`, no se valida contra él al resolver
+params, porque un `{variable}` tiene que poder seguir resolviendo a cualquier
+valor. Un `options_from` que no nombra un `Resource` que el plugin declara
+se reporta al cargar, igual que un alias en conflicto: no impide que el tool
+ande, pero un typo no debería verse recién como un buscador vacío.
+
+Un tool con `extra_params=True` puede además describir esos extras según lo
+que el nodo ya eligió (issue #27): `FunctionTool.describe_extra_params`, un
+callable opcional `(params_del_nodo, leer_item) -> tuple[Param, ...]`.
+`connections.llamar` acepta `{variable}` de más porque son las de la Action
+elegida —`{id_externo}`, `{pais}`—; con esto, elegida la conexión, el tool le
+dice a quien edita el flujo exactamente cuáles son, en vez de que la única
+forma de saberlo sea abrir la pantalla del plugin y copiarlas a mano.
+`leer_item` (mismo shape que `ctx.resource`) sólo ve items con los campos
+`secret` tapados —nunca en claro, ni siquiera acá— y corre mientras se edita
+el flujo, no en un run: una excepción del lado del plugin vuelve vacío, no
+tumba nada. `Instance.describe_extra_params(tool_id, node_params)` es la
+fachada; CLI (`extra-params`) y MCP (`describe_extra_params`) son capas
+delgadas encima.
+
 `Instance` es la fachada: `run()`, `diagnose()`, `run_action()`, `case_log()`,
 `run_detail()`, más los stores. Un servidor HTTP encima de esto es una capa
 delgada, no un segundo motor.

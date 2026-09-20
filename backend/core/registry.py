@@ -39,6 +39,7 @@ from .contract import (
     CONTRACT_VERSION,
     Action,
     MissingSetting,
+    Param,
     ParamError,
     Plugin,
     PluginManifest,
@@ -99,6 +100,28 @@ def _dependencia(spec: str) -> dict:
     except PackageNotFoundError:
         presente = False
     return {"spec": spec, "package": nombre, "present": presente}
+
+
+def _options_from_invalidos(
+    plugin_manifest: PluginManifest | None, dueño: str, params: Iterable[Param]
+) -> list[str]:
+    """
+    Un `Param.options_from` que no nombra un `Resource` que el propio
+    plugin declara.
+
+    `dueño` es sólo para el mensaje: el id del tool o el nombre de la acción
+    al que pertenecen `params`. Sin `plugin_manifest` (el modo mínimo, sin
+    configuración declarada) cualquier `options_from` no vacío ya es
+    inválido -- no hay ningún `Resource` posible al que pueda apuntar.
+    """
+    declarados = {r.name for r in plugin_manifest.resources} if plugin_manifest else set()
+    return [
+        f"{dueño}.{p.name}: options_from='{p.options_from}' no es un resource "
+        f"declarado por este plugin"
+        + (f" (tiene: {', '.join(sorted(declarados))})" if declarados else " (no declara ninguno)")
+        for p in params
+        if p.options_from and p.options_from not in declarados
+    ]
 
 
 @dataclass(frozen=True)
@@ -285,6 +308,9 @@ class ToolRegistry:
             self._tools[manifest.id] = tool  # type: ignore[assignment]
             accepted.append(manifest.id)
 
+            for error in _options_from_invalidos(plugin_manifest, manifest.id, manifest.params):
+                self._errors.append(LoadError(name, source, error))
+
             for alias in manifest.aliases:
                 if alias in self._tools or alias in self._aliases:
                     self._errors.append(
@@ -311,6 +337,8 @@ class ToolRegistry:
                     )
                 )
                 continue
+            for error in _options_from_invalidos(plugin_manifest, accion.name, accion.params):
+                self._errors.append(LoadError(name, source, error))
             self._actions[(name, accion.name)] = handler
 
         self._plugins.append(

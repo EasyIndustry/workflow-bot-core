@@ -441,6 +441,40 @@ def cmd_resources(inst: Instance, args) -> int:
     return 0
 
 
+def cmd_extra_params(inst: Instance, args) -> int:
+    """
+    Los params extra que un tool puede ofrecer, dados los que el nodo ya
+    eligió (issue #27) — para `connections.llamar`, elegida una Action, los
+    `{placeholders}` de su url/headers/payload en vez de tener que copiarlos
+    a mano desde la otra pantalla.
+
+    Vacío (no error) si el tool no describe una forma dinámica, si no existe,
+    o si no acepta params extra: la mayoría de los tools está en ese caso.
+    """
+    try:
+        params = json.loads(args.params) if args.params else {}
+    except json.JSONDecodeError as exc:
+        mensaje = f"--params no es JSON válido: {exc}"
+        if args.json:
+            print(json.dumps({"ok": False, "error": mensaje}, ensure_ascii=False))
+            return 2
+        print(mensaje, file=sys.stderr)
+        return 2
+
+    extras = inst.describe_extra_params(args.tool, params)
+    if args.json:
+        print(json.dumps({"tool": args.tool, "params": extras}, ensure_ascii=False))
+        return 0
+
+    if not extras:
+        print("sin params extra para describir")
+        return 0
+    for p in extras:
+        obligatorio = " (obligatorio)" if p["required"] else ""
+        print(f"  - {p['name']}{obligatorio}" + (f": {p['doc']}" if p["doc"] else ""))
+    return 0
+
+
 def cmd_users(inst: Instance, args) -> int:
     """
     Alta, baja y consulta de actores.
@@ -839,6 +873,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("resource")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_resources)
+
+    p = sub.add_parser(
+        "extra-params",
+        help="Params extra que un tool puede ofrecer, según los que el nodo ya eligió.",
+    )
+    p.add_argument("tool")
+    p.add_argument("--params", help='Params ya elegidos, como JSON: \'{"connection": "..."}\'')
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_extra_params)
 
     p = sub.add_parser("trace", help="La traza de un run ya ejecutado.")
     p.add_argument("run_id")

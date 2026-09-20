@@ -495,6 +495,30 @@ def test_resources_de_coleccion_inexistente_es_error(correr):
     assert codigo == 2
 
 
+# ── extra-params (issue #27) ─────────────────────────────────────────────
+
+
+def test_extra_params_sin_describer_es_vacio(correr):
+    """La mayoría de los tools no describe params extra dinámicos: vacío, no error."""
+    codigo, salida = correr("--plugin", f"demo={DEMO}", "extra-params", "demo.mover", "--json")
+    assert codigo == 0
+    assert json.loads(salida) == {"tool": "demo.mover", "params": []}
+
+
+def test_extra_params_texto_sin_nada_que_describir(correr):
+    codigo, salida = correr("--plugin", f"demo={DEMO}", "extra-params", "demo.mover")
+    assert codigo == 0
+    assert "sin params extra" in salida
+
+
+def test_extra_params_con_params_invalidos_es_error(correr):
+    codigo, salida = correr(
+        "--plugin", f"demo={DEMO}", "extra-params", "demo.mover", "--params", "{no es json", "--json"
+    )
+    assert codigo == 2
+    assert json.loads(salida)["ok"] is False
+
+
 # ── Actores desde la CLI ────────────────────────────────────────────────
 
 
