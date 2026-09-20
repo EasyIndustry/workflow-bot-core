@@ -20,6 +20,7 @@ plugins se descubrieran antes de atar los adapters, todos serían rechazados.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -37,6 +38,9 @@ from .resources import ResourceError, TableStore, store_for
 from .schema import MIGRATIONS, SCHEMA
 from .stores import RunStore, StoreError, WorkflowStore
 from .users import RunPolicy, UserError, UserStore
+
+
+log = logging.getLogger(__name__)
 
 
 class WorkflowNotFound(StoreError):
@@ -339,6 +343,68 @@ class Instance:
         if definicion is None:
             raise ResourceError(f'no hay una colección "{collection}" en el plugin "{plugin}"')
         self.resource_store(plugin, definicion).delete(key)
+
+    def describe_extra_params(self, tool_id: str, node_params: dict) -> list[dict]:
+        """
+        Los params extra que un tool con `extra_params=True` puede ofrecer,
+        dados los params que el nodo ya eligió (issue #27).
+
+        El caso: `connections.llamar` acepta cualquier `{variable}` de más
+        —lo que la Action elegida use en su url, headers y payload—, y hasta
+        ahora la única forma de saber cuáles eran era abrir la pantalla del
+        plugin y copiarlas a mano. Un tool que sabe describirse a sí mismo
+        (`Tool.describe_extra_params`, optativo) recibe acá los params ya
+        elegidos y un lector de sólo lectura sobre las colecciones del
+        **mismo** plugin, y devuelve qué otros params tienen sentido.
+
+        Vacío si el tool no lo declara (la mayoría), si no existe, o si el
+        manifest no marca `extra_params=True` — describir extras de un tool
+        que los descarta sería mostrar campos que después no llegarían a
+        ningún lado. Cualquier excepción del lado del plugin se traga y
+        vuelve vacío: esto corre mientras alguien edita un flujo, no en un
+        run, y no tiene sentido tumbar la pantalla por un describer roto.
+        """
+        manifest = self.registry.manifest(tool_id)
+        if manifest is None or not manifest.extra_params:
+            return []
+        tool = self.registry.get(tool_id)
+        describir = getattr(tool, "describe_extra_params", None)
+        if not callable(describir):
+            return []
+        dueño = self.registry.plugin_of(tool_id)
+        if dueño is None:
+            return []
+        try:
+            params = describir(dict(node_params), self._lector_de_items(dueño.name))
+            return [p.to_dict() for p in params]
+        except Exception:
+            log.exception("describe_extra_params de %s falló", tool_id)
+            return []
+
+    def _lector_de_items(self, plugin: str):
+        """
+        `leer_item(coleccion, clave, key_field="name")` ligado a un plugin,
+        para `describe_extra_params` (issue #27).
+
+        Mismo shape que `ToolContext.resource`, pero sobre
+        `resource_items_masked`: nunca ve el valor de un campo `secret`. Este
+        lector corre mientras se edita un flujo, no en un run -- no hay
+        `{env.CLAVE}` que resolver ni motivo para que el plugin vea un
+        secreto acá.
+        """
+
+        def leer(coleccion: str, clave: str, key_field: str = "name") -> dict | None:
+            objetivo = (clave or "").strip()
+            return next(
+                (
+                    i
+                    for i in self.resource_items_masked(plugin, coleccion)
+                    if str(i.get(key_field, "")) == objetivo
+                ),
+                None,
+            )
+
+        return leer
 
     # ── Ejecución ───────────────────────────────────────────────────────
 

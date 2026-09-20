@@ -102,25 +102,25 @@ def _dependencia(spec: str) -> dict:
     return {"spec": spec, "package": nombre, "present": presente}
 
 
-def _source_resources_invalidos(
+def _options_from_invalidos(
     plugin_manifest: PluginManifest | None, dueño: str, params: Iterable[Param]
 ) -> list[str]:
     """
-    Un `Param.source_resource` que no nombra un `Resource` que el propio
+    Un `Param.options_from` que no nombra un `Resource` que el propio
     plugin declara.
 
     `dueño` es sólo para el mensaje: el id del tool o el nombre de la acción
     al que pertenecen `params`. Sin `plugin_manifest` (el modo mínimo, sin
-    configuración declarada) cualquier `source_resource` no vacío ya es
+    configuración declarada) cualquier `options_from` no vacío ya es
     inválido -- no hay ningún `Resource` posible al que pueda apuntar.
     """
     declarados = {r.name for r in plugin_manifest.resources} if plugin_manifest else set()
     return [
-        f"{dueño}.{p.name}: source_resource='{p.source_resource}' no es un resource "
+        f"{dueño}.{p.name}: options_from='{p.options_from}' no es un resource "
         f"declarado por este plugin"
         + (f" (tiene: {', '.join(sorted(declarados))})" if declarados else " (no declara ninguno)")
         for p in params
-        if p.source_resource and p.source_resource not in declarados
+        if p.options_from and p.options_from not in declarados
     ]
 
 
@@ -308,7 +308,7 @@ class ToolRegistry:
             self._tools[manifest.id] = tool  # type: ignore[assignment]
             accepted.append(manifest.id)
 
-            for error in _source_resources_invalidos(plugin_manifest, manifest.id, manifest.params):
+            for error in _options_from_invalidos(plugin_manifest, manifest.id, manifest.params):
                 self._errors.append(LoadError(name, source, error))
 
             for alias in manifest.aliases:
@@ -337,7 +337,7 @@ class ToolRegistry:
                     )
                 )
                 continue
-            for error in _source_resources_invalidos(plugin_manifest, accion.name, accion.params):
+            for error in _options_from_invalidos(plugin_manifest, accion.name, accion.params):
                 self._errors.append(LoadError(name, source, error))
             self._actions[(name, accion.name)] = handler
 
