@@ -144,6 +144,17 @@ plugin: settings, colecciones con su esquema, acciones y qué ports usa. No hay
 que mantener ninguna lista propia — ese fue el error de la versión anterior, con
 el catálogo escrito a mano en tres archivos distintos.
 
+Un `Param` puede declarar `source_resource`: el nombre de un `Resource` del
+mismo plugin cuyos items son sus valores típicos (`Param("connection",
+source_resource="connections")`, para un tool que opera sobre una conexión
+guardada). Es sólo un hint para quien dibuje el campo —un buscador contra
+`GET /resources/{plugin}/{resource}` en vez de un texto pelado—, no una
+restricción: a diferencia de `choices`, no se valida contra él al resolver
+params, porque un `{variable}` tiene que poder seguir resolviendo a cualquier
+valor. Un `source_resource` que no nombra un `Resource` que el plugin declara
+se reporta al cargar, igual que un alias en conflicto: no impide que el tool
+ande, pero un typo no debería verse recién como un buscador vacío.
+
 `Instance` es la fachada: `run()`, `diagnose()`, `run_action()`, `case_log()`,
 `run_detail()`, más los stores. Un servidor HTTP encima de esto es una capa
 delgada, no un segundo motor.

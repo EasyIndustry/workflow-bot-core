@@ -139,6 +139,16 @@ class Param:
     # Nombres anteriores del parámetro, para renombrar sin romper flujos.
     aliases: tuple[str, ...] = ()
     doc: str = ""
+    # Nombre de un Resource del mismo plugin cuyos items son los valores
+    # típicos de este param -- "de qué colección lo llena un buscador en vez
+    # de un campo de texto pelado" (`connection` de un `Resource("connections")`,
+    # por ejemplo). A diferencia de `choices`, es puramente informativo: no se
+    # valida contra él acá, porque a diferencia de una lista cerrada un
+    # `{variable}` tiene que poder seguir resolviendo a cualquier valor del
+    # nodo. `registry` sí valida, al cargar el plugin, que el nombre exista
+    # entre los `Resource` que el plugin declara -- un typo acá no debería
+    # verse recién como un buscador vacío en la pantalla.
+    source_resource: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -150,6 +160,7 @@ class Param:
             "config_key": self.config_key,
             "aliases": list(self.aliases),
             "doc": self.doc,
+            "source_resource": self.source_resource,
         }
 
     def read_from(self, node_params: dict) -> Any:

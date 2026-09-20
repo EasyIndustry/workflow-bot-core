@@ -819,6 +819,106 @@ def test_alias_en_conflicto_se_reporta():
     assert any("alias en conflicto" in e.error for e in reg.errors)
 
 
+# ── source_resource: de qué colección salen los valores de un param ─────
+
+
+def test_source_resource_viaja_en_el_to_dict():
+    param = Param("connection", source_resource="connections")
+    assert param.to_dict()["source_resource"] == "connections"
+
+
+def test_source_resource_por_defecto_es_vacio():
+    """Compatibilidad: ningún plugin ni test existente declara esto, y no cambia nada si no lo usa."""
+    assert Param("x").to_dict()["source_resource"] == ""
+
+
+def test_source_resource_no_se_valida_al_resolver_params():
+    """
+    A diferencia de `choices`, no es una restricción del núcleo: un
+    `{variable}` sin resolver, o cualquier texto, tiene que poder pasar --
+    quien lo restringe (si quiere) es la UI que dibuja el buscador.
+    """
+    manifest = ToolManifest(
+        id="t.x",
+        label="x",
+        category="X",
+        params=(Param("connection", source_resource="connections"),),
+    )
+    resolved = manifest.resolve_params({"connection": "cualquier-cosa"}, {})
+    assert resolved == {"connection": "cualquier-cosa"}
+
+
+def test_source_resource_que_no_existe_en_el_plugin_se_reporta():
+    """Issue de diseño: un typo en `source_resource` se ve al cargar, no como un buscador vacío."""
+    manifest = PluginManifest(name="p", label="P", resources=(Resource(name="connections", label="Conexiones"),))
+    tool = FunctionTool(
+        manifest=ToolManifest(
+            id="p.usar",
+            label="x",
+            category="X",
+            params=(Param("connection", source_resource="conexiones"),),  # typo
+        ),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("p", "test", Plugin(manifest=manifest, tools=[tool]))
+
+    assert any("source_resource" in e.error and "conexiones" in e.error for e in reg.errors)
+    # El tool se registra igual: el typo no impide que ande, sólo rompe el hint.
+    assert reg.manifest("p.usar") is not None
+
+
+def test_source_resource_que_existe_no_se_reporta():
+    manifest = PluginManifest(name="p", label="P", resources=(Resource(name="connections", label="Conexiones"),))
+    tool = FunctionTool(
+        manifest=ToolManifest(
+            id="p.usar",
+            label="x",
+            category="X",
+            params=(Param("connection", source_resource="connections"),),
+        ),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("p", "test", Plugin(manifest=manifest, tools=[tool]))
+
+    assert reg.errors == []
+
+
+def test_source_resource_sin_manifest_de_plugin_siempre_se_reporta():
+    """El modo mínimo (sin PluginManifest) no declara ningún Resource posible."""
+    tool = FunctionTool(
+        manifest=ToolManifest(
+            id="p.usar",
+            label="x",
+            category="X",
+            params=(Param("connection", source_resource="connections"),),
+        ),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("p", "test", [tool])  # lista de tools pelada, sin Plugin/manifest
+
+    assert any("source_resource" in e.error for e in reg.errors)
+
+
+def test_source_resource_de_una_accion_tambien_se_valida():
+    declaracion = Action(
+        name="probar", label="Probar", params=(Param("connection", source_resource="conexiones"),)
+    )
+    manifest = PluginManifest(
+        name="p",
+        label="P",
+        resources=(Resource(name="connections", label="Conexiones"),),
+        actions=(declaracion,),
+    )
+    accion = FunctionAction(action=declaracion, fn=lambda ctx: ToolResult.ok())
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("p", "test", Plugin(manifest=manifest, tools=[], actions=[accion]))
+
+    assert any("probar.connection" in e.error for e in reg.errors)
+
+
 # ── Params abiertos ─────────────────────────────────────────────────────
 
 
