@@ -48,6 +48,7 @@ from .contract import (
     ToolManifest,
     ToolResult,
 )
+from .builtins import NATIVE_MANIFESTS
 from .ports import PLUGIN_PORTS
 
 log = logging.getLogger(__name__)
@@ -460,7 +461,10 @@ class ToolRegistry:
         return {
             "contract": CONTRACT_VERSION,
             "ports": sorted(self._adapters),
-            "tools": [m.to_dict() for m in self.manifests],
+            "tools": [
+                m.to_dict()
+                for m in sorted([*self.manifests, *NATIVE_MANIFESTS], key=lambda m: m.id)
+            ],
             "plugins": [
                 {
                     "name": p.name,

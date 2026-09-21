@@ -121,18 +121,13 @@ def list_tools(plugins: dict | None = None, root: str | None = None) -> dict:
     return {
         "contract": catalogo["contract"],
         "ports_disponibles": catalogo["ports"],
-        "tools": catalogo["tools"],
+        "tools": [t for t in catalogo["tools"] if not t["native"]],
+        # Los resuelve el executor, no el registry: se declaran en el catálogo
+        # (native=True) y acá se separan para que se lean como control de flujo.
         "nativos": [
-            {
-                "id": "flow.ejecutar",
-                "doc": "Ejecuta otro flujo por nombre. Comparte contexto y traza.",
-                "params": ["flowName"],
-            },
-            {
-                "id": "flow.retry_gate",
-                "doc": "Contador de reintentos por run. Combina con una arista |loop|.",
-                "params": ["retryGateKey", "retryGateMax"],
-            },
+            {"id": t["id"], "doc": t["doc"], "params": [p["name"] for p in t["params"]]}
+            for t in catalogo["tools"]
+            if t["native"]
         ],
     }
 

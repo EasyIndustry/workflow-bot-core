@@ -67,3 +67,18 @@ def test_version_del_nucleo_tiene_fallback_si_no_hay_ni_paquete_ni_archivo(monke
     monkeypatch.setattr(builtins, "_ARCHIVO_VERSION", tmp_path / "no-existe")
 
     assert builtins._version_del_nucleo() == "0.0.0+sin-instalar"
+
+
+def test_catalogo_declara_los_nativos_del_executor_sin_registrarlos(demo_instance):
+    """flow.* salen por el catálogo (para el editor) pero no son invocables como tool."""
+    from backend.core.builtins import NATIVE_MANIFESTS
+    from backend.core.flow.executor import NATIVE_FNS
+
+    assert {m.id for m in NATIVE_MANIFESTS} == set(NATIVE_FNS)
+
+    tools = {t["id"]: t for t in demo_instance.registry.catalog()["tools"]}
+    for fn in NATIVE_FNS:
+        assert tools[fn]["native"] is True
+        assert tools[fn]["params"] and tools[fn]["doc"]
+        assert demo_instance.registry.get(fn) is None
+    assert tools["core.log"]["native"] is False
