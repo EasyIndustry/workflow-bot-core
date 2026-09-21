@@ -224,6 +224,11 @@ class ToolManifest:
     # marcaría como error toda variable que venga de ahí.
     extra_outputs: bool = False
     extra_outputs_doc: str = ""
+    # True: el tool se declara pero no se ejecuta como tool. Lo resuelve el
+    # executor porque necesita estado del run (flow.ejecutar, flow.retry_gate).
+    # Está en el catálogo para que una UI pueda ofrecerlo; no está en el
+    # registry, así que nada lo puede invocar por ahí.
+    native: bool = False
     contract: int = CONTRACT_VERSION
 
     def __post_init__(self) -> None:
@@ -256,6 +261,7 @@ class ToolManifest:
             # que es exactamente lo que el flag existe para evitar.
             "extra_outputs": self.extra_outputs,
             "extra_outputs_doc": self.extra_outputs_doc,
+            "native": self.native,
             "contract": self.contract,
         }
 

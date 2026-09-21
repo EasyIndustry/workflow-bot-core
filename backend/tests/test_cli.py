@@ -97,6 +97,9 @@ def test_tools_json_es_el_catalogo_crudo(correr):
         "core.log",
         "core.set_status",
         "core.wait",
+        # Declarados para el editor; los resuelve el executor (native=True).
+        "flow.ejecutar",
+        "flow.retry_gate",
     }
 
 
