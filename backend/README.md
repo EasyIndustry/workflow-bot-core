@@ -166,6 +166,13 @@ valor. Un `options_from` que no nombra un `Resource` que el plugin declara
 se reporta al cargar, igual que un alias en conflicto: no impide que el tool
 ande, pero un typo no debería verse recién como un buscador vacío.
 
+Un `Param` también puede declarar `placeholder` (issue #29): un ejemplo del
+valor, para dibujar adentro del campo vacío (`Param("ruta", placeholder=
+r"D:\casos\AP962\stl")`). Convive con `doc` —`doc` explica qué es el param,
+`placeholder` muestra cómo se escribe— y, como `options_from`, es puramente
+informativo: no se valida contra él, no reemplaza a `default`, y viaja
+tal cual en el `to_dict()` que ve el catálogo.
+
 Un tool con `extra_params=True` puede además describir esos extras según lo
 que el nodo ya eligió (issue #27): `FunctionTool.describe_extra_params`, un
 callable opcional `(params_del_nodo, leer_item) -> tuple[Param, ...]`.
