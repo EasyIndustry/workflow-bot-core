@@ -189,6 +189,56 @@ def test_outputs_de_un_nodo_alimentan_al_siguiente():
     assert result.trace[1].params == {"message": "quedo en /tmp/salida", "level": "info"}
 
 
+def test_nodo_qualificado_elige_entre_dos_outputs_homonimos():
+    """
+    Issue #30: dos nodos que corren el mismo tool dejan el mismo output
+    (`ruta`), y `{ruta}` sólo puede resolver a la del último. Con
+    `{NODO.salida}` se elige cuál, sin dejar de poder escribir `{ruta}`.
+    """
+    tool = _tool(
+        "test.produce",
+        lambda ctx: ToolResult.ok(ruta=f"/tmp/{ctx.params['valor']}"),
+        params=[Param("valor")],
+        outputs=[Output("ruta", ParamType.PATH)],
+    )
+    result = _run(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    PRIMERO["test.produce | valor=uno"]\n'
+        '    SEGUNDO["test.produce | valor=dos"]\n'
+        '    L["core.log | message={PRIMERO.ruta} / {SEGUNDO.ruta} / {ruta}"]\n'
+        '    B --> PRIMERO\n'
+        '    PRIMERO --> SEGUNDO\n'
+        '    SEGUNDO --> L\n',
+        registry=_registry(tool),
+    )
+    assert result.status == "ok"
+    assert result.trace[-1].params["message"] == "/tmp/uno / /tmp/dos / /tmp/dos"
+
+
+def test_nodo_qualificado_no_pisa_una_variable_plana_del_mismo_nombre():
+    """
+    Issue #30, colisión: si un nodo se llama igual que un output de otro nodo,
+    gana la variable plana -- el dict agrupado bajo ese id no se escribe.
+    """
+    tool = _tool(
+        "test.produce",
+        lambda ctx: ToolResult.ok(ruta="/tmp/salida"),
+        outputs=[Output("ruta", ParamType.PATH)],
+    )
+    result = _run(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    ruta["test.produce"]\n'
+        '    L["core.log | message={ruta}"]\n'
+        '    B --> ruta\n'
+        '    ruta --> L\n',
+        registry=_registry(tool),
+    )
+    assert result.status == "ok"
+    assert result.trace[-1].params["message"] == "/tmp/salida"
+
+
 # ── Fallos: lo que antes seguía por la rama de éxito ────────────────────
 
 

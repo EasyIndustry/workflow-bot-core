@@ -568,7 +568,7 @@ def _run_action(
     trace.duration_ms = int((time.monotonic() - started) * 1000)
 
     if result.outputs:
-        run.context.merge_outputs(result.outputs)
+        run.context.merge_outputs(result.outputs, node_id=node_id)
 
     if result.message:
         run.log(
