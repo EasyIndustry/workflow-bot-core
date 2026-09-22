@@ -49,6 +49,7 @@ class Workflow:
     folder: str = ""
     state: str = "enabled"
     description: str = ""
+    source: str = ""
     updated_at: float = 0.0
 
     @property
@@ -61,6 +62,7 @@ class Workflow:
             "folder": self.folder,
             "state": self.state,
             "description": self.description,
+            "source": self.source,
             "updated_at": self.updated_at,
         }
         if with_content:
@@ -103,16 +105,17 @@ class WorkflowStore:
         folder: str = "",
         state: str = "enabled",
         description: str = "",
+        source: str = "",
     ) -> Workflow:
         name = _validate_name(name)
         self.db.execute(
-            "INSERT INTO workflows (org, name, folder, state, description, content, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO workflows (org, name, folder, state, description, source, content, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT (org, name) DO UPDATE SET"
             "   folder = excluded.folder, state = excluded.state,"
-            "   description = excluded.description, content = excluded.content,"
-            "   updated_at = excluded.updated_at",
-            (self.org, name, folder, state or "enabled", description, content, time.time()),
+            "   description = excluded.description, source = excluded.source,"
+            "   content = excluded.content, updated_at = excluded.updated_at",
+            (self.org, name, folder, state or "enabled", description, source, content, time.time()),
         )
         return self.get(name)  # type: ignore[return-value]
 
@@ -124,21 +127,22 @@ class WorkflowStore:
         folder: str | None = None,
         state: str | None = None,
         description: str | None = None,
+        source: str | None = None,
     ) -> Workflow:
         """
-        Guarda un `.mmd` crudo, tomando folder/state/description de su cabecera.
+        Guarda un `.mmd` crudo, tomando folder/state/description/source de su cabecera.
 
         Una clave ausente de la cabecera **no** se pisa con el default: se
         conserva la que el flujo ya tenía guardado, si existe. Sin esto,
         volver a guardar un flujo existente con un `.mmd` que no repite su
         cabecera completa —el caso de `save_flow` por MCP, cuyo `.mmd` viene
         del editor y no de un archivo con `%%` propio— resetea folder/state/
-        description a su default en cada guardado, silenciosamente.
+        description/source a su default en cada guardado, silenciosamente.
 
-        `folder`/`state`/`description` explícitos (no `None`) ganan sobre
-        cualquiera de las dos fuentes anteriores — es lo que le permite a un
-        llamador (la CLI, `save_flow`) fijar o cambiar el valor sin tener que
-        escribirlo adentro del `.mmd`.
+        `folder`/`state`/`description`/`source` explícitos (no `None`) ganan
+        sobre cualquiera de las dos fuentes anteriores — es lo que le permite a
+        un llamador (la CLI, `save_flow`) fijar o cambiar el valor sin tener
+        que escribirlo adentro del `.mmd`.
         """
         meta, contenido, explicitas = parse_meta(raw)
         previo = self.get(name)
@@ -156,6 +160,7 @@ class WorkflowStore:
             folder=_resolver("folder", meta.folder, folder, ""),
             state=_resolver("state", meta.state, state, "enabled"),
             description=_resolver("description", meta.description, description, ""),
+            source=_resolver("source", meta.source, source, ""),
         )
 
     def delete(self, name: str) -> bool:
@@ -176,6 +181,8 @@ class WorkflowStore:
             cabecera.append(f"%% state: {wf.state}")
         if wf.description:
             cabecera.append(f"%% description: {wf.description}")
+        if wf.source:
+            cabecera.append(f"%% source: {wf.source}")
         return ("\n".join(cabecera) + "\n" + wf.content) if cabecera else wf.content
 
     # ── Importación / exportación ───────────────────────────────────────
@@ -211,6 +218,7 @@ def _workflow(fila) -> Workflow:
         folder=fila["folder"],
         state=fila["state"],
         description=fila["description"],
+        source=fila["source"],
         updated_at=fila["updated_at"],
     )
 

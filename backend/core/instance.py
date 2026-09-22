@@ -838,6 +838,7 @@ class Instance:
                 "folder": wf.folder,
                 "enabled": wf.state != "disabled",
                 "description": wf.description,
+                "source": wf.source,
                 "tools": sorted({node.fn for _, node in graph.action_nodes()}),
             })
 

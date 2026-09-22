@@ -173,6 +173,7 @@ def test_add_json_devuelve_el_workflow_guardado(correr, tmp_path):
         "folder": "pruebas",
         "state": "enabled",
         "description": "",
+        "source": "",
     }
 
 

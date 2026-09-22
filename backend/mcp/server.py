@@ -239,6 +239,14 @@ TOOLS: list[types.Tool] = [
                 "type": "string",
                 "description": "Descripción del flujo. Misma regla de default que folder.",
             },
+            "source": {
+                "type": "string",
+                "description": (
+                    "Fuente para la que el flujo está pensado (issue #31): informativa, "
+                    "para que la UI pueda ofrecer las columnas de la fila. No restringe "
+                    "contra qué fuente se puede correr. Misma regla de default que folder."
+                ),
+            },
             "root": _ROOT,
         },
         ["flow"],
@@ -484,6 +492,7 @@ Sintaxis de un flujo:
 
     %% folder: CARPETA
     %% description: qué hace
+    %% source: fuente-para-la-que-está-pensado (opcional, issue #31)
     flowchart TD
         SN(inicio)
         N1["etiqueta § tool.id | param=valor, otro={variable}"]
