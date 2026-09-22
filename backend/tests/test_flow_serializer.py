@@ -232,6 +232,18 @@ def test_la_cabecera_solo_lleva_lo_que_tiene_valor():
     assert "%% folder: FORM/CNC4" in texto
     assert "%% state: disabled" in texto
     assert "description" not in texto
+    assert "source" not in texto
+
+
+def test_la_cabecera_lleva_la_fuente_cuando_la_trae():
+    """Issue #31: `source` es una clave más de la cabecera, escrita sólo si no está vacía."""
+    grafo = FlowGraph(
+        nodes={"A": StartNode(line=1)},
+        meta=FlowMeta(source="casos-nuevos"),
+    )
+    texto = to_mermaid(grafo, with_header=True)
+    assert "%% source: casos-nuevos" in texto
+    assert parse_flow(texto, with_meta=True).meta.source == "casos-nuevos"
 
 
 def test_lo_que_guarda_la_base_va_sin_cabecera():

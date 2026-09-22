@@ -148,6 +148,32 @@ def test_override_explicito_de_save_mmd_gana_sobre_todo(db):
     assert store.get("agrupado").folder == "OTRA"
 
 
+def test_workflow_importa_la_fuente_de_la_cabecera(db):
+    """Issue #31: `%% source:` es una clave más de la cabecera, como `folder`."""
+    store = WorkflowStore(db)
+    store.save_mmd("con fuente", "%% source: casos-nuevos\n" + FLUJO)
+    assert store.get("con fuente").source == "casos-nuevos"
+
+
+def test_ida_y_vuelta_a_mmd_conserva_la_fuente(db):
+    store = WorkflowStore(db)
+    original = "%% folder: FORM\n%% source: casos-nuevos\n" + FLUJO
+    store.save_mmd("ida", original)
+    texto = store.to_mmd("ida")
+    assert "%% source: casos-nuevos" in texto
+
+    store.save_mmd("vuelta", texto)
+    assert store.get("vuelta").source == "casos-nuevos"
+
+
+def test_guardar_de_nuevo_sin_cabecera_conserva_la_fuente(db):
+    """Misma regla que folder/state/description: una clave ausente no se pisa con el default."""
+    store = WorkflowStore(db)
+    store.save_mmd("agrupado", "%% source: casos-nuevos\n" + FLUJO)
+    store.save_mmd("agrupado", FLUJO)
+    assert store.get("agrupado").source == "casos-nuevos"
+
+
 def test_flujo_nuevo_sin_cabecera_ni_override_usa_los_defaults(db):
     store = WorkflowStore(db)
     wf = store.save_mmd("nuevo", FLUJO)

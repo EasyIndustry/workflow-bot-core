@@ -36,12 +36,15 @@ def _errors(graph) -> list[str]:
 
 def test_parse_meta_extrae_la_cabecera():
     meta, content, explicitas = parse_meta(
-        "%% folder: FORM\n%% state: disabled\n%% description: hola\nflowchart TD\n    A(inicio)"
+        "%% folder: FORM\n%% state: disabled\n%% description: hola\n"
+        "%% source: casos-nuevos\nflowchart TD\n    A(inicio)"
     )
-    assert (meta.folder, meta.state, meta.description) == ("FORM", "disabled", "hola")
+    assert (meta.folder, meta.state, meta.description, meta.source) == (
+        "FORM", "disabled", "hola", "casos-nuevos",
+    )
     assert meta.enabled is False
     assert content.startswith("flowchart TD")
-    assert explicitas == {"folder", "state", "description"}
+    assert explicitas == {"folder", "state", "description", "source"}
 
 
 def test_meta_por_defecto_es_enabled():

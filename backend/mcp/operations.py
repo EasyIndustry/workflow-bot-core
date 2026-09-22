@@ -317,6 +317,7 @@ def save_flow(
     folder: str | None = None,
     state: str | None = None,
     description: str | None = None,
+    source: str | None = None,
     root: str | None = None,
 ) -> dict:
     """
@@ -329,11 +330,11 @@ def save_flow(
     sus tools, ni pide un actor con permisos: sólo escribe la fila en la base
     de la instalación.
 
-    `folder`/`state`/`description` son opcionales y pisan lo que traiga la
-    cabecera `%%` del archivo. Sin ninguno de los dos —ni parámetro ni
-    cabecera—, se conserva el valor que el flujo ya tenía guardado en vez de
-    resetearlo: volver a guardar un flujo existente sin repetir su cabecera
-    completa no le borra la carpeta ni el estado.
+    `folder`/`state`/`description`/`source` son opcionales y pisan lo que
+    traiga la cabecera `%%` del archivo. Sin ninguno de los dos —ni parámetro
+    ni cabecera—, se conserva el valor que el flujo ya tenía guardado en vez
+    de resetearlo: volver a guardar un flujo existente sin repetir su
+    cabecera completa no le borra la carpeta, el estado ni la fuente.
     """
     argv = ["add", flow, "--json"]
     if name:
@@ -344,6 +345,8 @@ def save_flow(
         argv += ["--state", state]
     if description is not None:
         argv += ["--description", description]
+    if source is not None:
+        argv += ["--source", source]
     return _cli(*argv, root=root)
 
 

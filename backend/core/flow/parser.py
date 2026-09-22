@@ -119,13 +119,19 @@ class FlowMeta:
     folder: str = ""
     state: str = "enabled"
     description: str = ""
+    source: str = ""  # issue #31: fuente para la que el flujo está pensado
 
     @property
     def enabled(self) -> bool:
         return self.state != "disabled"
 
     def to_dict(self) -> dict:
-        return {"folder": self.folder, "state": self.state, "description": self.description}
+        return {
+            "folder": self.folder,
+            "state": self.state,
+            "description": self.description,
+            "source": self.source,
+        }
 
 
 @dataclass
@@ -209,7 +215,7 @@ def parse_meta(raw: str) -> tuple[FlowMeta, str, frozenset[str]]:
     necesita poder conservar lo que ya tenía en vez de que se le pise con el
     default (ver `WorkflowStore.save_mmd`).
     """
-    values = {"folder": "", "state": "enabled", "description": ""}
+    values = {"folder": "", "state": "enabled", "description": "", "source": ""}
     explicitas: set[str] = set()
     lines = raw.splitlines()
     i = 0

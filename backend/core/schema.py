@@ -54,7 +54,7 @@ LOCAL_ORG = "local"
 # explícita en vez de confiar en el orden de un dict.
 SCHEMA = {
     "users": 1,
-    "workflows": 1,
+    "workflows": 2,
     "runs": 2,
     "env": 1,
     "run_logs": 1,
@@ -110,7 +110,13 @@ MIGRATIONS: dict[str, dict[int, str]] = {
             UNIQUE (org, name)
         );
         CREATE INDEX IF NOT EXISTS idx_workflows_org_state ON workflows (org, state);
-        """
+        """,
+        # Issue #31: para qué fuente está pensado el flujo. Informativa, no
+        # obligatoria -- correr contra otra fuente sigue siendo válido -- así
+        # que ausente/vacía no rompe nada y no hace falta backfill.
+        2: """
+        ALTER TABLE workflows ADD COLUMN source TEXT NOT NULL DEFAULT '';
+        """,
     },
     "runs": {
         1: """

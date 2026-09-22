@@ -147,6 +147,7 @@ def from_dict(datos: dict) -> FlowGraph:
         folder=cabecera.get("folder") or "",
         state=cabecera.get("state") or "enabled",
         description=cabecera.get("description") or "",
+        source=cabecera.get("source") or "",
     )
     return grafo
 

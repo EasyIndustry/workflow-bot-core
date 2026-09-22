@@ -254,6 +254,7 @@ def cmd_add(inst: Instance, args) -> int:
         folder=args.folder,
         state=args.state,
         description=args.description,
+        source=args.source,
     )
     if args.json:
         print(json.dumps({
@@ -262,6 +263,7 @@ def cmd_add(inst: Instance, args) -> int:
             "folder": wf.folder,
             "state": wf.state,
             "description": wf.description,
+            "source": wf.source,
         }, ensure_ascii=False))
         return 0
 
@@ -796,6 +798,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--description",
         help="Descripción del flujo. Misma regla de default que --folder.",
+    )
+    p.add_argument(
+        "--source",
+        help="Fuente para la que el flujo está pensado. Misma regla de default que --folder.",
     )
     p.add_argument("--json", action="store_true", help="Resultado estructurado.")
     p.set_defaults(fn=cmd_add)
