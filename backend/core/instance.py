@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from pathlib import Path
+from typing import Any
 
 from . import boot as bootstrap
 from .config import ConfigStore
@@ -197,6 +199,9 @@ class Instance:
     def check_graph(self, graph: FlowGraph) -> list[Diagnostic]:
         """Diagnósticos de un grafo contra los tools realmente instalados."""
         extra: list[Diagnostic] = []
+        # nodo de acción → su manifest, para el chequeo de {NODO.salida} de
+        # más abajo (issue #30). Sólo lo tienen los nodos con tool resuelto.
+        manifests: dict[str, Any] = {}
 
         for node_id, node in graph.action_nodes():
             # Las nativas las resuelve el motor: no están en el registro y no
@@ -218,6 +223,7 @@ class Instance:
             manifest = self.registry.manifest(tool_id)
             if manifest is None:
                 continue
+            manifests[node_id] = manifest
             # Un param que el tool no declara se ignora en silencio al
             # ejecutar. Decirlo acá evita el "puse el parámetro y no hace nada".
             if not manifest.extra_params:
@@ -241,6 +247,46 @@ class Instance:
                         node.line,
                         node_id,
                     ))
+
+        # Issue #30: `{NODO.salida}` referencia el id de un nodo anterior, no
+        # un output plano cualquiera -- eso ya lo resuelve RunContext con un
+        # `{objeto.campo}` normal. Acá se valida la parte que un `.resolve()`
+        # en tiempo de ejecución no puede: que NODO exista como nodo de
+        # acción, que corra antes (directa o transitivamente) del nodo que lo
+        # usa, y -si el tool no declara `extra_outputs`- que la salida sea una
+        # que ese tool realmente deja.
+        ancestros: dict[str, set[str]] = {}
+        ids_de_accion = {nid for nid, _ in graph.action_nodes()}
+        for node_id, node in graph.action_nodes():
+            for clave, crudo in node.params.items():
+                if not isinstance(crudo, str):
+                    continue
+                for expr in _VAR_RE.findall(crudo):
+                    parts = expr.split(".")
+                    if len(parts) < 2 or parts[0] not in ids_de_accion:
+                        continue  # no es {NODO.salida} -- {objeto.campo} normal
+                    ref_id, salida = parts[0], parts[1]
+                    if node_id not in ancestros:
+                        ancestros[node_id] = _ancestors(graph, node_id)
+                    if ref_id not in ancestros[node_id]:
+                        extra.append(Diagnostic(
+                            Severity.ERROR,
+                            f'"{clave}" en "{node_id}" referencia a "{ref_id}", '
+                            "que no corre antes en el flujo.",
+                            node.line,
+                            node_id,
+                        ))
+                        continue
+                    ref_manifest = manifests.get(ref_id)
+                    if ref_manifest is not None and not ref_manifest.extra_outputs:
+                        declaradas = {o.name for o in ref_manifest.outputs}
+                        if salida not in declaradas:
+                            extra.append(Diagnostic(
+                                Severity.WARNING,
+                                f'"{ref_id}" no declara la salida "{salida}".',
+                                node.line,
+                                node_id,
+                            ))
 
         return extra
 
@@ -1104,6 +1150,25 @@ def _parecidos(nombre: str, disponibles: list[str], maximo: int = 2) -> list[str
     import difflib
 
     return [f'"{c}"' for c in difflib.get_close_matches(nombre, disponibles, n=maximo, cutoff=0.6)]
+
+
+# {nombre}, {NODO.salida} -- mismo patrón que RunContext, para encontrar en
+# check_graph las referencias calificadas por nodo del issue #30 sin correr
+# nada.
+_VAR_RE = re.compile(r"\{([\w.]+)\}")
+
+
+def _ancestors(graph: FlowGraph, node_id: str) -> set[str]:
+    """Ids que corren antes de `node_id`, siguiendo las aristas hacia atrás."""
+    seen: set[str] = set()
+    pending = [e.from_ for e in graph.in_edges(node_id)]
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        pending.extend(e.from_ for e in graph.in_edges(current))
+    return seen
 
 
 __all__ = ["Instance", "WorkflowNotFound"]

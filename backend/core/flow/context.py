@@ -58,12 +58,34 @@ class RunContext:
     vars: dict = field(default_factory=dict)
     env: dict = field(default_factory=dict)
     config: dict = field(default_factory=dict)
+    # Nombres de output que ya se escribieron como variable plana en algún
+    # nodo de este run. Sostiene la regla de colisión del issue #30: si un
+    # nodo se llama igual que un output de otro, gana la variable plana.
+    _plain_keys: set[str] = field(default_factory=set, repr=False, compare=False)
 
     # ── Escritura ───────────────────────────────────────────────────────
 
-    def merge_outputs(self, outputs: dict) -> None:
-        """Incorpora los outputs declarados por un tool tras ejecutarlo."""
+    def merge_outputs(self, outputs: dict, node_id: str | None = None) -> None:
+        """
+        Incorpora los outputs declarados por un tool tras ejecutarlo.
+
+        Además de mergear cada output por su nombre plano (`vars["ruta"]`,
+        de siempre), si viene `node_id` los deja también agrupados bajo el id
+        del nodo (`vars["MOVER_PDF"] = {"ruta": ...}`) — issue #30: cuando dos
+        nodos dejan el mismo nombre, `{NODO.salida}` permite elegir cuál, sin
+        tocar la interpolación: `{objeto.campo}` ya hace `_deep_get` sobre
+        `vars`.
+
+        Colisión entre el id de un nodo y el nombre de un output (issue #30,
+        punto 1): gana la variable plana. Si `node_id` coincide con un output
+        ya escrito por otro nodo, no se pisa con el dict agrupado; y si un
+        nodo posterior deja un output con ese mismo nombre, el plano
+        sobrescribe el grupo.
+        """
         self.vars.update(outputs)
+        self._plain_keys.update(outputs)
+        if node_id and node_id not in self._plain_keys:
+            self.vars[node_id] = outputs
 
     # ── Lectura ─────────────────────────────────────────────────────────
 
