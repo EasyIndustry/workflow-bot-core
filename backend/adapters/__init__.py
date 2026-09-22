@@ -25,6 +25,7 @@ from .browser_playwright import PlaywrightBrowserAdapter
 from .clock_system import SystemClockAdapter
 from .crypto_fernet import FernetCryptoAdapter
 from .fs_local import LocalFsAdapter
+from .geometry_null import NullGeometryAdapter
 from .http_urllib import UrllibHttpAdapter
 from .process_subprocess import SubprocessAdapter
 from .storage_sqlite import IN_MEMORY, SqliteStorageAdapter
@@ -90,6 +91,11 @@ def build_default_adapters(
         # (ver docstring del adapter) en vez de configurarlo acá.
         ports.BROWSER: PlaywrightBrowserAdapter(),
         ports.WINDOW: _build_window_adapter(),
+        # "Vacío" a propósito (issue #19): el core no trae ningún adapter de
+        # geometría real de fábrica. Una instalación que necesite cómputo
+        # geométrico inyecta el suyo con
+        # `Instance(adapters={**build_default_adapters(), "geometry": ...})`.
+        ports.GEOMETRY: NullGeometryAdapter(),
     }
 
 
@@ -98,6 +104,7 @@ __all__ = [
     "AtspiWindowAdapter",
     "FernetCryptoAdapter",
     "LocalFsAdapter",
+    "NullGeometryAdapter",
     "PlaywrightBrowserAdapter",
     "PywinautoWindowAdapter",
     "SqliteStorageAdapter",

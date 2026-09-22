@@ -8,7 +8,13 @@ version = "0.3.1"
 description = "Motor de workflows con trazas: parsea un flujo en Mermaid, lo ejecuta y deja registro de qué pasó en cada nodo."
 readme = "backend/README.md"
 requires-python = ">=3.10"
-dependencies = []
+# numpy (issue #19): transversal a cualquier port/adapter que haga cómputo
+# numérico -- geometría, imágenes, señales --, a diferencia de una librería
+# específica de un plugin (`trimesh`, por ejemplo, que se queda afuera:
+# ver GeometryPort en backend/core/ports.py). Es la única excepción a "cero
+# dependencias obligatorias" y es deliberada: sin esto, cada instalación que
+# necesite un adapter numérico tendría que acordarse de pedirla aparte.
+dependencies = ["numpy"]
 
 [project.optional-dependencies]
 crypto = ["cryptography==50.0.1"]

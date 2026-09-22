@@ -14,7 +14,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from backend.core.ports import FileInfo, HttpResponse, PortError, ProcessResult, WindowInfo
+from backend.core.ports import (
+    FileInfo,
+    HttpResponse,
+    NearestOnSurfaceResult,
+    PortError,
+    ProcessResult,
+    WindowInfo,
+)
 
 
 class FakeHttp:
@@ -343,6 +350,38 @@ class FakeBrowser:
         self.cerrado = True
 
 
+class FakeGeometry:
+    """
+    Adapter de geometría guionado (issue #19): nunca corre `trimesh` de
+    verdad.
+
+    `resultados` mapea `mesh_bytes` a la lista de `(punto_proyectado,
+    distancia)` que devuelve, en el mismo orden que los `points` pedidos.
+    Igual que el resto de los fakes: una malla no guionada levanta
+    `PortError`, para poder probar también el camino de error del tool.
+    A diferencia del `NullGeometryAdapter` real que trae el core,
+    `available` es True -- lo que un test necesita para ejercer el tool
+    como si hubiera un adapter de verdad detrás.
+    """
+
+    def __init__(self, resultados: dict[bytes, list[tuple]] | None = None) -> None:
+        self.resultados = dict(resultados or {})
+        self.calls: list[dict] = []
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def nearest_on_surface(self, mesh_bytes, points):
+        self.calls.append({"op": "nearest_on_surface", "n_points": len(points)})
+        if mesh_bytes not in self.resultados:
+            raise PortError("FakeGeometry: nadie guionó esta malla")
+        pares = self.resultados[mesh_bytes]
+        return NearestOnSurfaceResult(
+            points=tuple(p for p, _ in pares), distances=tuple(d for _, d in pares)
+        )
+
+
 class FakeWindow:
     """
     Ventana de escritorio guionada: nunca toca una de verdad.
@@ -413,7 +452,7 @@ class FakeWindow:
 
 
 def fake_adapters(**overrides) -> dict:
-    """Los seis ports en versión falsa. Se puede pisar cualquiera."""
+    """Los ports de plugin en versión falsa. Se puede pisar cualquiera."""
     adapters = {
         "http": FakeHttp(),
         "fs": FakeFs(),
@@ -421,6 +460,7 @@ def fake_adapters(**overrides) -> dict:
         "clock": FakeClock(),
         "browser": FakeBrowser(),
         "window": FakeWindow(),
+        "geometry": FakeGeometry(),
     }
     adapters.update(overrides)
     return adapters
@@ -435,6 +475,7 @@ __all__ = [
     "FakeBrowser",
     "FakeClock",
     "FakeFs",
+    "FakeGeometry",
     "FakeHttp",
     "FakeProcess",
     "FakeWindow",

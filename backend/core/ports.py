@@ -497,6 +497,64 @@ class CryptoPort(Protocol):
         ...
 
 
+# ── Geometría ───────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class NearestOnSurfaceResult:
+    """
+    Resultado de proyectar puntos sobre una superficie.
+
+    `points` y `distances` van paralelos a los puntos de entrada: el i-ésimo
+    punto proyectado y su distancia corresponden al i-ésimo punto pedido.
+    """
+
+    points: tuple[tuple[float, float, float], ...]
+    distances: tuple[float, ...]
+
+
+@runtime_checkable
+class GeometryPort(Protocol):
+    """
+    Cómputo geométrico sobre mallas (issue #19).
+
+    A propósito "vacío": el núcleo declara la forma y nunca bundlea un
+    adapter real detrás (ningún `trimesh`, ni ninguna otra librería "curada"
+    de geometría). Cada instalación que necesite geometría de verdad escribe
+    o instala su propio adapter — un fork curado, no algo de fábrica —, igual
+    que decide su propia `BrowserPort` con sesión persistente. Lo que el core
+    sí bindea siempre es un adapter nulo (`available=False`): el registry no
+    carga un plugin que pide un port sin ningún adapter atado, así que sin
+    esto el plugin ni siquiera podría cargar para devolver un error claro.
+
+    Un tool que use este port tiene que chequear `available` primero y
+    devolver un `ToolResult.err` explícito si no hay adapter real, en vez de
+    dejar que un `ImportError` de una librería de geometría viva adentro del
+    plugin.
+    """
+
+    def nearest_on_surface(
+        self, mesh_bytes: bytes, points: list[tuple[float, float, float]]
+    ) -> NearestOnSurfaceResult:
+        """
+        El punto más cercano en la superficie de `mesh_bytes` (un STL) para
+        cada punto de `points`, con su distancia. `PortError` si la malla no
+        se puede leer.
+        """
+        ...
+
+    @property
+    def available(self) -> bool:
+        """
+        Si hay un adapter de geometría real detrás en esta instalación.
+
+        Mismo criterio que `CryptoPort.available`: existe para que un tool
+        pueda decir "no hay adapter de geometría configurado" antes de
+        intentar nada, en vez de fallar a mitad de un cómputo.
+        """
+        ...
+
+
 # ── Almacenamiento ──────────────────────────────────────────────────────
 
 
@@ -565,6 +623,7 @@ BROWSER = "browser"
 WINDOW = "window"
 STORAGE = "storage"
 CRYPTO = "crypto"
+GEOMETRY = "geometry"
 
 PORTS: dict[str, type] = {
     HTTP: HttpPort,
@@ -575,13 +634,14 @@ PORTS: dict[str, type] = {
     WINDOW: WindowPort,
     STORAGE: StoragePort,
     CRYPTO: CryptoPort,
+    GEOMETRY: GeometryPort,
 }
 
 # Ports que un plugin puede pedir. `storage` y `crypto` no están: los dos son
 # del núcleo. Un plugin con acceso al almacenamiento elegiría dónde persisten
 # sus datos —exactamente lo que `Resource` existe para impedir— y uno con
 # acceso al cifrado podría leer secretos que no le corresponden.
-PLUGIN_PORTS = frozenset({HTTP, FS, PROCESS, CLOCK, BROWSER, WINDOW})
+PLUGIN_PORTS = frozenset({HTTP, FS, PROCESS, CLOCK, BROWSER, WINDOW, GEOMETRY})
 
 
 __all__ = [
@@ -589,6 +649,7 @@ __all__ = [
     "CLOCK",
     "CRYPTO",
     "FS",
+    "GEOMETRY",
     "HTTP",
     "PLUGIN_PORTS",
     "PORTS",
@@ -600,8 +661,10 @@ __all__ = [
     "CryptoPort",
     "FileInfo",
     "FsPort",
+    "GeometryPort",
     "HttpPort",
     "HttpResponse",
+    "NearestOnSurfaceResult",
     "PortError",
     "ProcessPort",
     "ProcessResult",
