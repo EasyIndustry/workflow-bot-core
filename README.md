@@ -59,8 +59,9 @@ coincida (no hay versionado automático desde git todavía).
   de verdad hasta que el flujo esté listo.
 - **Configuración en tres capas** (arranque, settings de plugin, secretos),
   cada una con su propia forma de resolverse y de reportar errores.
-- **Cero dependencias obligatorias**: todo corre con la stdlib de Python
-  3.10+. `cryptography` (secretos) y `mcp` (servidor de autoría) son
+- **Casi cero dependencias obligatorias**: sólo `numpy` (transversal a
+  cualquier adapter con cómputo numérico, issue #19), el resto stdlib de
+  Python 3.10+. `cryptography` (secretos) y `mcp` (servidor de autoría) son
   opcionales.
 
 El detalle completo de cada uno de estos puntos está en

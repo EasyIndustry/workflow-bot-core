@@ -23,6 +23,7 @@ from backend.adapters.browser_playwright import PlaywrightBrowserAdapter
 from backend.adapters.clock_system import SystemClockAdapter
 from backend.adapters.crypto_fernet import FernetCryptoAdapter
 from backend.adapters.fs_local import LocalFsAdapter
+from backend.adapters.geometry_null import NullGeometryAdapter
 from backend.adapters.http_urllib import UrllibHttpAdapter
 from backend.adapters.process_subprocess import SubprocessAdapter
 from backend.adapters.storage_sqlite import IN_MEMORY, SqliteStorageAdapter
@@ -995,3 +996,19 @@ def test_window_unsupported_en_un_sistema_operativo_sin_adapter():
         adapter.read_text(ventana)
     with pytest.raises(PortError, match="Darwin"):
         adapter.read_state(ventana, "checkbox")
+
+
+# ── Geometría (issue #19) ─────────────────────────────────────────────
+
+
+def test_geometry_null_no_tiene_ningun_computo_real_detras():
+    """
+    El de reserva que trae el core, no un mock: `available` es False siempre,
+    porque el núcleo deliberadamente no bundlea ningún adapter de geometría
+    de fábrica (issue #19). Usarlo de verdad falla explícito.
+    """
+    adapter = NullGeometryAdapter()
+
+    assert adapter.available is False
+    with pytest.raises(PortError, match="geometría"):
+        adapter.nearest_on_surface(b"stl-falso", [(0.0, 0.0, 0.0)])

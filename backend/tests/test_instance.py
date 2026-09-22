@@ -286,7 +286,7 @@ def test_la_instancia_arma_registro_ports_y_stores(instance):
     """
     assert instance.registry.errors == []
     assert set(instance.registry.tool_ids) == {"core.log", "core.set_status", "core.wait"}
-    assert set(instance.registry.adapters) == {"http", "fs", "process", "clock", "browser", "window"}
+    assert set(instance.registry.adapters) == {"http", "fs", "process", "clock", "browser", "window", "geometry"}
 
 
 def test_los_adapters_inyectados_son_los_que_llegan_al_tool(demo_instance, adapters):
