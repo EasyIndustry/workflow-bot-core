@@ -919,6 +919,41 @@ def test_options_from_de_una_accion_tambien_se_valida():
     assert any("probar.connection" in e.error for e in reg.errors)
 
 
+# ── placeholder: ejemplo adentro del campo vacío (issue #29) ─────────
+
+
+def test_placeholder_viaja_en_el_to_dict():
+    param = Param("ruta", placeholder=r"D:\casos\AP962\stl")
+    assert param.to_dict()["placeholder"] == r"D:\casos\AP962\stl"
+
+
+def test_placeholder_por_defecto_es_vacio():
+    """Compatibilidad: ningún plugin ni test existente declara esto, y no cambia nada si no lo usa."""
+    assert Param("x").to_dict()["placeholder"] == ""
+
+
+def test_placeholder_no_se_valida_al_resolver_params():
+    """
+    Puramente informativo, como options_from: un {variable} sigue pudiendo
+    resolver a cualquier cosa aunque no se parezca en nada al placeholder.
+    """
+    manifest = ToolManifest(
+        id="p.hacer",
+        label="Hacer",
+        category="TEST",
+        params=(Param("ruta", placeholder=r"D:\casos\AP962\stl"),),
+    )
+    resueltos = manifest.resolve_params({"ruta": "cualquier cosa"}, {})
+    assert resueltos["ruta"] == "cualquier cosa"
+
+
+def test_placeholder_no_reemplaza_doc_conviven_los_dos():
+    param = Param("coleccion", doc="La colección del plugin", placeholder="bots")
+    datos = param.to_dict()
+    assert datos["doc"] == "La colección del plugin"
+    assert datos["placeholder"] == "bots"
+
+
 # ── Params abiertos ─────────────────────────────────────────────────────
 
 

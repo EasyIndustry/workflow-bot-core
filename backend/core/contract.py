@@ -149,6 +149,13 @@ class Param:
     # entre los `Resource` que el plugin declara -- un typo acá no debería
     # verse recién como un buscador vacío en la pantalla.
     options_from: str = ""
+    # Ejemplo del valor, para mostrar adentro del campo vacío -- issue #29.
+    # Puramente informativo, como `options_from`: nunca se envía, nunca se
+    # valida contra él, y no reemplaza a `doc`. `doc` explica qué es el
+    # param; `placeholder` muestra cómo se escribe (`D:\casos\AP962\stl`
+    # dice más que cualquier `doc` sobre la forma de un PATH). Conviven: el
+    # ejemplo adentro del campo, la explicación abajo.
+    placeholder: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -161,6 +168,7 @@ class Param:
             "aliases": list(self.aliases),
             "doc": self.doc,
             "options_from": self.options_from,
+            "placeholder": self.placeholder,
         }
 
     def read_from(self, node_params: dict) -> Any:
