@@ -148,6 +148,24 @@ class Param:
     # nodo. `registry` sí valida, al cargar el plugin, que el nombre exista
     # entre los `Resource` que el plugin declara -- un typo acá no debería
     # verse recién como un buscador vacío en la pantalla.
+    #
+    # `options_from="core:<namespace>"` (issue #32) es una fuente que provee
+    # el núcleo en vez de un `Resource` del plugin -- "core:plugins" para los
+    # plugins instalados, por ejemplo -- para un param que nombra algo del
+    # lado del núcleo y no tiene una colección propia a la que apuntar
+    # (`bots.migrar`/`bots.comparar` nombrando una colección de *otro*
+    # plugin, el caso que motiva esto). `registry` no la busca entre los
+    # `Resource` del plugin dueño.
+    #
+    # Puede depender del valor elegido en otro param del mismo tool/acción:
+    # `core:resources:{plugin}` ofrece las colecciones del plugin que valga
+    # `{plugin}` en ese momento. Un solo placeholder, nombrando un solo param
+    # -- nunca una expresión ni algo anidado --, y `registry` valida al
+    # cargar que ese nombre exista entre los params de la misma declaración
+    # (mismo criterio que el resto de `options_from`: un typo no debería
+    # verse recién como un buscador vacío). Los params que un tool agrega en
+    # runtime vía `describe_extra_params` quedan afuera de ese chequeo -- no
+    # pasan por acá, nunca lo hicieron.
     options_from: str = ""
     # Ejemplo del valor, para mostrar adentro del campo vacío -- issue #29.
     # Puramente informativo, como `options_from`: nunca se envía, nunca se
