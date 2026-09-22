@@ -103,26 +103,72 @@ def _dependencia(spec: str) -> dict:
     return {"spec": spec, "package": nombre, "present": presente}
 
 
+# `core:<namespace>` o `core:<namespace>:{<param>}` -- issue #32. Un solo
+# placeholder, nombrando un solo param, sin expresiones ni anidado: eso es lo
+# que mantiene este chequeo en un `in` contra los params declarados, en vez de
+# convertirlo en un parser.
+_OPTIONS_FROM_CORE_RE = re.compile(r"^core:[\w-]+(?::\{(\w+)\})?$")
+
+
 def _options_from_invalidos(
     plugin_manifest: PluginManifest | None, dueño: str, params: Iterable[Param]
 ) -> list[str]:
     """
     Un `Param.options_from` que no nombra un `Resource` que el propio
-    plugin declara.
+    plugin declara, o que no respeta la sintaxis del namespace `core:`.
 
     `dueño` es sólo para el mensaje: el id del tool o el nombre de la acción
     al que pertenecen `params`. Sin `plugin_manifest` (el modo mínimo, sin
     configuración declarada) cualquier `options_from` no vacío ya es
     inválido -- no hay ningún `Resource` posible al que pueda apuntar.
+
+    `options_from="core:..."` (issue #32) es una fuente de opciones que
+    provee el núcleo -- "plugins instalados", "colecciones de tal plugin" --
+    y por eso no se busca entre los `Resource` del plugin dueño. Si además
+    trae un placeholder (`core:resources:{plugin}`), el nombre adentro de
+    `{}` tiene que ser el `name` o un alias de **otro param de esta misma
+    declaración** (tool o acción -- no por plugin: dos tools del mismo plugin
+    pueden declarar params distintos, y validar por plugin daría verde a una
+    combinación que en los hechos no existe). Un placeholder que no nombra
+    ningún param real de acá es el mismo tipo de typo que un `options_from`
+    que no nombra un `Resource`, y encima más difícil de notar: el campo
+    también queda vacío, pero *parece* que dependiera de algo.
+
+    Esta validación no ve los params que un tool agrega en runtime vía
+    `describe_extra_params` -- esos nunca pasan por acá, por diseño: es el
+    límite de lo que se puede saber al cargar, no un hueco a tapar después.
     """
     declarados = {r.name for r in plugin_manifest.resources} if plugin_manifest else set()
-    return [
-        f"{dueño}.{p.name}: options_from='{p.options_from}' no es un resource "
-        f"declarado por este plugin"
-        + (f" (tiene: {', '.join(sorted(declarados))})" if declarados else " (no declara ninguno)")
-        for p in params
-        if p.options_from and p.options_from not in declarados
-    ]
+    nombres_validos = {p.name for p in params} | {a for p in params for a in p.aliases}
+
+    errores: list[str] = []
+    for p in params:
+        if not p.options_from:
+            continue
+        if p.options_from.startswith("core:"):
+            m = _OPTIONS_FROM_CORE_RE.match(p.options_from)
+            if not m:
+                errores.append(
+                    f"{dueño}.{p.name}: options_from='{p.options_from}' no respeta la "
+                    f"sintaxis 'core:namespace' o 'core:namespace:{{param}}' (un solo "
+                    f"placeholder, sin anidar)"
+                )
+                continue
+            placeholder = m.group(1)
+            if placeholder and placeholder not in nombres_validos:
+                errores.append(
+                    f"{dueño}.{p.name}: options_from='{p.options_from}' referencia el "
+                    f"param '{placeholder}', que no existe en esta misma declaración"
+                    + (f" (tiene: {', '.join(sorted(nombres_validos))})" if nombres_validos else "")
+                )
+            continue
+        if p.options_from not in declarados:
+            errores.append(
+                f"{dueño}.{p.name}: options_from='{p.options_from}' no es un resource "
+                f"declarado por este plugin"
+                + (f" (tiene: {', '.join(sorted(declarados))})" if declarados else " (no declara ninguno)")
+            )
+    return errores
 
 
 @dataclass(frozen=True)

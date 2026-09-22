@@ -919,6 +919,102 @@ def test_options_from_de_una_accion_tambien_se_valida():
     assert any("probar.connection" in e.error for e in reg.errors)
 
 
+# ── options_from="core:..." — fuente de opciones que provee el núcleo (issue #32) ──
+
+
+def test_options_from_core_no_se_busca_entre_los_resources_del_plugin():
+    """Sin resources declarados, options_from='connections' se reportaría; 'core:plugins' no."""
+    tool = FunctionTool(
+        manifest=ToolManifest(
+            id="p.usar",
+            label="x",
+            category="X",
+            params=(Param("plugin", options_from="core:plugins"),),
+        ),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("p", "test", [tool])
+
+    assert reg.errors == []
+
+
+def test_options_from_core_con_placeholder_que_nombra_otro_param_es_valido():
+    tool = FunctionTool(
+        manifest=ToolManifest(
+            id="bots.migrar",
+            label="Migrar",
+            category="X",
+            params=(
+                Param("plugin", options_from="core:plugins"),
+                Param("coleccion", options_from="core:resources:{plugin}"),
+            ),
+        ),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("bots", "test", [tool])
+
+    assert reg.errors == []
+
+
+def test_options_from_core_con_placeholder_que_no_existe_se_reporta():
+    """Un typo acá es peor que en un options_from normal: el campo parece depender de algo."""
+    tool = FunctionTool(
+        manifest=ToolManifest(
+            id="bots.migrar",
+            label="Migrar",
+            category="X",
+            params=(Param("coleccion", options_from="core:resources:{plugn}"),),  # typo
+        ),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("bots", "test", [tool])
+
+    assert any(
+        "options_from" in e.error and "plugn" in e.error and "no existe" in e.error
+        for e in reg.errors
+    )
+
+
+def test_options_from_core_acepta_un_alias_del_param_referenciado():
+    """Mismo criterio que la resolución real: `read_from` acepta el nombre actual o un alias."""
+    tool = FunctionTool(
+        manifest=ToolManifest(
+            id="bots.migrar",
+            label="Migrar",
+            category="X",
+            params=(
+                Param("plugin", aliases=("nombre_plugin",)),
+                Param("coleccion", options_from="core:resources:{nombre_plugin}"),
+            ),
+        ),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("bots", "test", [tool])
+
+    assert reg.errors == []
+
+
+def test_options_from_core_con_sintaxis_invalida_se_reporta():
+    """Un solo placeholder, sin expresiones ni anidado: cualquier otra forma es un error de carga."""
+    tool = FunctionTool(
+        manifest=ToolManifest(
+            id="bots.migrar",
+            label="Migrar",
+            category="X",
+            params=(Param("coleccion", options_from="core:resources:{plugin}{otro}"),),
+        ),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("bots", "test", [tool])
+
+    assert any("options_from" in e.error and "sintaxis" in e.error for e in reg.errors)
+
+
 # ── placeholder: ejemplo adentro del campo vacío (issue #29) ─────────
 
 

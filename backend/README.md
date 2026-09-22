@@ -166,6 +166,19 @@ valor. Un `options_from` que no nombra un `Resource` que el plugin declara
 se reporta al cargar, igual que un alias en conflicto: no impide que el tool
 ande, pero un typo no debería verse recién como un buscador vacío.
 
+`options_from` también acepta el namespace `core:` (issue #32), para un param
+que nombra algo del lado del núcleo en vez de una colección del propio
+plugin —el caso de `bots.migrar`/`bots.comparar`, cuyos params `plugin` y
+`coleccion` nombran una colección de *otro* plugin y no tienen `Resource`
+propio al que apuntar—: `options_from="core:plugins"` para los plugins
+instalados, o `options_from="core:resources:{plugin}"` para las colecciones
+del plugin que valga el param `plugin` en ese momento. El placeholder es
+siempre uno solo, nombrando un solo param de la misma declaración, sin
+expresiones ni anidado; `registry` valida esa sintaxis y ese nombre al
+cargar, con el mismo criterio que el resto de `options_from` — pero no ve los
+params que un tool agrega en runtime vía `describe_extra_params`, que nunca
+pasan por acá.
+
 Un `Param` también puede declarar `placeholder` (issue #29): un ejemplo del
 valor, para dibujar adentro del campo vacío (`Param("ruta", placeholder=
 r"D:\casos\AP962\stl")`). Convive con `doc` —`doc` explica qué es el param,
