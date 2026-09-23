@@ -154,8 +154,20 @@ class FsPort(Protocol):
         """Contenido directo de una carpeta, ordenado por nombre."""
         ...
 
-    def walk(self, path: str) -> Iterator[FileInfo]:
-        """Todas las entradas bajo una carpeta, recursivo."""
+    def walk(self, path: str, max_depth: int | None = None) -> Iterator[FileInfo]:
+        """
+        Todas las entradas bajo una carpeta, recursivo.
+
+        Una carpeta se emite sin statear (`size`/`modified_at` en su default);
+        un archivo sí se statea -- es el costo real de un `walk` sin límite.
+
+        `max_depth` (issue #33) recorta cuántos niveles bajo `path` recorre:
+        `1` son sólo sus hijos directos, sin bajar más. Sin él (default,
+        `None`) es el árbol entero, como siempre. Sirve para "necesito los
+        nombres de acá abajo, nada más": sobre un share con decenas de miles
+        de entradas por nivel, `walk` sin este límite paga minutos en stats
+        que después se descartan.
+        """
         ...
 
     # Escritura

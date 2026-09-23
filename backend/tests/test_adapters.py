@@ -158,6 +158,37 @@ def test_fs_listar_y_recorrer(tmp_path):
     assert "hondo.txt" in todos
 
 
+def test_fs_walk_con_max_depth_no_baja_mas_del_limite(tmp_path):
+    """
+    Issue #33: sobre un share grande, bajar el árbol entero para pedir sólo
+    los hijos directos paga minutos de stat que después se descartan.
+    `max_depth=1` tiene que devolver exactamente eso -- nombres de acá abajo,
+    nada más hondo -- sin tocar lo que hay adentro de "sub".
+    """
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "hondo.txt").write_text("x")
+    (tmp_path / "arriba.txt").write_text("x")
+    fs = LocalFsAdapter()
+
+    directos = {e.name for e in fs.walk(str(tmp_path), max_depth=1)}
+    assert directos == {"sub", "arriba.txt"}
+
+    sin_limite = {e.name for e in fs.walk(str(tmp_path))}
+    assert "hondo.txt" in sin_limite  # sin max_depth, sigue siendo el árbol entero
+
+
+def test_fs_walk_max_depth_dos_llega_un_nivel_mas(tmp_path):
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "hondo.txt").write_text("x")
+    (tmp_path / "sub" / "mas_hondo").mkdir()
+    (tmp_path / "sub" / "mas_hondo" / "muy_hondo.txt").write_text("x")
+    fs = LocalFsAdapter()
+
+    nivel_dos = {e.name for e in fs.walk(str(tmp_path), max_depth=2)}
+    assert nivel_dos == {"sub", "hondo.txt", "mas_hondo"}
+    assert "muy_hondo.txt" not in nivel_dos
+
+
 def test_fs_un_error_del_sistema_lleva_la_ruta_adentro(tmp_path):
     """
     Un FileNotFoundError pelado no dice *cuál* archivo, que es lo único que se

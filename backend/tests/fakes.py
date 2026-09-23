@@ -113,11 +113,15 @@ class FakeFs:
                 hijos.append(self.stat(ruta))
         return hijos
 
-    def walk(self, path):
+    def walk(self, path, max_depth=None):
         p = _norm(path)
         for ruta in sorted(self.dirs | set(self.files)):
-            if ruta != p and ruta.startswith(p + "/"):
-                yield self.stat(ruta)
+            if ruta == p or not ruta.startswith(p + "/"):
+                continue
+            profundidad = ruta[len(p) + 1:].count("/") + 1
+            if max_depth is not None and profundidad > max_depth:
+                continue
+            yield self.stat(ruta)
 
     # ── Escritura ───────────────────────────────────────────────────────
 
