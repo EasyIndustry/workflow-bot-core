@@ -182,10 +182,11 @@ class LocalFsAdapter:
             raise PortError(f"no se pudo listar {destino}: {exc.strerror or exc}") from exc
         return [_info(e, _stat_o_none(e)) for e in entradas]
 
-    def walk(self, path: str) -> Iterator[FileInfo]:
+    def walk(self, path: str, max_depth: int | None = None) -> Iterator[FileInfo]:
         destino = self._p(path)
         if not destino.is_dir():
             raise PortError(f"no es una carpeta: {destino}")
+        profundidad_raiz = len(destino.parts)
         for base, carpetas, archivos in os.walk(destino):
             carpetas.sort()
             archivos.sort()
@@ -195,6 +196,12 @@ class LocalFsAdapter:
             for nombre in archivos:
                 entrada = raiz / nombre
                 yield _info(entrada, _stat_o_none(entrada), is_dir=False)
+            # Issue #33: podar en el lugar es lo que `os.walk` respeta para no
+            # bajar más -- los hijos de `raiz` ya se emitieron arriba (son el
+            # nivel `len(raiz.parts) - profundidad_raiz + 1`); si eso llega al
+            # límite, no hace falta entrar a ninguno de ellos.
+            if max_depth is not None and (len(raiz.parts) - profundidad_raiz + 1) >= max_depth:
+                carpetas.clear()
 
     # ── Escritura ───────────────────────────────────────────────────────
 
