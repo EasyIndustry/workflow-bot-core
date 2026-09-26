@@ -99,6 +99,11 @@ class NodeTrace:
     depth: int = 1
     flow: str = ""
     decision_value: str | None = None
+    # Issue #34: True sólo cuando un tool declarado dry_run="run" corrió de
+    # verdad en un dry run (ports fs/http en modo de sólo lectura). Distingue
+    # ese paso de uno salteado -- los outputs de acá son reales, no un "OK"
+    # asumido, y una UI no debería confundir los dos casos.
+    dry_executed: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -118,6 +123,7 @@ class NodeTrace:
             "depth": self.depth,
             "flow": self.flow,
             "decision_value": self.decision_value,
+            "dry_executed": self.dry_executed,
         }
 
 
@@ -507,7 +513,8 @@ def _run_action(
                 run.fail(f'Detenido en "{node_id}": {motivo}', node_id)
                 return None
 
-    # ── Dry run: valida y sigue, sin ejecutar nada ────────────────────
+    # ── Dry run: valida y sigue, sin ejecutar nada -- salvo que el tool se
+    # declare dry_run="run" (issue #34) ───────────────────────────────────
     if run.dry_run:
         if node.fn not in NATIVE_FNS and run.registry.get(node.fn) is None:
             trace.status = STATUS_ERR
@@ -538,6 +545,20 @@ def _run_action(
                 run.fail(f'Detenido en "{node_id}" ({node.fn}): {exc}', node_id)
                 return None
 
+        # Un tool que sólo lee (`dry_run="run"`, y sin ningún port que se
+        # quede sin modo de sólo lectura -- `dry_run_ok` repite ese chequeo)
+        # corre de verdad: es lo único que le da a una decisión posterior
+        # algo real con qué decidir, en vez de "sin valor conocido" y la
+        # primera rama siempre. `dry_run_ok` en `NATIVE_FNS` (flow.ejecutar,
+        # flow.retry_gate) no aplica -- no son tools de registry.
+        if node.fn not in NATIVE_FNS and run.registry.dry_run_ok(node.fn):
+            result = _invoke_tool(
+                run, node, node_id, resueltos,
+                on_params=lambda p: setattr(trace, "params", p),
+                read_only=True,
+            )
+            return _apply_result(run, trace, node, node_id, graph, result, started, dry_executed=True)
+
         run.log(
             f"[DRY] {node.fn}" + (f" | {_fmt(trace.params)}" if trace.params else ""),
             node_id=node_id,
@@ -559,6 +580,22 @@ def _run_action(
             run, node, node_id, resueltos, on_params=lambda p: setattr(trace, "params", p)
         )
 
+    return _apply_result(run, trace, node, node_id, graph, result, started)
+
+
+def _apply_result(
+    run: _Run,
+    trace: NodeTrace,
+    node: ActionNode,
+    node_id: str,
+    graph: FlowGraph,
+    result: ToolResult,
+    started: float,
+    *,
+    dry_executed: bool = False,
+) -> str | None:
+    """Vuelca un ToolResult a la traza y decide la próxima arista. Comparte
+    camino la corrida real y un dry run que ejecutó de verdad (issue #34)."""
     trace.status = result.status
     trace.message = result.message
     trace.outputs = dict(result.outputs)
@@ -566,6 +603,8 @@ def _run_action(
     trace.traceback = result.traceback
     trace.error_kind = result.error_kind
     trace.duration_ms = int((time.monotonic() - started) * 1000)
+    if dry_executed:
+        trace.dry_executed = True
 
     if result.outputs:
         run.context.merge_outputs(result.outputs, node_id=node_id)
@@ -624,6 +663,8 @@ def _invoke_tool(
     node_id: str,
     resueltos: dict,
     on_params: Callable[[dict], None] | None = None,
+    *,
+    read_only: bool = False,
 ) -> ToolResult:
     """
     Llama a un tool a través del registry.
@@ -634,6 +675,9 @@ def _invoke_tool(
     `on_params` recibe los params ya tipados, para que la traza registre lo que
     el tool realmente vio. Se llama sólo si el tipado tuvo éxito: cuando falla,
     lo que interesa ver es el valor crudo que no convirtió.
+
+    `read_only=True` (issue #34) es sólo un pase directo a
+    `registry.execute`: el llamador ya verificó `dry_run_ok` antes de pedirlo.
     """
 
     def ctx_factory(manifest, ports):
@@ -659,7 +703,7 @@ def _invoke_tool(
             ports=ports,
         )
 
-    return run.registry.execute(node.fn, ctx_factory)
+    return run.registry.execute(node.fn, ctx_factory, read_only=read_only)
 
 
 def _retry_gate(run: _Run, params: dict) -> ToolResult:

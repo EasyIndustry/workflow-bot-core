@@ -11,7 +11,7 @@ python -m backend.core workflows                    # flujos guardados
 python -m backend.core add flujo.mmd                # guarda un .mmd en la instalación
 python -m backend.core check flujo.mmd              # validar sin ejecutar
 python -m backend.core run flujo.mmd --row '{"id":"42"}'
-python -m backend.core run flujo.mmd --dry-run      # recorrer sin tocar el mundo
+python -m backend.core run flujo.mmd --dry-run      # recorrer sin tocar el mundo (salvo lo que declare dry_run="run", issue #34)
 python -m backend.core trace <run_id>               # la traza de una corrida
 ```
 
@@ -140,6 +140,19 @@ Reglas que el núcleo hace cumplir, no sugerencias:
   `ctx.resource(...)`.
 - Un plugin **no escribe HTML**: declara `Setting`, `Resource.fields` y
   `Action`, y quien construya la UI los renderiza desde `registry.catalog()`.
+
+Un tool que **sólo lee** puede declarar `ToolManifest(dry_run="run")` (issue
+#34): en un dry run corre de verdad, en vez del default `"skip"` (se asume
+`STATUS_OK` sin ejecutar nada). Es lo único que le da a una decisión
+posterior algo real con qué decidir —"leer un archivo y ramificar según lo
+que dice" no tiene forma de resolverse sin correr ese tool— y el núcleo lo
+hace cumplir, no confía en la declaración: `ctx.port("fs")`/`ctx.port("http")`
+llegan en un modo de sólo lectura (consulta pasa, escritura levanta
+`PortError`), así que un tool que declara `run` y escribe igual falla en
+seco en vez de escribir. Un tool que pide `process`/`window`/`browser` no
+tiene ningún modo de sólo lectura posible: `registry` lo reporta al cargar
+si declara `run` de todos modos, y el executor lo trata como `"skip"` pase
+lo que pase con ese diagnóstico.
 
 ## Para quien construya la interfaz
 

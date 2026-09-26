@@ -49,7 +49,7 @@ from .contract import (
     ToolResult,
 )
 from .builtins import NATIVE_MANIFESTS
-from .ports import PLUGIN_PORTS
+from .ports import PLUGIN_PORTS, PortError
 
 log = logging.getLogger(__name__)
 
@@ -101,6 +101,85 @@ def _dependencia(spec: str) -> dict:
     except PackageNotFoundError:
         presente = False
     return {"spec": spec, "package": nombre, "present": presente}
+
+
+# ── dry_run="run": el tool corre de verdad en seco, con fs/http en modo de
+# sólo lectura (issue #34) ───────────────────────────────────────────────
+
+# Sin ningún subconjunto de sólo lectura razonable: un tool que pide alguno
+# de éstos no puede beneficiarse de `dry_run="run"`, declare lo que declare.
+PORTS_SIN_MODO_LECTURA = frozenset({"process", "window", "browser"})
+
+_FS_ESCRITURA = frozenset({
+    "make_dirs", "move", "copy_file", "copy_tree",
+    "remove_file", "remove_tree", "rename", "write_text", "write_bytes",
+})
+
+_HTTP_METODOS_LECTURA = frozenset({"GET", "HEAD"})
+
+
+class _SoloLecturaFs:
+    """
+    Envuelve cualquier adapter de `fs`: delega consulta, bloquea escritura.
+
+    Genérico sobre el Protocol, no sobre un adapter concreto -- anda igual
+    con `LocalFsAdapter` que con el fake de test o un adapter de terceros.
+    `__getattr__` alcanza porque `FsPort` no tiene estado propio que envolver,
+    sólo métodos: lo único que hace falta interceptar es la escritura.
+    """
+
+    def __init__(self, real) -> None:
+        self._real = real
+
+    def __getattr__(self, nombre: str):
+        if nombre in _FS_ESCRITURA:
+            def _bloqueado(*args, **kwargs):
+                raise PortError(f"escritura en dry run: fs.{nombre}")
+            return _bloqueado
+        return getattr(self._real, nombre)
+
+
+class _SoloLecturaHttp:
+    """`GET`/`HEAD` pasan; cualquier otro método es escritura y se bloquea."""
+
+    def __init__(self, real) -> None:
+        self._real = real
+
+    def request(self, url, *, method: str = "GET", **kwargs):
+        if method.upper() not in _HTTP_METODOS_LECTURA:
+            raise PortError(f"escritura en dry run: HTTP {method}")
+        return self._real.request(url, method=method, **kwargs)
+
+    def __getattr__(self, nombre: str):
+        return getattr(self._real, nombre)
+
+
+def _en_modo_lectura(ports: dict) -> dict:
+    envueltos = dict(ports)
+    if "fs" in envueltos:
+        envueltos["fs"] = _SoloLecturaFs(envueltos["fs"])
+    if "http" in envueltos:
+        envueltos["http"] = _SoloLecturaHttp(envueltos["http"])
+    return envueltos
+
+
+def _dry_run_run_invalido(dueño_ports: tuple[str, ...], tool_id: str, manifest: ToolManifest) -> str | None:
+    """
+    Un tool que declara `dry_run="run"` pero pide un port sin modo de sólo
+    lectura. Se reporta al cargar, igual que un `options_from` inválido: no
+    impide que el tool se registre -- `ToolRegistry.dry_run_ok` vuelve a
+    chequear esto mismo en cada dry run, así que la declaración se trata
+    como "skip" pase lo que pase con este diagnóstico.
+    """
+    if manifest.dry_run != "run":
+        return None
+    conflicto = PORTS_SIN_MODO_LECTURA & set(dueño_ports)
+    if not conflicto:
+        return None
+    return (
+        f"{tool_id}: declara dry_run='run' pero pide {', '.join(sorted(conflicto))}, "
+        f"que no tiene modo de sólo lectura -- se lo trata como 'skip' en dry run"
+    )
 
 
 # `core:<namespace>` o `core:<namespace>:{<param>}` -- issue #32. Un solo
@@ -247,6 +326,23 @@ class ToolRegistry:
             return {}
         return {p: self._adapters[p] for p in cargado.ports if p in self._adapters}
 
+    def dry_run_ok(self, tool_id: str) -> bool:
+        """
+        Si el `dry_run="run"` de este tool es honorable ahora mismo (issue #34).
+
+        Repite el chequeo de `_dry_run_run_invalido` en vez de confiar en el
+        diagnóstico de carga: éste se puede haber pasado por alto
+        (`--allow-broken`, o un catálogo leído de una instalación vieja), y
+        un tool que pide `process`/`window`/`browser` no puede arriesgarse a
+        correr de verdad en seco pase lo que declare.
+        """
+        tool = self.get(tool_id)
+        if tool is None or tool.manifest.dry_run != "run":
+            return False
+        cargado = self.plugin_of(tool_id)
+        ports_del_dueño = set(cargado.ports) if cargado else set()
+        return not (ports_del_dueño & PORTS_SIN_MODO_LECTURA)
+
     # ── Descubrimiento ──────────────────────────────────────────────────
 
     def discover(self) -> "ToolRegistry":
@@ -357,6 +453,11 @@ class ToolRegistry:
 
             for error in _options_from_invalidos(plugin_manifest, manifest.id, manifest.params):
                 self._errors.append(LoadError(name, source, error))
+
+            dueño_ports = plugin_manifest.ports if plugin_manifest else ()
+            error_dry_run = _dry_run_run_invalido(dueño_ports, manifest.id, manifest)
+            if error_dry_run:
+                self._errors.append(LoadError(name, source, error_dry_run))
 
             for alias in manifest.aliases:
                 if alias in self._tools or alias in self._aliases:
@@ -545,7 +646,7 @@ class ToolRegistry:
 
     # ── Ejecución ───────────────────────────────────────────────────────
 
-    def execute(self, tool_id: str, ctx_factory) -> ToolResult:
+    def execute(self, tool_id: str, ctx_factory, *, read_only: bool = False) -> ToolResult:
         """
         Ejecuta un tool con aislamiento de fallos.
 
@@ -558,6 +659,12 @@ class ToolRegistry:
         tool, y devuelve el ToolContext. Recibe las dos cosas porque el núcleo
         tiene que resolver los params contra el manifest antes de construirlo, y
         porque los ports dependen de qué plugin es dueño del tool.
+
+        `read_only=True` (issue #34, dry_run="run") envuelve `fs`/`http` en un
+        modo que deja pasar la consulta y bloquea la escritura con `PortError`
+        -- el llamador (el executor) es quien decide, según `dry_run_ok`,
+        cuándo corresponde. `execute` no lo vuelve a chequear: confía en que
+        quien pide `read_only=True` ya lo hizo.
         """
         tool = self.get(tool_id)
         if tool is None:
@@ -567,8 +674,12 @@ class ToolRegistry:
                 f"Registrados: {disponibles}…"
             )
 
+        ports = self.ports_for(tool_id)
+        if read_only:
+            ports = _en_modo_lectura(ports)
+
         try:
-            ctx = ctx_factory(tool.manifest, self.ports_for(tool_id))
+            ctx = ctx_factory(tool.manifest, ports)
         except ParamError as exc:
             return ToolResult.err(str(exc))
         except Exception as exc:
