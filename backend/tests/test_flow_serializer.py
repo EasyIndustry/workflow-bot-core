@@ -147,13 +147,44 @@ def test_un_valor_sin_coma_ni_pipe_no_se_cita():
     assert "msg=hola" in to_mermaid(grafo)
 
 
-# ── Lo que no se puede escribir ─────────────────────────────────────────
+# ── Comillas escapadas (issue #36) ───────────────────────────────────────
 
 
-def test_un_valor_con_comilla_se_avisa():
-    """Sin escape para una comilla dentro de un valor citado, esto sigue roto."""
+def test_un_valor_con_comilla_se_cita_y_escapa():
+    """Issue #36: una comilla ya no rompe el round-trip -- se cita y se escapa."""
     grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": 'di "hola"'}, line=1)})
+    assert verificar(grafo) == []
+    texto = to_mermaid(grafo, strict=True)
+    assert 'msg="di \\"hola\\""' in texto
+    despues = parse_flow(texto, with_meta=False)
+    assert despues.nodes["N1"].params["msg"] == 'di "hola"'
+
+
+def test_un_json_serializado_con_varias_claves_sobrevive_el_round_trip():
+    """El caso real reportado (issue #36): un ParamType.JSON con más de una clave."""
+    import json
+
+    valor = json.dumps({"a": {"tipo": "si_no"}, "b": {"tipo": "si_no"}})
+    grafo = FlowGraph(nodes={"N1": ActionNode(fn="test.decide", params={"preguntas": valor}, line=1)})
+    assert verificar(grafo) == []
+    despues = parse_flow(to_mermaid(grafo, strict=True), with_meta=False)
+    assert json.loads(despues.nodes["N1"].params["preguntas"]) == json.loads(valor)
+
+
+def test_un_valor_citado_que_termina_en_backslash_suelto_se_avisa():
+    """
+    El límite que persiste: una barra invertida suelta justo antes del cierre
+    de la cita se leería como una comilla escapada. No es cualquier backslash
+    -- una ruta de Windows sin coma ni comilla no se cita, y no le pega.
+    """
+    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "a, b\\"}, line=1)})
     assert verificar(grafo)
+
+
+def test_una_ruta_de_windows_sin_coma_no_se_cita_ni_le_pega_el_backslash():
+    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"ruta": r"D:\casos\AP962\stl"}, line=1)})
+    assert verificar(grafo) == []
+    assert r'ruta=D:\casos\AP962\stl' in to_mermaid(grafo)
 
 
 def test_la_coma_en_una_condicion_no_es_un_problema():
@@ -175,7 +206,7 @@ def test_un_pipe_en_una_condicion_si_es_un_problema():
 
 
 def test_strict_levanta_antes_de_guardar_algo_roto():
-    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": 'di "hola"'}, line=1)})
+    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "a, b\\"}, line=1)})
     try:
         to_mermaid(grafo, strict=True)
         raise AssertionError("debió levantar")
@@ -185,7 +216,7 @@ def test_strict_levanta_antes_de_guardar_algo_roto():
 
 def test_sin_strict_escribe_igual_y_deja_decidir():
     """Guardar a medias mientras se escribe está permitido; hacerlo callado, no."""
-    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": 'di "hola"'}, line=1)})
+    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "a, b\\"}, line=1)})
     assert "core.log" in to_mermaid(grafo)
 
 

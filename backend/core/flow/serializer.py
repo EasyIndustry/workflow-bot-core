@@ -19,9 +19,14 @@ Tres reglas que salen de eso:
    de palabra, con sólo un warning).
 3. **Lo que no puede round-trippear se avisa, no se emite y se reza.**
    `verificar()` devuelve los problemas y `to_mermaid(..., strict=True)` levanta
-   antes de guardar. Un valor con `"` no sobrevive al parseo —no hay forma de
-   escapar una comilla dentro de un valor citado, todavía— y guardarlo en
-   silencio es el defecto que este módulo existe para no repetir.
+   antes de guardar. Un valor con `"` sí sobrevive desde issue #36: se cita y
+   cada comilla se escapa como `\"` — lo que deja pasar un `ParamType.JSON`
+   serializado con `json.dumps` (comillas propias) como valor de un param, el
+   caso real que rompía `bots`/`laya`. Lo que sigue sin poder distinguirse es
+   un valor citado que termina en una barra invertida suelta: se leería como
+   una comilla escapada. `verificar()` marca ese caso puntual, no cualquier
+   backslash — doblarlos todos rompería los ~30 nodos que ya escriben una
+   ruta de Windows sin citar.
 """
 
 from __future__ import annotations
@@ -36,10 +41,6 @@ from .parser import (
     StartNode,
     UnknownNode,
 )
-
-# Un valor con estos caracteres no vuelve igual del parser: `|` y `,` son
-# separadores de parámetros, y `"` cierra la etiqueta del nodo.
-PROHIBIDOS_EN_VALOR = ('"',)
 
 # Y en una condición de arista, la coma **sí** significa algo: es el operador
 # IN, que arma la lista de valores. Ahí lo que no puede aparecer es el pipe,
@@ -172,14 +173,19 @@ def verificar(grafo: FlowGraph) -> list[str]:
             if not nodo.fn.strip():
                 problemas.append(f'El nodo "{node_id}" no tiene tool')
             for clave, valor in nodo.params.items():
-                for caracter in PROHIBIDOS_EN_VALOR:
-                    if caracter in str(valor):
-                        problemas.append(
-                            f'{node_id} › {clave}: el valor contiene "{caracter}", '
-                            f"que separa parámetros o cierra la etiqueta y no "
-                            f"sobrevive al volver a leer el flujo"
-                        )
-                if DISPLAY_SEP in str(valor):
+                texto = str(valor)
+                # Issue #36: una comilla ya sobrevive (se cita y se escapa).
+                # Lo único que sigue sin poder distinguirse es un valor citado
+                # que termina en una barra invertida suelta: se leería como
+                # una comilla escapada y se comería el cierre de la cita.
+                necesita_cita = any(c in texto for c in (",", "|", '"'))
+                if necesita_cita and _termina_en_backslash_impar(texto):
+                    problemas.append(
+                        f'{node_id} › {clave}: el valor necesita citarse (tiene "," "|" o '
+                        f'\'"\') y termina en una barra invertida suelta, que se leería '
+                        f"como una comilla escapada y no sobrevive al volver a leer el flujo"
+                    )
+                if DISPLAY_SEP in texto:
                     problemas.append(
                         f'{node_id} › {clave}: el valor contiene "{DISPLAY_SEP}", '
                         f"que separa el nombre visible de la definición"
@@ -200,6 +206,22 @@ def verificar(grafo: FlowGraph) -> list[str]:
     return problemas
 
 
+def _termina_en_backslash_impar(texto: str) -> bool:
+    """
+    Si `texto` termina en una cantidad impar de `\\` seguidas.
+
+    Un par se escribe y se lee sin ambigüedad (`\\\\` -> un backslash literal
+    más lo que siga); una suelta justo antes de donde iría la comilla de
+    cierre de la cita se confunde con `\\"` -- issue #36.
+    """
+    i = len(texto)
+    cuenta = 0
+    while i > 0 and texto[i - 1] == "\\":
+        cuenta += 1
+        i -= 1
+    return cuenta % 2 == 1
+
+
 def _orden(grafo: FlowGraph) -> list[str]:
     """
     Los nodos en el orden en que estaban en el archivo, y los nuevos al final.
@@ -216,14 +238,22 @@ def _orden(grafo: FlowGraph) -> list[str]:
 
 def _citar_si_hace_falta(valor: str) -> str:
     """
-    Envuelve el valor en comillas si tiene `,` o `|`: sin eso, el parser lo
-    leería como el arranque de otro parámetro. Un valor sin ninguno de los dos
-    se escribe tal cual, como siempre — no le agrega comillas a los ~30 nodos
+    Envuelve el valor en comillas si tiene `,`, `|` o `"`: sin eso, el parser lo
+    leería como el arranque de otro parámetro (`,`/`|`) o cerraría la etiqueta
+    del nodo a mitad de camino (`"`). Un valor sin ninguno de los tres se
+    escribe tal cual, como siempre — no le agrega comillas a los ~30 nodos
     existentes que no las necesitan.
+
+    Cada `"` del valor se escapa como `\\"` (issue #36) antes de envolver: es
+    lo que deja pasar un `ParamType.JSON` serializado con `json.dumps` —con
+    sus propias comillas— como valor de un param. No se toca ningún otro
+    backslash: doblarlos todos rompería los ~30 nodos que ya escriben una ruta
+    de Windows sin citar. `verificar()` señala el único caso que esto deja sin
+    resolver -- un valor citado que termina en una barra invertida suelta.
     """
     valor = str(valor)
-    if "," in valor or "|" in valor:
-        return f'"{valor}"'
+    if "," in valor or "|" in valor or '"' in valor:
+        return '"' + valor.replace('"', '\\"') + '"'
     return valor
 
 

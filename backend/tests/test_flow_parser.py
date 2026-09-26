@@ -264,6 +264,18 @@ def test_valor_citado_con_pipe_no_corta_los_params():
     assert graph.nodes["N"].params == {"message": "a|b", "level": "warning"}
 
 
+def test_comilla_escapada_dentro_de_un_valor_citado_es_literal():
+    """Issue #36: `\\"` no cierra la cita -- deja pasar un JSON con sus propias comillas."""
+    graph = parse_flow(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    N["laya.preguntar | preguntas="{\\"a\\": 1, \\"b\\": 2}""]\n'
+        '    B --> N\n'
+    )
+    assert graph.runnable
+    assert graph.nodes["N"].params == {"preguntas": '{"a": 1, "b": 2}'}
+
+
 def test_comilla_sin_cerrar_es_error():
     graph = parse_flow(
         'flowchart TD\n'
