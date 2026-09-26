@@ -919,6 +919,103 @@ def test_options_from_de_una_accion_tambien_se_valida():
     assert any("probar.connection" in e.error for e in reg.errors)
 
 
+# ── dry_run="run" — un tool que sólo lee corre de verdad en seco (issue #34) ──
+
+
+def test_dry_run_run_con_puerto_sin_modo_lectura_se_reporta_al_cargar():
+    tool = FunctionTool(
+        manifest=ToolManifest(id="p.usar", label="x", category="X", dry_run="run"),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    manifest = PluginManifest(name="p", label="P", ports=("process",))
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("p", "test", Plugin(manifest=manifest, tools=[tool]))
+
+    assert any(
+        "dry_run" in e.error and "process" in e.error for e in reg.errors
+    )
+    # El typo de diseño no impide que el tool ande -- mismo criterio que options_from.
+    assert reg.manifest("p.usar") is not None
+
+
+def test_dry_run_run_con_puertos_compatibles_no_se_reporta():
+    tool = FunctionTool(
+        manifest=ToolManifest(id="p.usar", label="x", category="X", dry_run="run"),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    manifest = PluginManifest(name="p", label="P", ports=("fs", "http"))
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("p", "test", Plugin(manifest=manifest, tools=[tool]))
+
+    assert reg.errors == []
+
+
+def test_dry_run_ok_es_false_por_default():
+    tool = FunctionTool(
+        manifest=ToolManifest(id="p.usar", label="x", category="X"),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("p", "test", Plugin(manifest=PluginManifest(name="p", label="P"), tools=[tool]))
+
+    assert reg.dry_run_ok("p.usar") is False
+
+
+def test_dry_run_ok_es_true_con_puertos_compatibles():
+    tool = FunctionTool(
+        manifest=ToolManifest(id="p.usar", label="x", category="X", dry_run="run"),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    manifest = PluginManifest(name="p", label="P", ports=("fs",))
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("p", "test", Plugin(manifest=manifest, tools=[tool]))
+
+    assert reg.dry_run_ok("p.usar") is True
+
+
+def test_dry_run_ok_es_false_con_puerto_incompatible_aunque_declare_run():
+    """
+    La red de seguridad: `dry_run_ok` no confía en el diagnóstico de carga --
+    lo repite. Un `--allow-broken` u otro camino que pase por alto el error
+    de carga no debería poder arriesgar tocar el mundo en un dry run.
+    """
+    tool = FunctionTool(
+        manifest=ToolManifest(id="p.usar", label="x", category="X", dry_run="run"),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    manifest = PluginManifest(name="p", label="P", ports=("fs", "browser"))
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("p", "test", Plugin(manifest=manifest, tools=[tool]))
+
+    assert reg.dry_run_ok("p.usar") is False
+
+
+def test_execute_read_only_bloquea_escritura_de_fs_y_deja_pasar_lectura():
+    fs = FakeFs(files={"/a.txt": "hola"})
+    tool = FunctionTool(
+        manifest=ToolManifest(id="p.usar", label="x", category="X"),
+        fn=lambda ctx: ToolResult.ok(leido=ctx.port("fs").read_text("/a.txt")),
+    )
+    manifest = PluginManifest(name="p", label="P", ports=("fs",))
+    reg = ToolRegistry(adapters=fake_adapters(fs=fs))
+    reg._add_plugin("p", "test", Plugin(manifest=manifest, tools=[tool]))
+
+    resultado = reg.execute("p.usar", lambda m, ports: ToolContext(
+        run_id="r", case_id="c", params={}, config={}, context={}, log=lambda *a: None, ports=ports,
+    ), read_only=True)
+    assert resultado.outputs["leido"] == "hola"
+
+    def _ctx_que_escribe(m, ports):
+        ports["fs"].write_text("/b.txt", "x")
+        return ToolContext(
+            run_id="r", case_id="c", params={}, config={}, context={}, log=lambda *a: None, ports=ports,
+        )
+
+    escritura = reg.execute("p.usar", _ctx_que_escribe, read_only=True)
+    assert escritura.failed
+    assert "escritura en dry run" in escritura.message
+
+
 # ── options_from="core:..." — fuente de opciones que provee el núcleo (issue #32) ──
 
 

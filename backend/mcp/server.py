@@ -159,10 +159,11 @@ TOOLS: list[types.Tool] = [
     ),
     _tool(
         "dry_run_flow",
-        "Recorre el flujo entero con un row de prueba SIN ejecutar un solo tool. "
-        "Resuelve las variables, sigue las ramas y devuelve la traza con los "
-        "valores a los que se habría resuelto cada param. No toca red, disco ni "
-        "procesos.",
+        "Recorre el flujo entero con un row de prueba sin ejecutar un tool, salvo "
+        "que declare dry_run='run' (issue #34, un tool que sólo lee): ese corre de "
+        "verdad, con fs/http en modo de sólo lectura -- es lo único que le da a una "
+        "decisión posterior algo real con qué decidir. El resto resuelve variables, "
+        "sigue ramas y devuelve la traza sin tocar nada.",
         {
             "flow": {"type": "string", "description": "Ruta a un .mmd, o un flujo guardado."},
             "row": {
@@ -456,7 +457,8 @@ Bucle de trabajo (autoría de un flujo o un plugin):
   3. check_flow        ¿parsea? ¿los params cierran contra los manifests?
   4. falta un tool     -> plugin_template, escribir el plugin, load_plugin
   5. check_flow        de nuevo, ahora con plugins={nombre: ruta}
-  6. dry_run_flow      recorrido completo con un row, sin tocar el mundo
+  6. dry_run_flow      recorrido completo con un row (issue #34: un tool con
+                       dry_run="run" corre de verdad, sólo lectura)
   7. save_flow         deja el .mmd guardado en la instalación, sin ejecutarlo
   8. install_plugin    si hizo falta un plugin nuevo, deja instalado el que load_plugin aceptó
   9. run_flow          ejecución real, sólo si hace falta y con root propio
@@ -473,7 +475,8 @@ de verdad contra una instalación — ya no hace falta.
 Ejecución real
 --------------
 
-`dry_run_flow` no toca nada y alcanza para casi todo. `run_flow` sí ejecuta, y
+`dry_run_flow` no toca nada -salvo un tool que declare `dry_run="run"`, y ahí
+sólo en modo lectura (issue #34)- y alcanza para casi todo. `run_flow` sí ejecuta, y
 por eso pide dos cosas:
 
   - `root` obligatorio: la instalación donde escribe. Usar un directorio

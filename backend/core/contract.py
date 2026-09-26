@@ -255,6 +255,19 @@ class ToolManifest:
     # Está en el catálogo para que una UI pueda ofrecerlo; no está en el
     # registry, así que nada lo puede invocar por ahí.
     native: bool = False
+    # "skip" (default): en dry run, el tool no corre -- el executor asume
+    # STATUS_OK y sigue, como siempre. "run" (issue #34): el tool corre de
+    # verdad, con sus ports fs/http envueltos en modo de sólo lectura
+    # (`registry.execute(..., read_only=True)`), para que una decisión que
+    # depende de su output tenga con qué decidir en seco -- "leer un archivo
+    # y decidir según lo que dice" no puede resolverse sin correr el tool.
+    # Lo declara el autor del tool, que es quien sabe si sólo lee; el núcleo
+    # lo hace cumplir (no confía sólo en la declaración): un intento de
+    # escritura en modo sólo-lectura levanta PortError, no se ignora.
+    # Un tool que pide process/window/browser no tiene ningún modo de sólo
+    # lectura posible -- `registry` lo reporta al cargar y el executor lo
+    # trata como "skip" pase lo que declare, nunca arriesga tocar el mundo.
+    dry_run: str = "skip"
     contract: int = CONTRACT_VERSION
 
     def __post_init__(self) -> None:
@@ -288,6 +301,7 @@ class ToolManifest:
             "extra_outputs": self.extra_outputs,
             "extra_outputs_doc": self.extra_outputs_doc,
             "native": self.native,
+            "dry_run": self.dry_run,
             "contract": self.contract,
         }
 
