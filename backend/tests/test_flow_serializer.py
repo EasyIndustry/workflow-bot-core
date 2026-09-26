@@ -126,10 +126,10 @@ def test_el_separador_no_le_agrega_un_espacio_al_valor_anterior():
 
 
 def test_un_valor_con_pipe_no_es_problema_se_cita_solo():
-    """Issue #10: antes esto no round-trippeaba; ahora se escribe entre comillas."""
+    """Issue #10: antes esto no round-trippeaba; ahora se escribe citado (issue #37: con #quot;)."""
     grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "a|b"}, line=1)})
     assert verificar(grafo) == []
-    assert '"a|b"' in to_mermaid(grafo)
+    assert "#quot;a|b#quot;" in to_mermaid(grafo)
 
 
 def test_un_valor_con_coma_no_es_problema_se_cita_solo():
@@ -150,25 +150,45 @@ def test_un_valor_sin_coma_ni_pipe_no_se_cita():
 # ── Comillas escapadas (issue #36/#37) ───────────────────────────────────
 
 
-def test_un_valor_con_comilla_se_cita_y_escapa():
-    """Issue #36/#37: una comilla ya no rompe el round-trip -- se cita y se escapa con #quot;."""
+def test_un_valor_con_comilla_se_cita_con_quot_y_escapa_con_34():
+    """
+    Issue #37: dos entidades distintas -- #quot; abre/cierra la cita, #34;
+    es una comilla literal adentro. La misma entidad para las dos cosas
+    (el primer intento) es indistinguible para este mismo parser.
+    """
     grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": 'di "hola"'}, line=1)})
     assert verificar(grafo) == []
     texto = to_mermaid(grafo, strict=True)
-    assert 'msg="di #quot;hola#quot;"' in texto
+    assert 'msg=#quot;di #34;hola#34;#quot;' in texto
     despues = parse_flow(texto, with_meta=False)
     assert despues.nodes["N1"].params["msg"] == 'di "hola"'
 
 
-def test_el_escape_es_la_entidad_de_mermaid_no_un_backslash():
+def test_el_wrapper_ya_no_es_una_comilla_cruda():
     """
-    Issue #37: `\\"` rompe la vista Mermaid real (mermaid.js no lo entiende,
-    aunque nuestro propio parser lo leyera bien) -- se corrigió a `#quot;`,
-    que Mermaid ya reconoce en una etiqueta y dibuja como `"`.
+    Issue #37: una comilla cruda de más adentro de la etiqueta de un nodo
+    rompe mermaid.js -- ni siquiera la del wrapper de la cita puede serlo.
     """
     grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": 'di "hola"'}, line=1)})
     texto = to_mermaid(grafo, strict=True)
     assert "\\" not in texto
+    # Único par de comillas crudas: el wrapper `["…"]` del nodo, de Mermaid.
+    assert texto.count('"') == 2
+
+
+def test_un_valor_citado_que_empieza_con_llave_ya_no_rompe_mermaid():
+    """
+    Issue #37: el bug de fondo no era sólo la comilla -- CUALQUIER valor
+    citado que empezara con "{"/"("/"["/">" ya rompía mermaid.js antes de
+    esto, con o sin comillas adentro, porque el wrapper era una comilla
+    cruda. Con #quot; como wrapper, deja de pasar.
+    """
+    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "{a}, b"}, line=1)})
+    assert verificar(grafo) == []
+    texto = to_mermaid(grafo, strict=True)
+    assert texto.count('"') == 2  # nada más que el wrapper del nodo
+    despues = parse_flow(texto, with_meta=False)
+    assert despues.nodes["N1"].params["msg"] == "{a}, b"
 
 
 def test_un_json_serializado_con_varias_claves_sobrevive_el_round_trip():
@@ -182,14 +202,23 @@ def test_un_json_serializado_con_varias_claves_sobrevive_el_round_trip():
     assert json.loads(despues.nodes["N1"].params["preguntas"]) == json.loads(valor)
 
 
+def test_el_formato_legado_con_comilla_cruda_se_sigue_leyendo():
+    """Los ~30 nodos ya escritos con comilla cruda (antes de #37) no se rompen."""
+    texto = 'flowchart TD\n    N1["core.log | message="a, b""]\n'
+    despues = parse_flow(texto, with_meta=False)
+    assert despues.nodes["N1"].params == {"message": "a, b"}
+
+
 def test_un_valor_citado_con_la_secuencia_de_escape_literal_se_avisa():
     """
     El límite que persiste (issue #37): un valor citado que ya trae, sin
-    querer decir una comilla, la secuencia literal `#quot;` se leería como
-    una comilla escapada -- mismo límite que tiene el propio Mermaid.
+    querer decir eso, la secuencia literal de una de las entidades se leería
+    como parte de la cita -- mismo límite que tiene el propio Mermaid.
     """
     grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "a, b #quot; c"}, line=1)})
     assert verificar(grafo)
+    grafo2 = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "a, b #34; c"}, line=1)})
+    assert verificar(grafo2)
 
 
 def test_una_ruta_de_windows_sin_coma_no_se_cita_ni_le_pega_el_escape():
