@@ -239,6 +239,15 @@ def _split_display(label: str) -> tuple[str, str]:
     return label[:idx].strip(), label[idx + len(DISPLAY_SEP) :].strip()
 
 
+# La entidad que Mermaid ya reconoce en una etiqueta y dibuja como `"`
+# (issue #36/#37): usarla en vez de un escape con backslash (`\"`) es lo que
+# mantiene el .mmd como un diagrama Mermaid válido. mermaid.js (v11) no
+# entiende `\"` -- lo probó workflow-bot-app contra la vista real, "Expecting
+# 'SQE'" justo en la barra invertida -- pero `#quot;` es texto plano para su
+# gramática, y de paso Mermaid la sustituye por `"` al dibujar la etiqueta.
+ESCAPE_COMILLA = "#quot;"
+
+
 def _dividir_pares(texto: str) -> tuple[list[str], bool]:
     """
     Separa por `,` y `|`, salvo dentro de comillas dobles.
@@ -247,14 +256,13 @@ def _dividir_pares(texto: str) -> tuple[list[str], bool]:
     comilla sólo abre pegada a un `=` (`key="...`) — en cualquier otro lugar
     del valor es un carácter más, sin efecto.
 
-    `\\"` dentro de un valor citado es una comilla literal (issue #36): no
+    `#quot;` dentro de un valor citado es una comilla literal (issue #36): no
     cierra la cita ni separa nada -- es lo que deja escribir un JSON
     serializado (`json.dumps`, con sus propias comillas) como valor de un
-    param. Cualquier otro backslash es un carácter más, sin efecto -- no hay
-    escape para nada que no sea la comilla, y una barra invertida suelta
-    justo antes de la comilla de cierre sigue siendo ambigua (se lee como
-    comilla escapada): el límite conocido que persiste es un valor citado
-    que termina en `\\`, no cualquier backslash suelto en cualquier lugar.
+    param, sin dejar de ser un diagrama Mermaid válido. No hay escape para
+    nada más: un valor citado que contenga la secuencia literal `#quot;` sin
+    querer decir una comilla es el límite conocido que persiste (mismo
+    límite que tiene el propio Mermaid con su entidad).
 
     Devuelve además si el texto terminó con una comilla sin cerrar, para que
     quien llama pueda avisar en vez de devolver un valor cortado a la mitad.
@@ -262,10 +270,15 @@ def _dividir_pares(texto: str) -> tuple[list[str], bool]:
     segmentos: list[str] = []
     actual: list[str] = []
     en_comillas = False
-    for ch in texto:
-        if ch == '"' and en_comillas and actual and actual[-1] == "\\":
-            actual[-1] = '"'  # \" -> " literal: no cierra la cita
-        elif ch == '"' and (en_comillas or not actual or actual[-1] == "="):
+    i = 0
+    n = len(texto)
+    while i < n:
+        if en_comillas and texto.startswith(ESCAPE_COMILLA, i):
+            actual.append('"')  # #quot; -> " literal: no cierra la cita
+            i += len(ESCAPE_COMILLA)
+            continue
+        ch = texto[i]
+        if ch == '"' and (en_comillas or not actual or actual[-1] == "="):
             en_comillas = not en_comillas
             actual.append(ch)
         elif ch in ",|" and not en_comillas:
@@ -273,6 +286,7 @@ def _dividir_pares(texto: str) -> tuple[list[str], bool]:
             actual = []
         else:
             actual.append(ch)
+        i += 1
     segmentos.append("".join(actual))
     return segmentos, en_comillas
 
