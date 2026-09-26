@@ -20,19 +20,23 @@ Tres reglas que salen de eso:
 3. **Lo que no puede round-trippear se avisa, no se emite y se reza.**
    `verificar()` devuelve los problemas y `to_mermaid(..., strict=True)` levanta
    antes de guardar. Un valor con `"` sí sobrevive desde issue #36: se cita y
-   cada comilla se escapa como `\"` — lo que deja pasar un `ParamType.JSON`
-   serializado con `json.dumps` (comillas propias) como valor de un param, el
-   caso real que rompía `bots`/`laya`. Lo que sigue sin poder distinguirse es
-   un valor citado que termina en una barra invertida suelta: se leería como
-   una comilla escapada. `verificar()` marca ese caso puntual, no cualquier
-   backslash — doblarlos todos rompería los ~30 nodos que ya escriben una
-   ruta de Windows sin citar.
+   cada comilla se escapa como `#quot;` — la entidad que Mermaid ya reconoce
+   en una etiqueta y dibuja como `"`, y no un escape con backslash (`\"`):
+   mermaid.js no entiende ese escape y deja de poder dibujar el .mmd, aunque
+   nuestro propio parser lo lea bien (issue #37, corrigiendo el intento
+   original de #36). Con `#quot;` el archivo sigue siendo un diagrama Mermaid
+   válido -- lo que deja pasar un `ParamType.JSON` serializado con
+   `json.dumps` (comillas propias) como valor de un param, el caso real que
+   rompía `bots`/`laya`. Lo que sigue sin poder distinguirse es un valor
+   citado que ya trae, sin querer decir una comilla, la secuencia literal
+   `#quot;` — mismo límite que tiene el propio Mermaid con su entidad.
 """
 
 from __future__ import annotations
 
 from .parser import (
     DISPLAY_SEP,
+    ESCAPE_COMILLA,
     ActionNode,
     DecisionNode,
     FlowEdge,
@@ -174,16 +178,18 @@ def verificar(grafo: FlowGraph) -> list[str]:
                 problemas.append(f'El nodo "{node_id}" no tiene tool')
             for clave, valor in nodo.params.items():
                 texto = str(valor)
-                # Issue #36: una comilla ya sobrevive (se cita y se escapa).
-                # Lo único que sigue sin poder distinguirse es un valor citado
-                # que termina en una barra invertida suelta: se leería como
-                # una comilla escapada y se comería el cierre de la cita.
+                # Issue #36/#37: una comilla ya sobrevive (se cita y se
+                # escapa con la entidad de Mermaid, #quot;). Lo único que
+                # sigue sin poder distinguirse es un valor citado que ya
+                # trae, sin querer decir una comilla, la secuencia literal
+                # `#quot;` -- mismo límite que tiene el propio Mermaid con
+                # su entidad.
                 necesita_cita = any(c in texto for c in (",", "|", '"'))
-                if necesita_cita and _termina_en_backslash_impar(texto):
+                if necesita_cita and ESCAPE_COMILLA in texto:
                     problemas.append(
-                        f'{node_id} › {clave}: el valor necesita citarse (tiene "," "|" o '
-                        f'\'"\') y termina en una barra invertida suelta, que se leería '
-                        f"como una comilla escapada y no sobrevive al volver a leer el flujo"
+                        f'{node_id} › {clave}: el valor necesita citarse y contiene la '
+                        f'secuencia "{ESCAPE_COMILLA}", que se leería como una comilla '
+                        f"escapada y no sobrevive al volver a leer el flujo"
                     )
                 if DISPLAY_SEP in texto:
                     problemas.append(
@@ -204,22 +210,6 @@ def verificar(grafo: FlowGraph) -> list[str]:
                 )
 
     return problemas
-
-
-def _termina_en_backslash_impar(texto: str) -> bool:
-    """
-    Si `texto` termina en una cantidad impar de `\\` seguidas.
-
-    Un par se escribe y se lee sin ambigüedad (`\\\\` -> un backslash literal
-    más lo que siga); una suelta justo antes de donde iría la comilla de
-    cierre de la cita se confunde con `\\"` -- issue #36.
-    """
-    i = len(texto)
-    cuenta = 0
-    while i > 0 and texto[i - 1] == "\\":
-        cuenta += 1
-        i -= 1
-    return cuenta % 2 == 1
 
 
 def _orden(grafo: FlowGraph) -> list[str]:
@@ -244,16 +234,17 @@ def _citar_si_hace_falta(valor: str) -> str:
     escribe tal cual, como siempre — no le agrega comillas a los ~30 nodos
     existentes que no las necesitan.
 
-    Cada `"` del valor se escapa como `\\"` (issue #36) antes de envolver: es
-    lo que deja pasar un `ParamType.JSON` serializado con `json.dumps` —con
-    sus propias comillas— como valor de un param. No se toca ningún otro
-    backslash: doblarlos todos rompería los ~30 nodos que ya escriben una ruta
-    de Windows sin citar. `verificar()` señala el único caso que esto deja sin
-    resolver -- un valor citado que termina en una barra invertida suelta.
+    Cada `"` del valor se escapa como `#quot;` (issue #36/#37) antes de
+    envolver: es lo que deja pasar un `ParamType.JSON` serializado con
+    `json.dumps` —con sus propias comillas— como valor de un param, sin dejar
+    de ser un diagrama Mermaid válido (un escape con backslash lo rompe para
+    mermaid.js, aunque nuestro propio parser lo lea bien). `verificar()`
+    señala el único caso que esto deja sin resolver -- un valor citado que ya
+    trae la secuencia literal `#quot;` sin querer decir una comilla.
     """
     valor = str(valor)
     if "," in valor or "|" in valor or '"' in valor:
-        return '"' + valor.replace('"', '\\"') + '"'
+        return '"' + valor.replace('"', ESCAPE_COMILLA) + '"'
     return valor
 
 

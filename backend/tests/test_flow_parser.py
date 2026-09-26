@@ -265,11 +265,11 @@ def test_valor_citado_con_pipe_no_corta_los_params():
 
 
 def test_comilla_escapada_dentro_de_un_valor_citado_es_literal():
-    """Issue #36: `\\"` no cierra la cita -- deja pasar un JSON con sus propias comillas."""
+    """Issue #36/#37: `#quot;` no cierra la cita -- deja pasar un JSON con sus propias comillas."""
     graph = parse_flow(
         'flowchart TD\n'
         '    B(inicio)\n'
-        '    N["laya.preguntar | preguntas="{\\"a\\": 1, \\"b\\": 2}""]\n'
+        '    N["laya.preguntar | preguntas="{#quot;a#quot;: 1, #quot;b#quot;: 2}""]\n'
         '    B --> N\n'
     )
     assert graph.runnable
