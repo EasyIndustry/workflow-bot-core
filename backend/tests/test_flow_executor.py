@@ -119,6 +119,34 @@ def test_decision_prioriza_el_row():
     assert ctx.decision_value("referencia") == "CNC4"
 
 
+def test_decision_value_acepta_nodo_calificado_y_recursivo():
+    """
+    Issue #35: una decisión puede ramificar sobre un campo *adentro* de un
+    output agrupado por nodo, no sólo sobre un output plano de nivel
+    superior -- mismo `_deep_get` que ya usaba `resolve()` para un param de
+    Acción (issue #30), tantos niveles como haga falta.
+    """
+    ctx = RunContext(vars={"LAYA": {"matriz": {"eleccion": "regar"}}})
+    assert ctx.decision_value("LAYA.matriz.eleccion") == "regar"
+
+
+def test_decision_value_indexa_una_lista_con_un_segmento_numerico():
+    ctx = RunContext(vars={"LAYA": {"opciones": [{"eleccion": "regar"}, {"eleccion": "esperar"}]}})
+    assert ctx.decision_value("LAYA.opciones.1.eleccion") == "esperar"
+
+
+def test_decision_value_calificado_prioriza_clave_plana_exacta():
+    """Un output que de casualidad se llame igual que la expresión calificada gana, sin ambigüedad."""
+    ctx = RunContext(vars={"LAYA.eleccion": "literal", "LAYA": {"eleccion": "anidado"}})
+    assert ctx.decision_value("LAYA.eleccion") == "literal"
+
+
+def test_decision_value_calificado_sin_match_devuelve_none():
+    ctx = RunContext(vars={"LAYA": {"eleccion": "regar"}})
+    assert ctx.decision_value("LAYA.no_existe") is None
+    assert ctx.decision_value("OTRO.eleccion") is None
+
+
 # ── Recorrido del grafo ─────────────────────────────────────────────────
 
 
@@ -152,6 +180,33 @@ def test_decision_toma_la_rama_del_valor():
     )
     assert [t.node_id for t in _run(flow, row={"referencia": "CNC4"}).trace] == ["D", "A"]
     assert [t.node_id for t in _run(flow, row={"referencia": "CNC3"}).trace] == ["D", "C"]
+
+
+def test_decision_ramifica_sobre_un_campo_calificado_de_un_output():
+    """
+    Issue #35, de punta a punta: un tool deja un output estructurado (una
+    "matriz de decisiones") y el nodo de Decisión ramifica sobre un campo de
+    adentro, sin que el tool tenga que desglosarlo aparte como output plano.
+    """
+    tool = _tool(
+        "test.decide",
+        lambda ctx: ToolResult.ok(matriz={"eleccion": "regar", "confianza": 0.9}),
+        outputs=[Output("matriz", ParamType.JSON)],
+    )
+    flow = (
+        "flowchart TD\n"
+        "    B(inicio)\n"
+        '    LAYA["test.decide"]\n'
+        "    D{LAYA.matriz.eleccion}\n"
+        '    A["core.log | message=regando"]\n'
+        '    C["core.log | message=esperando"]\n'
+        "    B --> LAYA\n"
+        "    LAYA --> D\n"
+        "    D -->|regar| A\n"
+        "    D -->|esperar| C\n"
+    )
+    result = _run(flow, registry=_registry(tool))
+    assert [t.node_id for t in result.trace] == ["LAYA", "D", "A"]
 
 
 def test_decision_sin_rama_falla_con_el_nodo():
