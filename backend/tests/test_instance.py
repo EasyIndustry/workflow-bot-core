@@ -394,6 +394,61 @@ def test_check_graph_avisa_de_una_salida_que_el_nodo_no_declara(demo_instance):
     assert "algo_que_no_existe" in d.message
 
 
+def test_check_graph_acepta_variable_de_decision_calificada(demo_instance):
+    """Issue #35: una Decisión también puede ramificar sobre `NODO.salida`."""
+    demo_instance.workflows.save_mmd(
+        "decision_calificada",
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    PRIMERO["demo.mover | origen=/a, destino=/b"]\n'
+        '    D{PRIMERO.destino}\n'
+        '    L["core.log | message=x"]\n'
+        '    B --> PRIMERO\n'
+        '    PRIMERO --> D\n'
+        '    D -->|/b| L\n',
+    )
+    _, diagnosticos = demo_instance.diagnose("decision_calificada")
+    assert diagnosticos == []
+
+
+def test_check_graph_marca_variable_de_decision_que_no_corre_antes(demo_instance):
+    """Issue #35: mismo chequeo de orden que un param de Acción, para `variable`."""
+    demo_instance.workflows.save_mmd(
+        "decision_fuera_de_orden",
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    D{TERCERO.destino}\n'
+        '    TERCERO["demo.mover | origen=/a, destino=/b"]\n'
+        '    L["core.log | message=x"]\n'
+        '    B --> D\n'
+        '    D -->|cualquiera| TERCERO\n'
+        '    TERCERO --> L\n',
+    )
+    _, diagnosticos = demo_instance.diagnose("decision_fuera_de_orden")
+    assert any(
+        "TERCERO" in d.message and "no corre antes" in d.message for d in diagnosticos
+    )
+
+
+def test_check_graph_avisa_de_variable_de_decision_con_salida_no_declarada(demo_instance):
+    """Issue #35: `{PRIMERO.algo_que_no_existe}` en una Decisión -- warning, no error."""
+    demo_instance.workflows.save_mmd(
+        "decision_salida_mala",
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    PRIMERO["demo.mover | origen=/a, destino=/b"]\n'
+        '    D{PRIMERO.algo_que_no_existe}\n'
+        '    L["core.log | message=x"]\n'
+        '    B --> PRIMERO\n'
+        '    PRIMERO --> D\n'
+        '    D -->|cualquiera| L\n',
+    )
+    _, diagnosticos = demo_instance.diagnose("decision_salida_mala")
+    (d,) = diagnosticos
+    assert d.severity.value == "warning"
+    assert "algo_que_no_existe" in d.message
+
+
 def test_missing_config_solo_de_los_plugins_del_flujo(demo_instance):
     demo_instance.workflows.save_mmd(
         "solo_log", 'flowchart TD\n    B(inicio)\n    N["core.log | message=x"]\n    B --> N\n'

@@ -22,12 +22,26 @@ _VAR_RE = re.compile(r"\{([\w.]+)\}")
 
 
 def _deep_get(root: Any, keys: list[str]) -> Any:
-    """Recorre un camino de claves; None si algún tramo no es indexable."""
+    """
+    Recorre un camino de claves; None si algún tramo no es indexable.
+
+    Un tramo que son sólo dígitos (`campo.0`, issue #35) indexa una lista en
+    vez de buscar una clave de dict -- mismo separador que el resto del
+    traversal, sin sintaxis nueva (`campo[0]` exigiría ensanchar la regex de
+    placeholder en dos lugares y sumar un parser). Recursivo por
+    construcción: `campo.0.sub.1` es sólo esta misma cadena de pasos, sin
+    límite de profundidad.
+    """
     current = root
     for key in keys:
-        if not isinstance(current, dict):
+        if isinstance(current, list):
+            if not key.isdigit() or int(key) >= len(current):
+                return None
+            current = current[int(key)]
+        elif isinstance(current, dict):
+            current = current.get(key)
+        else:
             return None
-        current = current.get(key)
         if current is None:
             return None
     return current
@@ -103,10 +117,30 @@ class RunContext:
         El row antes que las variables computadas: una decisión ramifica por un
         dato del caso, y un output homónimo de un nodo anterior no debería
         cambiar por dónde va el flujo.
+
+        `NODO.salida` calificado por nodo, recursivo (`NODO.salida.sub...`,
+        issue #35) -- mismo `_deep_get` que ya usa `resolve()` para un param
+        de un nodo de Acción (issue #30), extendido acá a `variable` porque
+        antes sólo hacía un lookup plano: una decisión que necesitaba un
+        campo *adentro* de un output (o desambiguar entre dos nodos
+        homónimos) no tenía forma de pedirlo, y el tool tenía que dejarlo
+        aparte, ya desglosado, sólo para poder ramificar sobre él.
+
+        Sólo se intenta si el nombre entero no matcheó ya como clave plana:
+        un output que de casualidad se llame igual que una expresión
+        calificada (con puntos) no cambia de comportamiento.
         """
         if variable in self.row:
             return self.row[variable]
-        return self.vars.get(variable)
+        if variable in self.vars:
+            return self.vars[variable]
+        if "." in variable:
+            parts = variable.split(".")
+            deep = _deep_get(self.vars, parts)
+            if deep is not None:
+                return deep
+            return _deep_get(self.row, parts)
+        return None
 
     # ── Interpolación ───────────────────────────────────────────────────
 

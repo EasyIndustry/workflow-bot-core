@@ -31,7 +31,7 @@ from . import boot as bootstrap
 from .config import ConfigStore
 from .env_store import EnvStore, referencias
 from .flow.executor import NATIVE_FNS, RunResult, execute_flow
-from .flow.parser import Diagnostic, FlowGraph, Severity, parse_flow
+from .flow.parser import DecisionNode, Diagnostic, FlowGraph, Severity, parse_flow
 from .jsonio import dumps
 from .log_store import MODO_EXPIRACION, LogStore
 from .ports import CryptoPort, StoragePort
@@ -257,36 +257,49 @@ class Instance:
         # que ese tool realmente deja.
         ancestros: dict[str, set[str]] = {}
         ids_de_accion = {nid for nid, _ in graph.action_nodes()}
+
+        def _valida_referencia_calificada(expr: str, node_id: str, line: int | None, origen: str) -> None:
+            parts = expr.split(".")
+            if len(parts) < 2 or parts[0] not in ids_de_accion:
+                return  # no es NODO.salida -- objeto.campo normal, o un índice de lista
+            ref_id, salida = parts[0], parts[1]
+            if node_id not in ancestros:
+                ancestros[node_id] = _ancestors(graph, node_id)
+            if ref_id not in ancestros[node_id]:
+                extra.append(Diagnostic(
+                    Severity.ERROR,
+                    f'{origen} referencia a "{ref_id}", que no corre antes en el flujo.',
+                    line,
+                    node_id,
+                ))
+                return
+            ref_manifest = manifests.get(ref_id)
+            if ref_manifest is not None and not ref_manifest.extra_outputs:
+                declaradas = {o.name for o in ref_manifest.outputs}
+                if salida not in declaradas:
+                    extra.append(Diagnostic(
+                        Severity.WARNING,
+                        f'"{ref_id}" no declara la salida "{salida}".',
+                        line,
+                        node_id,
+                    ))
+
         for node_id, node in graph.action_nodes():
             for clave, crudo in node.params.items():
                 if not isinstance(crudo, str):
                     continue
                 for expr in _VAR_RE.findall(crudo):
-                    parts = expr.split(".")
-                    if len(parts) < 2 or parts[0] not in ids_de_accion:
-                        continue  # no es {NODO.salida} -- {objeto.campo} normal
-                    ref_id, salida = parts[0], parts[1]
-                    if node_id not in ancestros:
-                        ancestros[node_id] = _ancestors(graph, node_id)
-                    if ref_id not in ancestros[node_id]:
-                        extra.append(Diagnostic(
-                            Severity.ERROR,
-                            f'"{clave}" en "{node_id}" referencia a "{ref_id}", '
-                            "que no corre antes en el flujo.",
-                            node.line,
-                            node_id,
-                        ))
-                        continue
-                    ref_manifest = manifests.get(ref_id)
-                    if ref_manifest is not None and not ref_manifest.extra_outputs:
-                        declaradas = {o.name for o in ref_manifest.outputs}
-                        if salida not in declaradas:
-                            extra.append(Diagnostic(
-                                Severity.WARNING,
-                                f'"{ref_id}" no declara la salida "{salida}".',
-                                node.line,
-                                node_id,
-                            ))
+                    _valida_referencia_calificada(expr, node_id, node.line, f'"{clave}" en "{node_id}"')
+
+        # Issue #35: mismo chequeo para la `variable` de un nodo de Decisión,
+        # que ahora también acepta `NODO.salida` calificado (y recursivo,
+        # `NODO.salida.sub...`) -- ahí no hay `{}` que extraer con `_VAR_RE`:
+        # el string entero, sin envoltorio, ya es la expresión.
+        for node_id, node in graph.nodes.items():
+            if isinstance(node, DecisionNode) and "." in node.variable:
+                _valida_referencia_calificada(
+                    node.variable, node_id, node.line, f'La variable de "{node_id}"'
+                )
 
         return extra
 

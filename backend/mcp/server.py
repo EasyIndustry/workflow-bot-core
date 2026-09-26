@@ -506,6 +506,11 @@ Sintaxis de un flujo:
   - Las aristas se resuelven por prioridad: |loop| -> |ok|/|err| -> incondicional.
   - `{variables}` sale del row del caso o de outputs de nodos anteriores.
     `{env.CLAVE}` para secretos; `{ruta.parent}` para la carpeta contenedora.
+  - `NODO.salida` califica por id de nodo cuando dos dejan el mismo output
+    (issue #30); recursivo y con índice de lista (`NODO.salida.campo.0`,
+    issue #35). En un param de Acción va entre `{}` como cualquier otra
+    variable; en `variable` de un nodo de Decisión (el campo después de `§`
+    en un `{...}`) va sin envolver, tal cual: `D1{LAYA.matriz.eleccion}`.
   - Un nodo que falla sin arista |err| corta el flujo.
 
 Esperar a que algo termine — el patrón más frecuente. Un tool devuelve
