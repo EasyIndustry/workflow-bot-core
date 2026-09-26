@@ -239,30 +239,46 @@ def _split_display(label: str) -> tuple[str, str]:
     return label[:idx].strip(), label[idx + len(DISPLAY_SEP) :].strip()
 
 
-# La entidad que Mermaid ya reconoce en una etiqueta y dibuja como `"`
-# (issue #36/#37): usarla en vez de un escape con backslash (`\"`) es lo que
-# mantiene el .mmd como un diagrama Mermaid válido. mermaid.js (v11) no
-# entiende `\"` -- lo probó workflow-bot-app contra la vista real, "Expecting
-# 'SQE'" justo en la barra invertida -- pero `#quot;` es texto plano para su
-# gramática, y de paso Mermaid la sustituye por `"` al dibujar la etiqueta.
-ESCAPE_COMILLA = "#quot;"
+# Issue #37: dos entidades de Mermaid, no una. Un valor citado con comilla
+# cruda (`key="valor"`) tiene el mismo problema de fondo que la comilla que
+# quería escapar: **cualquier** `"` de más adentro de la etiqueta de un nodo
+# (`["…"]`) rompe mermaid.js apenas lo que sigue se parece a su sintaxis
+# (`{`, `(`, `[`, `>`) -- verificado por workflow-bot-app contra la vista
+# real, y les pasaba ya antes de esto a valores citados sin ninguna comilla
+# adentro, con sólo empezar así. `#quot;` (que Mermaid ya reconoce y dibuja
+# como `"`) reemplaza la comilla cruda como apertura/cierre de la cita. Una
+# comilla LITERAL dentro del valor usa una entidad distinta, `#34;` -- si
+# las dos usaran `#quot;` (el primer intento), este mismo parser no podría
+# distinguir "cierra la cita" de "una comilla más del valor". Las dos se
+# dibujan igual (`"`) en Mermaid, así que la elección no afecta el diagrama.
+CITA_ENTIDAD = "#quot;"
+ESCAPE_COMILLA = "#34;"
 
 
 def _dividir_pares(texto: str) -> tuple[list[str], bool]:
     """
     Separa por `,` y `|`, salvo dentro de comillas dobles.
 
-    `k="v, con coma"` es un solo segmento: la coma de adentro no separa. La
-    comilla sólo abre pegada a un `=` (`key="...`) — en cualquier otro lugar
-    del valor es un carácter más, sin efecto.
+    `k=#quot;v, con coma#quot;` es un solo segmento: la coma de adentro no
+    separa. La cita sólo abre pegada a un `=` (`key=#quot;...` o, en modo
+    legado, `key="...`) — en cualquier otro lugar del valor es texto más,
+    sin efecto.
 
-    `#quot;` dentro de un valor citado es una comilla literal (issue #36): no
-    cierra la cita ni separa nada -- es lo que deja escribir un JSON
-    serializado (`json.dumps`, con sus propias comillas) como valor de un
-    param, sin dejar de ser un diagrama Mermaid válido. No hay escape para
-    nada más: un valor citado que contenga la secuencia literal `#quot;` sin
-    querer decir una comilla es el límite conocido que persiste (mismo
-    límite que tiene el propio Mermaid con su entidad).
+    Dos formas de citar un valor, y las dos se leen:
+
+    - **Nueva (issue #37), la que escribe `to_mermaid` de acá en más:**
+      `#quot;` abre y cierra; `#34;` adentro es una comilla literal.
+    - **Legado (los nodos ya escritos así):** una comilla cruda (`"`) abre y
+      cierra -- sin escape para nada, es el formato original de antes de
+      #36, y sigue leyéndose para no romper lo ya guardado. `to_mermaid` ya
+      no lo vuelve a escribir: tiene el mismo problema con Mermaid que se
+      corrige acá.
+
+    Los dos modos no se mezclan: una cita abierta en un modo sólo cierra con
+    el delimitador de ese mismo modo. El límite que persiste es un valor
+    citado (en modo nuevo) que ya trae, sin querer decir una comilla, la
+    secuencia literal `#quot;` o `#34;` -- mismo límite que tiene el propio
+    Mermaid con sus entidades.
 
     Devuelve además si el texto terminó con una comilla sin cerrar, para que
     quien llama pueda avisar en vez de devolver un valor cortado a la mitad.
@@ -270,15 +286,26 @@ def _dividir_pares(texto: str) -> tuple[list[str], bool]:
     segmentos: list[str] = []
     actual: list[str] = []
     en_comillas = False
+    modo_entidad = False
     i = 0
     n = len(texto)
     while i < n:
-        if en_comillas and texto.startswith(ESCAPE_COMILLA, i):
-            actual.append('"')  # #quot; -> " literal: no cierra la cita
+        if en_comillas and modo_entidad and texto.startswith(ESCAPE_COMILLA, i):
+            actual.append('"')  # #34; -> " literal: no cierra la cita
             i += len(ESCAPE_COMILLA)
             continue
+        if en_comillas and modo_entidad and texto.startswith(CITA_ENTIDAD, i):
+            en_comillas, modo_entidad = False, False
+            actual.append('"')
+            i += len(CITA_ENTIDAD)
+            continue
+        if not en_comillas and texto.startswith(CITA_ENTIDAD, i) and (not actual or actual[-1] == "="):
+            en_comillas, modo_entidad = True, True
+            actual.append('"')
+            i += len(CITA_ENTIDAD)
+            continue
         ch = texto[i]
-        if ch == '"' and (en_comillas or not actual or actual[-1] == "="):
+        if ch == '"' and not modo_entidad and (en_comillas or not actual or actual[-1] == "="):
             en_comillas = not en_comillas
             actual.append(ch)
         elif ch in ",|" and not en_comillas:
