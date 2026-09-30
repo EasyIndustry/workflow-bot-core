@@ -352,6 +352,41 @@ TOOLS: list[types.Tool] = [
         },
     ),
     _tool(
+        "list_waiting_runs",
+        "Runs pausados en una decisión manual, esperando que alguien elija la "
+        "rama. Cada uno trae `waiting`: nodo, variable, ayuda y una opción por "
+        "rama; el `value` de una opción es lo que se le pasa a resume_run.",
+        {
+            "case_id": {"type": "string", "description": "Filtra por caso."},
+            "limit": {"type": "integer"},
+            "root": _ROOT,
+        },
+    ),
+    _tool(
+        "resume_run",
+        "Retoma un run pausado en una decisión manual, por la rama `value`. "
+        "Ejecuta DE VERDAD lo que sigue del flujo: mismas guardas que run_flow "
+        "(`root` obligatorio, permisos del actor). Mismo run_id; puede quedar "
+        "esperando otra vez si llega a otra decisión manual.",
+        {
+            "run_id": {"type": "string"},
+            "value": {
+                "type": "string",
+                "description": "La rama elegida: el `value` de una opción de `waiting.options`.",
+            },
+            "root": {
+                "type": "string",
+                "description": "Directorio de la instalación donde está el run. Sin default.",
+            },
+            "actor": {
+                "type": "string",
+                "description": "Actor registrado que decide. Por defecto 'agente-mcp'.",
+            },
+            "plugins": _PLUGINS,
+        },
+        ["run_id", "value", "root"],
+    ),
+    _tool(
         "get_run",
         "La traza completa de un run ya ejecutado: cada nodo, sus params "
         "resueltos y su resultado.",
@@ -430,6 +465,8 @@ HANDLERS: dict[str, Callable[..., dict]] = {
     "list_flows": operations.list_flows,
     "get_flow": operations.get_flow,
     "list_runs": operations.list_runs,
+    "list_waiting_runs": operations.list_waiting_runs,
+    "resume_run": operations.resume_run,
     "get_run": operations.get_run,
     "get_case_log": operations.get_case_log,
     "write_resource_item": operations.write_resource_item,
@@ -445,6 +482,7 @@ X", "armame un flujo que haga Y") y no se conoce esta instalación:
 
   - No se sabe qué hay acá            -> describe_installation
   - Por qué algo falló                -> list_runs / get_run / get_case_log
+  - Un run espera una decisión manual -> list_waiting_runs / resume_run
   - Qué flujos existen, o uno puntual -> list_flows / get_flow
   - Completar una colección de un plugin (una conexión, una fuente, una nota)
                                        -> write_resource_item / delete_resource_item
@@ -515,6 +553,10 @@ Sintaxis de un flujo:
     variable; en `variable` de un nodo de Decisión (el campo después de `§`
     en un `{...}`) va sin envolver, tal cual: `D1{LAYA.matriz.eleccion}`.
   - Un nodo que falla sin arista |err| corta el flujo.
+  - `D1{Revisión § aprobado | manual | ayuda=texto}` es una decisión manual
+    (issue #37): la corrida real se pausa ahí (status "waiting") hasta que
+    alguien elige la rama con resume_run. En dry run no pausa: sigue por la
+    rama que diga el row, o por la primera.
 
 Esperar a que algo termine — el patrón más frecuente. Un tool devuelve
 `ToolResult.again(...)` para pedir otra vuelta, y eso toma la arista |loop|;
@@ -539,9 +581,9 @@ Reglas de un plugin, que el núcleo hace cumplir:
   - No sabe dónde se guardan sus datos: los lee con ctx.resource(...).
   - No escribe HTML: declara Setting, Resource.fields y Action.
 
-Este servidor es para AUTORÍA. No ejecuta flujos de verdad: dry_run_flow recorre
-sin tocar nada, y run_action es la única ejecución real, acotada a lo que el
-contrato define como disparable por una persona.\
+Este servidor es para AUTORÍA. Lo que ejecuta de verdad está acotado: run_action
+(lo que el contrato define como disparable por una persona), y run_flow /
+resume_run, con `root` obligatorio y los permisos del actor.\
 """
 
 

@@ -60,6 +60,7 @@ SCHEMA = {
     "run_logs": 1,
     "settings": 1,
     "plugin_items": 1,
+    "run_waits": 1,
 }
 
 MIGRATIONS: dict[str, dict[int, str]] = {
@@ -201,6 +202,25 @@ MIGRATIONS: dict[str, dict[int, str]] = {
             updated_at  REAL NOT NULL,
             UNIQUE (org, key)
         );
+        """
+    },
+    # Issue #37: el checkpoint de un run pausado en una decisión manual. Aparte
+    # de `runs` porque `runs` es append-only y de auditoría, y esto es estado
+    # vivo: existe mientras el run espera y se borra al retomarlo o
+    # descartarlo. `checkpoint` es JSON y nunca lleva `env` ni `config`.
+    "run_waits": {
+        1: """
+        CREATE TABLE IF NOT EXISTS run_waits (
+            run_id      TEXT PRIMARY KEY,
+            org         TEXT NOT NULL DEFAULT 'local',
+            case_id     TEXT NOT NULL DEFAULT '',
+            flow        TEXT NOT NULL DEFAULT '',
+            source      TEXT NOT NULL DEFAULT '',
+            node_id     TEXT NOT NULL DEFAULT '',
+            checkpoint  TEXT NOT NULL,
+            created_at  REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_run_waits_case ON run_waits (org, case_id, flow);
         """
     },
     "plugin_items": {

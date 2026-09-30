@@ -39,6 +39,7 @@ def test_cada_dominio_versiona_por_separado(db):
         "run_logs",
         "settings",
         "plugin_items",
+        "run_waits",
     }
     # `runs` ya migró una vez: es la prueba de que el versionado por dominio
     # sirve para lo que se diseñó — subir uno solo sin tocar los otros seis.

@@ -35,6 +35,10 @@ CONTRACT_VERSION = 1
 # Statuses que el núcleo entiende al resolver aristas del flujo.
 STATUS_OK = "ok"
 STATUS_ERR = "err"
+# Issue #37: un *run* (nunca un tool) pausado en una decisión manual, esperando
+# que una persona elija la rama. No es un status de ToolResult ni de arista:
+# los plugins no lo ven, por eso no sube CONTRACT_VERSION.
+STATUS_WAITING = "waiting"
 
 
 class ParamType(str, Enum):

@@ -136,6 +136,8 @@ def from_dict(datos: dict) -> FlowGraph:
                 variable=crudo.get("variable") or "",
                 display=crudo.get("display") or "",
                 line=linea,
+                manual=bool(crudo.get("manual")),
+                ayuda=str(crudo.get("ayuda") or ""),
             )
         else:
             grafo.nodes[node_id] = UnknownNode(line=linea)
@@ -198,6 +200,31 @@ def verificar(grafo: FlowGraph) -> list[str]:
                         f'{node_id} › {clave}: el valor contiene "{DISPLAY_SEP}", '
                         f"que separa el nombre visible de la definición"
                     )
+
+        if isinstance(nodo, DecisionNode):
+            if nodo.manual and not any(
+                a.condition for a in grafo.edges if a.from_ == node_id
+            ):
+                problemas.append(
+                    f'La decisión manual "{node_id}" no tiene ninguna arista con '
+                    f"condición: no habría nada que elegir"
+                )
+            # Issue #37: la ayuda vive adentro de `{...}`, así que `}` la
+            # cerraría y `§` partiría la etiqueta. Coma, pipe y comilla se
+            # citan igual que el valor de un param.
+            ayuda = nodo.ayuda or ""
+            for caracter in ("}", DISPLAY_SEP):
+                if caracter in ayuda:
+                    problemas.append(
+                        f'La ayuda de "{node_id}" contiene "{caracter}", que corta la etiqueta'
+                    )
+            if any(c in ayuda for c in (",", "|", '"')) and (
+                CITA_ENTIDAD in ayuda or ESCAPE_COMILLA in ayuda
+            ):
+                problemas.append(
+                    f'La ayuda de "{node_id}" necesita citarse y contiene una '
+                    f"entidad ({CITA_ENTIDAD} o {ESCAPE_COMILLA}) que no sobrevive"
+                )
 
         etiqueta = getattr(nodo, "display", "") or getattr(nodo, "label", "") or ""
         if '"' in etiqueta or "]" in etiqueta:
@@ -263,7 +290,15 @@ def _nodo(node_id: str, nodo) -> str:
         return f"{node_id}({nodo.label})"
 
     if isinstance(nodo, DecisionNode):
-        cuerpo = _con_display(nodo.display, nodo.variable)
+        definicion = nodo.variable
+        # Issue #37: mismo `| clave=valor` que una acción. Con espacio a los
+        # dos lados del pipe: la ayuda se trimea al parsear, a diferencia del
+        # valor de un param.
+        if nodo.manual:
+            definicion += " | manual"
+        if nodo.ayuda:
+            definicion += f" | ayuda={_citar_si_hace_falta(nodo.ayuda.strip())}"
+        cuerpo = _con_display(nodo.display, definicion)
         return f"{node_id}{{{cuerpo}}}"
 
     if isinstance(nodo, ActionNode):

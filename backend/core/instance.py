@@ -24,13 +24,25 @@ import logging
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 from . import boot as bootstrap
 from .config import ConfigStore
 from .env_store import EnvStore, referencias
-from .flow.executor import NATIVE_FNS, RunResult, execute_flow
+from .contract import STATUS_ERR, STATUS_WAITING
+from .flow.executor import (
+    CHECKPOINT_VERSION,
+    NATIVE_FNS,
+    LogEntry,
+    NodeTrace,
+    RunResult,
+    execute_flow,
+    resolve_manual,
+    resume_flow,
+    waiting_payload,
+)
 from .flow.parser import DecisionNode, Diagnostic, FlowGraph, Severity, parse_flow
 from .jsonio import dumps
 from .log_store import MODO_EXPIRACION, LogStore
@@ -38,7 +50,7 @@ from .ports import CryptoPort, StoragePort
 from .registry import ToolRegistry
 from .resources import ResourceError, TableStore, store_for
 from .schema import MIGRATIONS, SCHEMA
-from .stores import RunStore, StoreError, WorkflowStore
+from .stores import RunStore, StoreError, WaitStore, WorkflowStore
 from .users import RunPolicy, UserError, UserStore
 
 
@@ -47,6 +59,20 @@ log = logging.getLogger(__name__)
 
 class WorkflowNotFound(StoreError):
     pass
+
+
+class PendingDecision(UserError):
+    """
+    El caso tiene una decisión manual pendiente en ese flujo (issue #37).
+
+    Distinguible a propósito: arrancar otra corrida encima dejaría dos runs
+    vivos del mismo caso, y quien lo pidió (la app, un agente) tiene que
+    poder mostrar "Esperando" en vez de un error genérico.
+    """
+
+    def __init__(self, message: str, *, run_id: str) -> None:
+        super().__init__(message)
+        self.run_id = run_id
 
 
 class Instance:
@@ -96,6 +122,7 @@ class Instance:
 
         self.workflows = WorkflowStore(self.db)
         self.runs = RunStore(self.db)
+        self.waits = WaitStore(self.db)
         self.logs = LogStore(self.db)
 
         self.users = UserStore(self.db)
@@ -549,10 +576,28 @@ class Instance:
         `is_cancelled`: el mismo punto del recorrido, en la otra dirección.
 
         Los dry-run también se guardan: sirven para ver qué se validó y cuándo.
+
+        Una decisión manual (issue #37) pausa la corrida: vuelve con
+        `status="waiting"` y `resultado.waiting` con las opciones, y el
+        checkpoint queda en la base para `resume`. Con `persist=False` no
+        hay checkpoint, así que ese run no se puede retomar. Si el caso ya
+        tiene una espera abierta en este flujo, levanta `PendingDecision` en
+        vez de arrancar otra corrida encima (un dry run sí se permite: no
+        toca nada).
         """
         texto = self.load_workflow(flow_name)
         policy = self.policy_for(actor)
         graph = parse_flow(texto, with_meta=False)
+
+        if not dry_run:
+            pendiente = self.waits.for_case(case_id, flow_name)
+            if pendiente is not None:
+                raise PendingDecision(
+                    f'El caso "{case_id}" tiene una decisión pendiente en el run '
+                    f"{pendiente.run_id} (nodo {pendiente.node_id}); retomala o "
+                    "descartala antes de volver a ejecutar.",
+                    run_id=pendiente.run_id,
+                )
 
         vedados = self.authorize(graph, policy)
         if vedados:
@@ -591,6 +636,14 @@ class Instance:
         if persist:
             try:
                 self.runs.save(resultado, flow=flow_name, source=source, started_at=empezado)
+                if resultado.checkpoint is not None:
+                    self.waits.save(
+                        resultado.run_id,
+                        {**resultado.checkpoint, "source": source, "flow": flow_name},
+                        case_id=case_id,
+                        flow=flow_name,
+                        source=source,
+                    )
                 # El log va a su propia tabla, en una escritura.
                 self.logs.append_run(resultado, flow=flow_name, source=source)
                 self._limpiar_logs()
@@ -598,6 +651,167 @@ class Instance:
                 # Un fallo al guardar no puede tumbar un run que ya se ejecutó.
                 pass
         return resultado
+
+    # ── Decisiones manuales (issue #37) ─────────────────────────────────
+
+    def _espera(self, run_id: str):
+        """El resumen y el checkpoint de un run en espera, o UserError."""
+        resumen = self.runs.summary(run_id)
+        if resumen is None:
+            raise UserError(f"No existe el run {run_id}")
+        if resumen.status != STATUS_WAITING:
+            raise UserError(
+                f'El run {run_id} no está esperando una decisión (status "{resumen.status}")'
+            )
+        espera = self.waits.get(run_id)
+        if espera is None:
+            raise UserError(
+                f"El run {run_id} figura en espera pero no tiene checkpoint; "
+                "sólo se puede descartar (discard_wait)."
+            )
+        if espera.checkpoint.get("version") != CHECKPOINT_VERSION:
+            raise UserError(
+                f"El checkpoint del run {run_id} es de otra versión del núcleo "
+                f"({espera.checkpoint.get('version')!r}); sólo se puede descartar."
+            )
+        return resumen, espera
+
+    def resume(
+        self,
+        run_id: str,
+        value: str,
+        *,
+        actor: str | None = None,
+        is_cancelled=None,
+        on_step=None,
+    ) -> RunResult:
+        """
+        Retoma un run pausado en una decisión manual, por la rama `value`.
+
+        Exige que el run esté en `waiting` y que `value` sea una rama de
+        **esa** decisión; si no, `UserError` sin tocar nada. El actor de
+        `resume` tiene que poder correr el flujo (mismo chequeo que `run`), y
+        queda en la traza como `decided_by`. Mismo `run_id`: al terminar
+        queda `ok`/`err`, o `waiting` otra vez si llega a otra decisión
+        manual. Se corre el flujo del checkpoint, no el guardado ahora.
+        """
+        resumen, espera = self._espera(run_id)
+        policy = self.policy_for(actor)
+        checkpoint = espera.checkpoint
+        graph = parse_flow(checkpoint.get("flow_text") or "", with_meta=False)
+
+        vedados = self.authorize(graph, policy)
+        if vedados:
+            raise UserError(
+                f'El actor "{policy.actor}" no puede ejecutar "{resumen.flow}":\n  '
+                + "\n  ".join(vedados)
+            )
+
+        elegido = "" if value is None else str(value).strip()
+        if resolve_manual(graph, espera.node_id, elegido) is None:
+            opciones = ", ".join(
+                f'"{o["value"]}"' for o in waiting_payload(graph, espera.node_id)["options"]
+            ) or "ninguna"
+            raise UserError(
+                f'"{elegido}" no es una rama de la decisión "{espera.node_id}". '
+                f"Opciones: {opciones}"
+            )
+
+        if not self.waits.take(run_id):
+            raise UserError(f"El run {run_id} ya se está retomando o se descartó")
+
+        previo = self.runs.get(run_id) or {}
+        logs_previos = [
+            LogEntry(t=l.to_dict()["t"], message=l.message, level=l.level, node_id=l.node_id, ts=l.ts)
+            for l in self.logs.for_run(run_id)
+        ]
+        resultado = resume_flow(
+            checkpoint,
+            elegido,
+            run_id=run_id,
+            case_id=resumen.case_id,
+            registry=self.registry,
+            decided_by=policy.actor,
+            prior_trace=[NodeTrace.from_dict(t) for t in previo.get("trace") or []],
+            prior_logs=logs_previos,
+            config=self.effective_config(),
+            env=self.env_vars(),
+            load_flow=self.load_workflow,
+            is_cancelled=is_cancelled,
+            on_step=on_step,
+            resources=self.resource_items,
+            policy=policy,
+        )
+        self._guardar_retomado(resultado, resumen, n_logs_previos=len(logs_previos))
+        return resultado
+
+    def discard_wait(self, run_id: str, *, actor: str | None = None) -> RunResult:
+        """
+        Cierra una espera sin seguir: el run queda `err` con
+        `error_kind="discarded"`. A diferencia de `resume`, funciona aunque
+        falte el checkpoint -- es la salida para una espera que quedó a
+        medias.
+        """
+        resumen = self.runs.summary(run_id)
+        if resumen is None:
+            raise UserError(f"No existe el run {run_id}")
+        if resumen.status != STATUS_WAITING:
+            raise UserError(
+                f'El run {run_id} no está esperando una decisión (status "{resumen.status}")'
+            )
+        policy = self.policy_for(actor)
+        self.waits.take(run_id)
+
+        previo = self.runs.get(run_id) or {}
+        mensaje = f"Decisión descartada por {policy.actor}"
+        nodo = (previo.get("waiting") or {}).get("node_id")
+        resultado = RunResult(
+            run_id=run_id,
+            case_id=resumen.case_id,
+            actor=resumen.actor,
+            status=STATUS_ERR,
+            message=mensaje,
+            failed_node=nodo,
+            error_kind="discarded",
+            trace=[NodeTrace.from_dict(t) for t in previo.get("trace") or []],
+            logs=[LogEntry(t=time.strftime("%H:%M:%S"), message=mensaje, level="error", node_id=nodo)],
+        )
+        self._guardar_retomado(resultado, resumen, n_logs_previos=0)
+        return resultado
+
+    def _guardar_retomado(self, resultado: RunResult, resumen, *, n_logs_previos: int) -> None:
+        """Reescribe el run que esperaba, suma sólo las líneas nuevas del log."""
+        datos = resultado.to_dict()
+        datos.update(flow=resumen.flow, source=resumen.source, started_at=resumen.started_at)
+        self.runs.finish_wait(resultado.run_id, datos, finished_at=self._ahora())
+        if resultado.checkpoint is not None:
+            self.waits.save(
+                resultado.run_id,
+                {**resultado.checkpoint, "source": resumen.source, "flow": resumen.flow},
+                case_id=resumen.case_id,
+                flow=resumen.flow,
+                source=resumen.source,
+            )
+        nuevas = RunResult(
+            run_id=resultado.run_id, case_id=resultado.case_id,
+            logs=resultado.logs[n_logs_previos:],
+        )
+        try:
+            self.logs.append_run(nuevas, flow=resumen.flow, source=resumen.source)
+            self._limpiar_logs()
+        except (StoreError, OSError):
+            pass
+
+    def list_waiting(self, *, limit: int = 50, case_id: str | None = None) -> list[dict]:
+        """
+        Los runs pausados en una decisión manual, cada uno con su `waiting`
+        (nodo, ayuda, opciones): lo que hace falta para preguntar y retomar.
+        """
+        filas = []
+        for r in self.runs.list(status=STATUS_WAITING, limit=limit, case_id=case_id):
+            datos = self.runs.get(r.run_id) or {}
+            filas.append({**r.to_dict(), "waiting": datos.get("waiting")})
+        return filas
 
     def run_action(
         self, plugin: str, action: str, *, params: dict | None = None, item: str | None = None
@@ -725,6 +939,7 @@ class Instance:
         source: str | None = None,
         actor: str | None = None,
         include_dry: bool = True,
+        status: str | None = None,
     ) -> list[dict]:
         """Runs ya ejecutados, resumidos -- "qué corrió y cómo terminó" sin abrir cada traza."""
         resumenes = self.runs.list(
@@ -734,6 +949,7 @@ class Instance:
             source=source,
             actor=actor,
             include_dry=include_dry,
+            status=status,
         )
         return [r.to_dict() for r in resumenes]
 
@@ -838,8 +1054,6 @@ class Instance:
         lee ANTES de decidir qué otro tool usar, no un reemplazo de ellos:
         `get_flow`/`list_runs`/etc. siguen siendo el camino para el detalle.
         """
-        from .contract import STATUS_OK
-
         catalogo = self.registry.catalog()
         tools_por_id = {t["id"]: t for t in catalogo["tools"]}
 
@@ -901,7 +1115,10 @@ class Instance:
             "ports_disponibles": catalogo["ports"],
             "runs": {
                 "recientes": len(runs_recientes),
-                "fallidos": sum(1 for r in runs_recientes if r["status"] != STATUS_OK),
+                "fallidos": sum(1 for r in runs_recientes if r["status"] == STATUS_ERR),
+                # Issue #37: decisiones manuales pendientes, en toda la
+                # instalación y no sólo entre los recientes.
+                "en_espera": self.runs.count(status=STATUS_WAITING),
                 "ultimo_por_flujo": ultimo_por_flujo,
             },
         }
@@ -1132,7 +1349,12 @@ def _resumen_instalacion(datos: dict) -> str:
         f"{etiqueta_fs} · "
         f"process_allowlist: {boot['process_allowlist'] if boot['process_allowlist'] is not None else 'cualquiera'} · "
         f"actor por defecto: {boot['default_actor']}.",
-        f"Runs recientes: {datos['runs']['recientes']}, {datos['runs']['fallidos']} fallaron.",
+        f"Runs recientes: {datos['runs']['recientes']}, {datos['runs']['fallidos']} fallaron."
+        + (
+            f" {datos['runs']['en_espera']} esperando una decisión manual."
+            if datos["runs"].get("en_espera")
+            else ""
+        ),
     ]
 
     acciones = [
@@ -1185,4 +1407,4 @@ def _ancestors(graph: FlowGraph, node_id: str) -> set[str]:
     return seen
 
 
-__all__ = ["Instance", "WorkflowNotFound"]
+__all__ = ["Instance", "PendingDecision", "WorkflowNotFound"]

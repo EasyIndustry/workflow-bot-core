@@ -13,6 +13,9 @@ python -m backend.core check flujo.mmd              # validar sin ejecutar
 python -m backend.core run flujo.mmd --row '{"id":"42"}'
 python -m backend.core run flujo.mmd --dry-run      # recorrer sin tocar el mundo (salvo lo que declare dry_run="run", issue #34)
 python -m backend.core trace <run_id>               # la traza de una corrida
+python -m backend.core runs --status waiting        # runs esperando una decisión manual (issue #37)
+python -m backend.core resume <run_id> <valor>      # retomar por la rama elegida
+python -m backend.core discard <run_id>             # cerrar la espera sin seguir
 ```
 
 ## Las cuatro capas
@@ -217,6 +220,43 @@ delgadas encima.
 `run_detail()`, más los stores. Un servidor HTTP encima de esto es una capa
 delgada, no un segundo motor.
 
+### Decisiones manuales (issue #37)
+
+Una decisión que toma una persona, no un dato:
+
+```
+D1{Revisión del diseño § aprobado | manual | ayuda=Mirá el PDF antes de elegir}
+D1 -->|si| N5
+D1 -->|rehacer| N2
+```
+
+- **En una corrida real siempre pausa**, aunque la variable ya tenga valor.
+  `run()` vuelve con `status="waiting"` y `resultado.waiting` (también en
+  `to_dict()`): `node_id`, `display`, `variable`, `ayuda` y `options`, una por
+  arista con condición (`value` es lo que hay que mandar; en `a,b` alcanza el
+  primero). El hilo queda libre: el run vuelve, y las demás filas siguen.
+- El **checkpoint** queda en la tabla `run_waits`: el texto del flujo, vars,
+  row, visitas, contadores. **Nunca** `env` ni `config`, que se vuelven a leer
+  al retomar. Sobrevive a un reinicio.
+- `Instance.resume(run_id, value, actor=)` sigue por esa rama con el **mismo
+  `run_id`** y el flujo del checkpoint (no el editado mientras esperaba). La
+  traza del nodo guarda `decision_value` y `decided_by`. Un `value` que no es
+  rama, o un run que no espera, es `UserError` sin tocar nada. Termina
+  `ok`/`err`, o `waiting` otra vez en la próxima decisión manual.
+- `Instance.discard_wait(run_id, actor=)` cierra sin seguir: `err`,
+  `error_kind="discarded"`.
+- Mientras un caso espera en un flujo, `run()` de ese caso y flujo levanta
+  `PendingDecision` (con `.run_id`), en vez de arrancar otra corrida encima.
+- `list_waiting()` / `list_runs(status="waiting")` las listan; la retención de
+  logs y `runs.prune` no tocan un run en espera.
+- En **dry run** no pausa: sigue por la rama de la fila, o por la primera con
+  un warning.
+- Dentro de un **subflujo** (`flow.ejecutar`) no está soportado todavía: el run
+  falla con `error_kind="manual_in_subflow"`.
+- `RunResult.failed` es sólo `status == "err"`: un run en espera no falló.
+- La app sabe que el núcleo lo soporta por
+  `catalog()["capabilities"]["manual_decisions"]`, sin comparar versiones.
+
 ## Quién ejecuta: actores y permisos
 
 Cada run queda atribuido a un actor, y el actor **decide qué se puede**. No es
@@ -353,6 +393,8 @@ interfaz de operación: no ejecuta flujos de verdad.
 | `load_plugin` | ¿el núcleo acepta este plugin? sin ejecutarlo |
 | `run_action` | ejecuta una `Action` declarada por un plugin. `item=` resuelve params desde un item guardado |
 | `run_flow` | ejecución real. `root` obligatorio, y el actor limita qué puede |
+| `list_waiting_runs` | runs pausados en una decisión manual, con sus opciones (issue #37) |
+| `resume_run` | retoma uno por la rama elegida. Mismas guardas que `run_flow` |
 | `list_users` | qué puede cada actor, para entender una denegación |
 | `plugin_template` | esqueleto con los ports ya declarados |
 

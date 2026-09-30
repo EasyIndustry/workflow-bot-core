@@ -51,6 +51,13 @@ from .contract import (
 from .builtins import NATIVE_MANIFESTS
 from .ports import PLUGIN_PORTS, PortError
 
+# Capacidades del núcleo que un cliente puede consultar en `catalog()` en vez
+# de comparar versiones. Sólo se agregan claves; una que existe no cambia de
+# significado.
+CAPABILITIES = {
+    "manual_decisions": True,  # issue #37
+}
+
 log = logging.getLogger(__name__)
 
 # Grupo de entry points donde se buscan los plugins. Genérico a propósito: el
@@ -607,6 +614,10 @@ class ToolRegistry:
         """
         return {
             "contract": CONTRACT_VERSION,
+            # Qué sabe hacer este núcleo, para que una UI decida qué dibujar
+            # sin comparar versiones. `manual_decisions` (issue #37): decisión
+            # manual que pausa el run y `Instance.resume` para seguir.
+            "capabilities": dict(CAPABILITIES),
             "ports": sorted(self._adapters),
             "tools": [
                 m.to_dict()
