@@ -56,6 +56,7 @@ from .ports import PLUGIN_PORTS, PortError
 # significado.
 CAPABILITIES = {
     "manual_decisions": True,  # issue #37
+    "manual_decision_help_vars": True,  # issue #38: `{variables}` en la ayuda
 }
 
 log = logging.getLogger(__name__)

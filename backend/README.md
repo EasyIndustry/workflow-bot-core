@@ -256,6 +256,13 @@ D1 -->|rehacer| N2
 - `RunResult.failed` es sólo `status == "err"`: un run en espera no falló.
 - La app sabe que el núcleo lo soporta por
   `catalog()["capabilities"]["manual_decisions"]`, sin comparar versiones.
+- La **ayuda acepta `{variables}`** (issue #38): `waiting.ayuda` sale resuelta
+  con el contexto del run al pausar (fila, salidas, `{NODO.salida...}`), y
+  `waiting.ayuda_plantilla` es la original. Lo que no resuelve queda literal.
+  `{env.X}` **nunca** se resuelve en la ayuda, porque viaja a la UI y queda en
+  `runs.data`. En el `.mmd` las llaves de la ayuda se escriben `#123;`/`#125;`
+  (mermaid.js no acepta llaves sueltas en un rombo); el parser acepta también
+  llaves crudas. Capacidad: `capabilities["manual_decision_help_vars"]`.
 
 ## Quién ejecuta: actores y permisos
 

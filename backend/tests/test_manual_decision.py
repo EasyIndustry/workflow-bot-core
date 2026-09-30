@@ -155,10 +155,10 @@ def test_serializer_ida_y_vuelta_con_ayuda_citada():
     assert vuelta.ayuda == "Revisá esto, y aquello | también"
 
 
-def test_verificar_avisa_llave_en_la_ayuda():
+def test_verificar_avisa_la_secuencia_literal_de_una_llave():
     datos = parse_flow(FLUJO).to_dict()
-    datos["nodes"]["D1"]["ayuda"] = "no uses }"
-    assert any("}" in p for p in verificar(from_dict(datos)))
+    datos["nodes"]["D1"]["ayuda"] = "no uses #125; así"
+    assert any("#125;" in p for p in verificar(from_dict(datos)))
 
 
 def test_el_catalogo_publica_la_capacidad(inst):
@@ -451,3 +451,63 @@ def test_cli_resume_y_runs_waiting(tmp_path, capsys):
     final = json.loads(capsys.readouterr().out)
     assert final["status"] == STATUS_OK
     assert [t["node_id"] for t in final["trace"]] == ["D", "A"]
+
+
+# ── Issue #38: {variables} en la ayuda ─────────────────────────────────
+
+AYUDA = """\
+flowchart TD
+    SN1(inicio)
+    N1["t.producir | valor=3"]
+    D1{¿Seguir? § aprobado | manual | ayuda=#quot;Hay {N1.codigo} fallidos, caso {id}, plano {codigo}, {no_existe}, {env.SECRETO}#quot;}
+    N2["t.marca | x=si"]
+    N3["t.producir | valor=7"]
+    D2{Otra § b | manual | ayuda=Ahora {N3.codigo} y antes {N1.codigo}}
+    SN1 --> N1
+    N1 --> D1
+    D1 -->|si| N2
+    D1 -->|no| N3
+    N3 --> D2
+    D2 -->|si| N2
+"""
+
+
+def test_38_1_a_4_la_ayuda_se_resuelve_al_pausar(inst):
+    inst.env.save("SECRETO", "no-se-escribe", secret=True)
+    inst.workflows.save("ayuda", AYUDA)
+    r = inst.run("ayuda", "42", row={"id": "42"})
+
+    assert r.status == STATUS_WAITING
+    assert r.waiting["ayuda"] == (
+        "Hay 3 fallidos, caso 42, plano 3, {no_existe}, {env.SECRETO}"
+    )
+    assert r.waiting["ayuda_plantilla"].startswith("Hay {N1.codigo} fallidos")
+    filas = inst.db.query("SELECT data FROM runs") + inst.db.query("SELECT checkpoint FROM run_waits")
+    assert all("no-se-escribe" not in json.dumps(f) for f in filas)
+    assert inst.run_detail(r.run_id)["waiting"]["ayuda"] == r.waiting["ayuda"]
+
+
+def test_38_5_editor_ida_y_vuelta_con_llaves():
+    datos = parse_flow(AYUDA).to_dict()
+    editado = from_dict(datos)
+    assert verificar(editado) == []
+    texto = to_mermaid(editado)
+    # mermaid.js no acepta llaves sueltas adentro del rombo: van como entidad.
+    linea = next(l for l in texto.splitlines() if l.strip().startswith("D1{"))
+    assert linea.count("{") == 1 and linea.count("}") == 1
+    assert "#123;N1.codigo#125;" in linea
+    vuelta = parse_flow(texto)
+    assert vuelta.runnable
+    assert vuelta.nodes["D1"].ayuda == parse_flow(AYUDA).nodes["D1"].ayuda
+
+
+def test_38_6_la_segunda_decision_resuelve_con_su_contexto(inst):
+    inst.workflows.save("ayuda", AYUDA)
+    r = inst.run("ayuda", "42", row={"id": "42"})
+    medio = inst.resume(r.run_id, "no")
+    assert medio.waiting["node_id"] == "D2"
+    assert medio.waiting["ayuda"] == "Ahora 7 y antes 3"
+
+
+def test_38_capacidad(inst):
+    assert inst.registry.catalog()["capabilities"]["manual_decision_help_vars"] is True

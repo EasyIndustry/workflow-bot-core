@@ -39,6 +39,8 @@ from .parser import (
     CITA_ENTIDAD,
     DISPLAY_SEP,
     ESCAPE_COMILLA,
+    LLAVE_ABRE,
+    LLAVE_CIERRA,
     ActionNode,
     DecisionNode,
     FlowEdge,
@@ -209,15 +211,21 @@ def verificar(grafo: FlowGraph) -> list[str]:
                     f'La decisión manual "{node_id}" no tiene ninguna arista con '
                     f"condición: no habría nada que elegir"
                 )
-            # Issue #37: la ayuda vive adentro de `{...}`, así que `}` la
-            # cerraría y `§` partiría la etiqueta. Coma, pipe y comilla se
-            # citan igual que el valor de un param.
+            # La ayuda vive adentro de `{...}`: `§` partiría la etiqueta. Las
+            # llaves de una `{variable}` (issue #38) se escriben como entidad,
+            # y coma, pipe y comilla se citan igual que el valor de un param;
+            # lo que no sobrevive es la secuencia literal de alguna de esas
+            # entidades.
             ayuda = nodo.ayuda or ""
-            for caracter in ("}", DISPLAY_SEP):
-                if caracter in ayuda:
-                    problemas.append(
-                        f'La ayuda de "{node_id}" contiene "{caracter}", que corta la etiqueta'
-                    )
+            if DISPLAY_SEP in ayuda:
+                problemas.append(
+                    f'La ayuda de "{node_id}" contiene "{DISPLAY_SEP}", que corta la etiqueta'
+                )
+            if LLAVE_ABRE in ayuda or LLAVE_CIERRA in ayuda:
+                problemas.append(
+                    f'La ayuda de "{node_id}" contiene la secuencia literal '
+                    f'"{LLAVE_ABRE}" o "{LLAVE_CIERRA}", que se leería como una llave'
+                )
             if any(c in ayuda for c in (",", "|", '"')) and (
                 CITA_ENTIDAD in ayuda or ESCAPE_COMILLA in ayuda
             ):
@@ -297,7 +305,10 @@ def _nodo(node_id: str, nodo) -> str:
         if nodo.manual:
             definicion += " | manual"
         if nodo.ayuda:
-            definicion += f" | ayuda={_citar_si_hace_falta(nodo.ayuda.strip())}"
+            ayuda = _citar_si_hace_falta(nodo.ayuda.strip())
+            # Issue #38: mermaid.js no acepta `{`/`}` sueltas en un rombo.
+            ayuda = ayuda.replace("{", LLAVE_ABRE).replace("}", LLAVE_CIERRA)
+            definicion += f" | ayuda={ayuda}"
         cuerpo = _con_display(nodo.display, definicion)
         return f"{node_id}{{{cuerpo}}}"
 

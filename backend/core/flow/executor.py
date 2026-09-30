@@ -581,7 +581,7 @@ def _pause_for_decision(
         )
     )
     run.result.status = STATUS_WAITING
-    run.result.waiting = waiting_payload(graph, node_id)
+    run.result.waiting = waiting_payload(graph, node_id, context=run.context)
     run.log(
         f"Esperando decisión manual {node.variable}"
         + (f' ("{node.display}")' if node.display else ""),
@@ -591,15 +591,21 @@ def _pause_for_decision(
     return None
 
 
-def waiting_payload(graph: FlowGraph, node_id: str) -> dict:
+def waiting_payload(
+    graph: FlowGraph, node_id: str, *, context: RunContext | None = None
+) -> dict:
     """
     Lo que una UI necesita para preguntar, sin leer el .mmd (issue #37).
 
     Una opción por arista **con condición**. `value` es lo que hay que mandar
     para ir por esa arista: en una condición con coma (`a,b`), alcanza el
     primero.
+
+    Con `context`, la ayuda sale resuelta con lo que el run tiene en ese
+    momento (issue #38); `ayuda_plantilla` es la original.
     """
     node = graph.nodes[node_id]
+    plantilla = getattr(node, "ayuda", "") or ""
     opciones = []
     for edge in graph.out_edges(node_id):
         if edge.condition is None:
@@ -618,9 +624,27 @@ def waiting_payload(graph: FlowGraph, node_id: str) -> dict:
         "node_id": node_id,
         "display": getattr(node, "display", ""),
         "variable": getattr(node, "variable", ""),
-        "ayuda": getattr(node, "ayuda", ""),
+        "ayuda": _resolver_ayuda(plantilla, context) if context is not None else plantilla,
+        "ayuda_plantilla": plantilla,
         "options": opciones,
     }
+
+
+def _resolver_ayuda(plantilla: str, context: RunContext) -> str:
+    """
+    La ayuda con sus `{variables}` resueltas: fila, salidas planas y
+    `{NODO.salida...}`, con la misma precedencia que un param. Lo que no
+    resuelve queda literal.
+
+    **Sin `env` ni `config`** (issue #38): la ayuda viaja a la UI y queda en
+    `runs.data`, así que un `{env.SECRETO}` queda como plantilla en vez de
+    escribirse resuelto.
+    """
+    if "{" not in plantilla:
+        return plantilla
+    visible = RunContext(row=context.row, vars=context.vars)
+    resuelta = visible.resolve(plantilla)
+    return resuelta if isinstance(resuelta, str) else str(resuelta)
 
 
 def resume_flow(

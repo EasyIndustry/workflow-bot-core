@@ -200,16 +200,44 @@ _SHAPES = (
     # adentro (ver `_dividir_pares`, que es quien realmente las interpreta).
     (re.compile(r'^(\w+)\["(.*)"\]$'), "rect"),
     (re.compile(r"^(\w+)\[([^\]]+)\]$"), "rect"),
-    (re.compile(r"^(\w+)\{([^}]+)\}$"), "diamond"),
+    # Issue #38: la ayuda de una decisión manual puede llevar `{variables}`,
+    # así que el rombo ya no es "sin `}` adentro": se toma todo hasta la `}`
+    # final y `_rombo` verifica que esa sea la que cierra la primera `{`.
+    (re.compile(r"^(\w+)(\{.+\})$"), "diamond"),
     (re.compile(r"^(\w+)\(([^)]+)\)$"), "round"),
 )
 
 _INLINE_SHAPES = (
     (re.compile(r'^\["(.*)"\]$'), "rect"),
     (re.compile(r"^\[([^\]]+)\]$"), "rect"),
-    (re.compile(r"^\{([^}]+)\}$"), "diamond"),
+    (re.compile(r"^(\{.+\})$"), "diamond"),
     (re.compile(r"^\(([^)]+)\)$"), "round"),
 )
+
+
+def _rombo(texto: str) -> str | None:
+    """
+    El contenido de `{...}` si la `}` final es la que cierra la primera `{`
+    (issue #38); None si no -- `{a} --> C{b}` no es un rombo, son dos cosas.
+
+    Llaves de más sin cerrar (`{a{b}`) siguen valiendo como antes, cuando el
+    patrón era "cualquier cosa menos `}`": lo único que se rechaza es una
+    `{` de apertura que ya cerró antes del final.
+    """
+    profundidad = 0
+    for i, ch in enumerate(texto):
+        if ch == "{":
+            profundidad += 1
+        elif ch == "}":
+            profundidad -= 1
+            if profundidad == 0 and i != len(texto) - 1:
+                return None
+    return texto[1:-1] or None
+
+
+def _etiqueta(m: "re.Match[str]", shape: str, grupo: int) -> str | None:
+    etiqueta = m.group(grupo)
+    return _rombo(etiqueta) if shape == "diamond" else etiqueta
 
 
 def parse_meta(raw: str) -> tuple[FlowMeta, str, frozenset[str]]:
@@ -264,6 +292,13 @@ def _split_display(label: str) -> tuple[str, str]:
 # dibujan igual (`"`) en Mermaid, así que la elección no afecta el diagrama.
 CITA_ENTIDAD = "#quot;"
 ESCAPE_COMILLA = "#34;"
+
+# Issue #38: las llaves de una `{variable}` adentro de la ayuda de un rombo.
+# mermaid.js no acepta `{`/`}` sueltas en la etiqueta de un `D1{...}`, así que
+# el serializer las escribe como entidad (que Mermaid dibuja como la llave) y
+# el parser las lee de vuelta.
+LLAVE_ABRE = "#123;"
+LLAVE_CIERRA = "#125;"
 
 
 def _dividir_pares(texto: str) -> tuple[list[str], bool]:
@@ -358,7 +393,7 @@ def _parse_decision_label(label: str) -> tuple[str, str, bool, str, list[str], b
                 valor = valor.strip()
                 if len(valor) >= 2 and valor[0] == '"' and valor[-1] == '"':
                     valor = valor[1:-1]
-                ayuda = valor
+                ayuda = valor.replace(LLAVE_ABRE, "{").replace(LLAVE_CIERRA, "}")
                 continue
             descartados.append(texto)
     return variable, display, manual, ayuda, descartados, sin_cerrar
@@ -488,8 +523,8 @@ class _Builder:
             return
         for pattern, shape in _INLINE_SHAPES:
             m = pattern.match(text)
-            if m:
-                self.register(node_id, shape, m.group(1), line)
+            if m and (etiqueta := _etiqueta(m, shape, 1)) is not None:
+                self.register(node_id, shape, etiqueta, line)
                 return
 
 
@@ -545,8 +580,8 @@ def parse_flow(text: str, *, with_meta: bool = True) -> FlowGraph:
         # ── Definición de nodo suelta ────────────────────────────────
         for pattern, shape in _SHAPES:
             m = pattern.match(line)
-            if m:
-                b.register(m.group(1), shape, m.group(2), lineno)
+            if m and (etiqueta := _etiqueta(m, shape, 2)) is not None:
+                b.register(m.group(1), shape, etiqueta, lineno)
                 break
         else:
             b.warn(f"Línea no reconocida por el parser: {line!r}", lineno)
