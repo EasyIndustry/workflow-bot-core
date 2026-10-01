@@ -144,7 +144,9 @@ def test_describe_installation_es_la_foto_entera_en_una_llamada(raiz):
     assert resultado["boot"]["default_actor"] == "local"
     assert "fs_root" in resultado["boot"]
     assert "window" in resultado["ports_disponibles"]
-    assert resultado["runs"] == {"recientes": 0, "fallidos": 0, "ultimo_por_flujo": {}}
+    assert resultado["runs"] == {
+        "recientes": 0, "fallidos": 0, "en_espera": 0, "ultimo_por_flujo": {}
+    }
 
 
 def test_describe_installation_trae_un_resumen_en_texto_plano(raiz):
@@ -706,6 +708,8 @@ def test_la_lista_de_tools_no_crece_con_los_plugins():
         "list_flows",
         "get_flow",
         "list_runs",
+        "list_waiting_runs",
+        "resume_run",
         "get_run",
         "get_case_log",
         "write_resource_item",
@@ -801,6 +805,41 @@ def test_run_flow_ejecuta_de_verdad_y_deja_traza(raiz):
     assert resultado["actor"] == "agente-mcp"
     assert resultado["run_id"]
     assert any("procesando 0044" in linea for linea in resultado["logs"])
+
+
+def test_resume_run_exige_root(raiz):
+    with pytest.raises(ops.OperationError, match="necesita `root`"):
+        ops.resume_run("run-x", "si", root="")
+
+
+def test_list_waiting_runs_y_resume_run(raiz, tmp_path):
+    """Issue #37: un agente ve la espera, elige la rama y el run termina."""
+    _alta(raiz)
+    flujo = tmp_path / "revision.mmd"
+    flujo.write_text(
+        "flowchart TD\n S(inicio)\n D{Rev § ok | manual | ayuda=Mirá antes}\n"
+        ' A["core.log | message=aprobado {id}"]\n'
+        ' B["core.log | message=rechazado {id}"]\n'
+        " S --> D\n D -->|si| A\n D -->|no| B\n",
+        encoding="utf-8",
+    )
+    pausado = ops.run_flow(str(flujo), root=raiz, row={"id": "9"}, save=True)
+    assert pausado["status"] == "waiting"
+    assert [o["value"] for o in pausado["waiting"]["options"]] == ["si", "no"]
+
+    esperando = ops.list_waiting_runs(root=raiz)["runs"]
+    assert [r["run_id"] for r in esperando] == [pausado["run_id"]]
+    assert esperando[0]["waiting"]["ayuda"] == "Mirá antes"
+
+    with pytest.raises(ops.OperationError, match="no es una rama"):
+        ops.resume_run(pausado["run_id"], "tal vez", root=raiz)
+
+    final = ops.resume_run(pausado["run_id"], "no", root=raiz)
+    assert final["status"] == "ok"
+    assert final["run_id"] == pausado["run_id"]
+    assert final["trace"][0]["decided_by"] == "agente-mcp"
+    assert any("rechazado 9" in linea for linea in final["logs"])
+    assert ops.list_waiting_runs(root=raiz)["runs"] == []
 
 
 def test_resumen_de_run_no_pierde_el_error_kind():

@@ -77,6 +77,12 @@ class DecisionNode:
     display: str = ""
     line: int | None = None
     type: str = "decision"
+    # Issue #37: `D1{Revisión § aprobado | manual | ayuda=...}`. Una decisión
+    # manual la toma una persona: la corrida real se pausa acá (status
+    # "waiting") hasta que alguien elige la rama, aunque la variable ya tenga
+    # valor. `ayuda` es el texto que una UI muestra al preguntar.
+    manual: bool = False
+    ayuda: str = ""
 
 
 @dataclass(frozen=True)
@@ -98,6 +104,11 @@ def _node_to_dict(node: FlowNode) -> dict:
             data[attr] = value
     if display := getattr(node, "display", ""):
         data["display"] = display
+    # Issue #37: sólo si están, así el payload de una decisión común no cambia.
+    if getattr(node, "manual", False):
+        data["manual"] = True
+    if ayuda := getattr(node, "ayuda", ""):
+        data["ayuda"] = ayuda
     return data
 
 
@@ -189,16 +200,44 @@ _SHAPES = (
     # adentro (ver `_dividir_pares`, que es quien realmente las interpreta).
     (re.compile(r'^(\w+)\["(.*)"\]$'), "rect"),
     (re.compile(r"^(\w+)\[([^\]]+)\]$"), "rect"),
-    (re.compile(r"^(\w+)\{([^}]+)\}$"), "diamond"),
+    # Issue #38: la ayuda de una decisión manual puede llevar `{variables}`,
+    # así que el rombo ya no es "sin `}` adentro": se toma todo hasta la `}`
+    # final y `_rombo` verifica que esa sea la que cierra la primera `{`.
+    (re.compile(r"^(\w+)(\{.+\})$"), "diamond"),
     (re.compile(r"^(\w+)\(([^)]+)\)$"), "round"),
 )
 
 _INLINE_SHAPES = (
     (re.compile(r'^\["(.*)"\]$'), "rect"),
     (re.compile(r"^\[([^\]]+)\]$"), "rect"),
-    (re.compile(r"^\{([^}]+)\}$"), "diamond"),
+    (re.compile(r"^(\{.+\})$"), "diamond"),
     (re.compile(r"^\(([^)]+)\)$"), "round"),
 )
+
+
+def _rombo(texto: str) -> str | None:
+    """
+    El contenido de `{...}` si la `}` final es la que cierra la primera `{`
+    (issue #38); None si no -- `{a} --> C{b}` no es un rombo, son dos cosas.
+
+    Llaves de más sin cerrar (`{a{b}`) siguen valiendo como antes, cuando el
+    patrón era "cualquier cosa menos `}`": lo único que se rechaza es una
+    `{` de apertura que ya cerró antes del final.
+    """
+    profundidad = 0
+    for i, ch in enumerate(texto):
+        if ch == "{":
+            profundidad += 1
+        elif ch == "}":
+            profundidad -= 1
+            if profundidad == 0 and i != len(texto) - 1:
+                return None
+    return texto[1:-1] or None
+
+
+def _etiqueta(m: "re.Match[str]", shape: str, grupo: int) -> str | None:
+    etiqueta = m.group(grupo)
+    return _rombo(etiqueta) if shape == "diamond" else etiqueta
 
 
 def parse_meta(raw: str) -> tuple[FlowMeta, str, frozenset[str]]:
@@ -253,6 +292,13 @@ def _split_display(label: str) -> tuple[str, str]:
 # dibujan igual (`"`) en Mermaid, así que la elección no afecta el diagrama.
 CITA_ENTIDAD = "#quot;"
 ESCAPE_COMILLA = "#34;"
+
+# Issue #38: las llaves de una `{variable}` adentro de la ayuda de un rombo.
+# mermaid.js no acepta `{`/`}` sueltas en la etiqueta de un `D1{...}`, así que
+# el serializer las escribe como entidad (que Mermaid dibuja como la llave) y
+# el parser las lee de vuelta.
+LLAVE_ABRE = "#123;"
+LLAVE_CIERRA = "#125;"
 
 
 def _dividir_pares(texto: str) -> tuple[list[str], bool]:
@@ -316,6 +362,41 @@ def _dividir_pares(texto: str) -> tuple[list[str], bool]:
         i += 1
     segmentos.append("".join(actual))
     return segmentos, en_comillas
+
+
+def _parse_decision_label(label: str) -> tuple[str, str, bool, str, list[str], bool]:
+    """
+    Parsea "Nombre § variable | manual | ayuda=texto" (issue #37) →
+    (variable, display, manual, ayuda, descartados, sin_cerrar).
+
+    Misma forma `| clave=valor` que una acción, con `manual` como bandera
+    suelta. Sin `|`, es la decisión de siempre: toda la definición es la
+    variable.
+    """
+    display, definition = _split_display(label)
+    pipe = definition.find("|")
+    variable = (definition[:pipe] if pipe >= 0 else definition).strip()
+    manual, ayuda = False, ""
+    descartados: list[str] = []
+    sin_cerrar = False
+    if pipe >= 0:
+        pares, sin_cerrar = _dividir_pares(definition[pipe + 1 :])
+        for pair in pares:
+            texto = pair.strip()
+            if not texto:
+                continue
+            if texto.lower() == "manual":
+                manual = True
+                continue
+            clave, eq, valor = texto.partition("=")
+            if eq and clave.strip().lower() == "ayuda":
+                valor = valor.strip()
+                if len(valor) >= 2 and valor[0] == '"' and valor[-1] == '"':
+                    valor = valor[1:-1]
+                ayuda = valor.replace(LLAVE_ABRE, "{").replace(LLAVE_CIERRA, "}")
+                continue
+            descartados.append(texto)
+    return variable, display, manual, ayuda, descartados, sin_cerrar
 
 
 def _parse_action_label(label: str) -> tuple[str, dict[str, str], str, list[str], bool]:
@@ -387,11 +468,26 @@ class _Builder:
         if shape == "round":
             node: FlowNode = StartNode(label=label or "inicio", line=line)
         elif shape == "diamond":
-            display, variable = _split_display(label)
+            variable, display, manual, ayuda, descartados, sin_cerrar = _parse_decision_label(label)
             if not variable:
                 self.error(f'Nodo de decisión "{node_id}" sin variable', line, node_id)
                 variable = ""
-            node = DecisionNode(variable=variable, display=display, line=line)
+            for texto in descartados:
+                self.error(
+                    f'En la decisión "{node_id}" no se reconoce "{texto}": se acepta '
+                    f'"manual" y "ayuda=texto".',
+                    line,
+                    node_id,
+                )
+            if sin_cerrar:
+                self.error(
+                    f'En la decisión "{node_id}" hay una comilla sin cerrar en la ayuda.',
+                    line,
+                    node_id,
+                )
+            node = DecisionNode(
+                variable=variable, display=display, line=line, manual=manual, ayuda=ayuda
+            )
         else:
             fn_id, params, display, descartados, sin_cerrar = _parse_action_label(label)
             if not fn_id:
@@ -427,8 +523,8 @@ class _Builder:
             return
         for pattern, shape in _INLINE_SHAPES:
             m = pattern.match(text)
-            if m:
-                self.register(node_id, shape, m.group(1), line)
+            if m and (etiqueta := _etiqueta(m, shape, 1)) is not None:
+                self.register(node_id, shape, etiqueta, line)
                 return
 
 
@@ -484,8 +580,8 @@ def parse_flow(text: str, *, with_meta: bool = True) -> FlowGraph:
         # ── Definición de nodo suelta ────────────────────────────────
         for pattern, shape in _SHAPES:
             m = pattern.match(line)
-            if m:
-                b.register(m.group(1), shape, m.group(2), lineno)
+            if m and (etiqueta := _etiqueta(m, shape, 2)) is not None:
+                b.register(m.group(1), shape, etiqueta, lineno)
                 break
         else:
             b.warn(f"Línea no reconocida por el parser: {line!r}", lineno)
@@ -494,7 +590,28 @@ def parse_flow(text: str, *, with_meta: bool = True) -> FlowGraph:
     _resolve_orphans(graph)
     _resolve_start(graph)
     _flag_unreachable(graph)
+    _check_manual_decisions(graph)
     return graph
+
+
+def _check_manual_decisions(graph: FlowGraph) -> None:
+    """
+    Una decisión manual sin ninguna arista con condición no tiene nada que
+    ofrecerle a quien decide (issue #37): la corrida se pausaría para una
+    pregunta sin respuestas posibles.
+    """
+    for node_id, node in graph.nodes.items():
+        if isinstance(node, DecisionNode) and node.manual:
+            if not any(e.condition is not None for e in graph.out_edges(node_id)):
+                graph.diagnostics.append(
+                    Diagnostic(
+                        Severity.ERROR,
+                        f'La decisión manual "{node_id}" no tiene ninguna arista con '
+                        f"condición: no habría nada que elegir.",
+                        node.line,
+                        node_id,
+                    )
+                )
 
 
 def _resolve_orphans(graph: FlowGraph) -> None:

@@ -28,7 +28,14 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from ..contract import STATUS_ERR, STATUS_OK, ParamError, ToolContext, ToolResult
+from ..contract import (
+    STATUS_ERR,
+    STATUS_OK,
+    STATUS_WAITING,
+    ParamError,
+    ToolContext,
+    ToolResult,
+)
 from ..registry import ToolRegistry
 from .context import RunContext
 from .parser import (
@@ -53,6 +60,11 @@ MAX_DEPTH = 5
 FLOW_EJECUTAR = "flow.ejecutar"
 FLOW_RETRY_GATE = "flow.retry_gate"
 NATIVE_FNS = frozenset({FLOW_EJECUTAR, FLOW_RETRY_GATE})
+
+# Versión del formato del checkpoint de una decisión manual (issue #37). Sube
+# si cambia lo que hace falta para retomar; un checkpoint de otra versión no
+# se intenta leer.
+CHECKPOINT_VERSION = 1
 
 
 @dataclass
@@ -104,6 +116,8 @@ class NodeTrace:
     # ese paso de uno salteado -- los outputs de acá son reales, no un "OK"
     # asumido, y una UI no debería confundir los dos casos.
     dry_executed: bool = False
+    # Issue #37: en una decisión manual, quién eligió la rama al retomar.
+    decided_by: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -124,7 +138,14 @@ class NodeTrace:
             "flow": self.flow,
             "decision_value": self.decision_value,
             "dry_executed": self.dry_executed,
+            "decided_by": self.decided_by,
         }
+
+    @classmethod
+    def from_dict(cls, datos: dict) -> "NodeTrace":
+        """La traza de un nodo ya guardada, para seguirla al retomar (issue #37)."""
+        campos = cls.__dataclass_fields__
+        return cls(**{k: v for k, v in datos.items() if k in campos})
 
 
 @dataclass
@@ -141,10 +162,19 @@ class RunResult:
     trace: list[NodeTrace] = field(default_factory=list)
     logs: list[LogEntry] = field(default_factory=list)
     dry_run: bool = False
+    # Issue #37: None salvo que el run esté pausado en una decisión manual. Es
+    # lo que una UI necesita para preguntar sin leer el .mmd: nodo, variable,
+    # ayuda y una opción por rama. Que no sea None es la forma de saber que el
+    # run espera (`if resultado.waiting:`), aparte de `failed`.
+    waiting: dict | None = None
+    # Lo que hace falta para retomar. **No** va en `to_dict()`: lo persiste
+    # `Instance` en su propia tabla, y nunca incluye `env` ni `config`.
+    checkpoint: dict | None = field(default=None, repr=False)
 
     @property
     def failed(self) -> bool:
-        return self.status != STATUS_OK
+        # Un run en espera no falló: sólo `err` es falla (issue #37).
+        return self.status == STATUS_ERR
 
     def to_dict(self) -> dict:
         return {
@@ -156,6 +186,7 @@ class RunResult:
             "failed_node": self.failed_node,
             "error_kind": self.error_kind,
             "dry_run": self.dry_run,
+            "waiting": self.waiting,
             "trace": [t.to_dict() for t in self.trace],
             "logs": [entry.to_dict() for entry in self.logs],
         }
@@ -231,6 +262,32 @@ class _Run:
             )
         except Exception:  # noqa: BLE001 - ver docstring
             pass
+
+    def build_checkpoint(self, flow_text: str, node_id: str, visits: dict[str, int]) -> dict:
+        """
+        Todo lo que hace falta para retomar una decisión manual (issue #37).
+
+        El texto del flujo va entero: se retoma lo que se empezó, aunque
+        alguien edite el flujo mientras espera. **Nunca** `env` ni `config`:
+        se vuelven a leer al retomar, así un secreto no queda escrito acá.
+        `vars` sí -- ya está en la traza (`trace.outputs`), no expone nada
+        nuevo.
+        """
+        return {
+            "version": CHECKPOINT_VERSION,
+            "flow_text": flow_text,
+            "node_id": node_id,
+            "vars": dict(self.context.vars),
+            "row": dict(self.context.row),
+            "plain_keys": sorted(self.context._plain_keys),
+            "visits": dict(visits),
+            "steps": self.steps,
+            "total_steps": self.total_steps,
+            "retry_counters": dict(self.retry_counters),
+            "last_status": self.last_status,
+            "last_loop": self.last_loop,
+            "actor": self.result.actor,
+        }
 
     def fail(
         self, message: str, node_id: str | None = None, *, error_kind: str | None = None
@@ -313,8 +370,23 @@ def execute_flow(
     return run.result
 
 
-def _walk(run: _Run, flow_text: str, *, depth: int, flow_name: str) -> None:
-    """Recorre un grafo. Se reentra a sí misma por flow.ejecutar."""
+def _walk(
+    run: _Run,
+    flow_text: str,
+    *,
+    depth: int,
+    flow_name: str,
+    start: str | None = None,
+    visits: dict[str, int] | None = None,
+) -> None:
+    """
+    Recorre un grafo. Se reentra a sí misma por flow.ejecutar.
+
+    `start`/`visits` son para retomar una decisión manual (issue #37): se
+    sigue desde la rama elegida con las visitas que ya había, sin volver a
+    anunciar el flujo ni sus warnings, que ya están en el log del run.
+    """
+    retomando = start is not None
     if depth > MAX_DEPTH:
         run.fail(f"Máximo nivel de anidamiento de flujos alcanzado ({MAX_DEPTH})")
         return
@@ -331,25 +403,27 @@ def _walk(run: _Run, flow_text: str, *, depth: int, flow_name: str) -> None:
         run.fail(f"El flujo {etiqueta} tiene errores y no se puede ejecutar — {detalle}")
         return
 
-    for warning in graph.warnings:
+    if not retomando:
+        for warning in graph.warnings:
+            run.log(
+                f"L{warning.line}: {warning.message}" if warning.line else warning.message,
+                "warning",
+                warning.node_id,
+            )
+
         run.log(
-            f"L{warning.line}: {warning.message}" if warning.line else warning.message,
-            "warning",
-            warning.node_id,
+            f"Flujo {etiqueta}: {len(graph.nodes)} nodos, {len(graph.edges)} aristas"
+            + (" (dry run)" if run.dry_run else "")
         )
 
-    run.log(
-        f"Flujo {etiqueta}: {len(graph.nodes)} nodos, {len(graph.edges)} aristas"
-        + (" (dry run)" if run.dry_run else "")
-    )
+        # El total es el del flujo principal: un subflujo sigue contando sobre
+        # el mismo índice, porque para quien mira el progreso es una sola
+        # corrida.
+        if depth == 1:
+            run.total_steps = len(graph.action_nodes())
 
-    # El total es el del flujo principal: un subflujo sigue contando sobre el
-    # mismo índice, porque para quien mira el progreso es una sola corrida.
-    if depth == 1:
-        run.total_steps = len(graph.action_nodes())
-
-    visits: dict[str, int] = {}
-    current: str | None = graph.start_node
+    visits = dict(visits or {})
+    current: str | None = start if retomando else graph.start_node
 
     while current:
         if run.is_cancelled():
@@ -370,6 +444,7 @@ def _walk(run: _Run, flow_text: str, *, depth: int, flow_name: str) -> None:
             )
             return
 
+        node_id = current
         current = _step(
             run,
             graph,
@@ -380,6 +455,11 @@ def _walk(run: _Run, flow_text: str, *, depth: int, flow_name: str) -> None:
             flow_name=flow_name,
         )
         if run.result.failed:
+            return
+        if run.result.waiting is not None:
+            # Issue #37: pausa. El hilo vuelve acá y queda libre; retomar es
+            # otra llamada, desde el checkpoint.
+            run.result.checkpoint = run.build_checkpoint(flow_text, node_id, visits)
             return
 
     run.log(f"Flujo {etiqueta} completado")
@@ -406,6 +486,9 @@ def _step(
         # ejecuta un grafo con errores. Queda como red de seguridad.
         run.fail(f'Nodo "{node_id}" no está definido', node_id)
         return None
+
+    if isinstance(node, DecisionNode) and node.manual and not run.dry_run:
+        return _pause_for_decision(run, graph, node_id, node, visit=visit, depth=depth, flow_name=flow_name)
 
     if isinstance(node, DecisionNode):
         value = run.context.decision_value(node.variable)
@@ -435,12 +518,15 @@ def _step(
                 (e for e in graph.out_edges(node_id) if e.condition is not None), None
             )
             if primera is not None:
-                run.log(
-                    f'[DRY] {node.variable} sin valor conocido; se explora la rama '
-                    f'"{primera.condition}"',
-                    "warning",
-                    node_id,
-                )
+                if node.manual:
+                    # Issue #37: en seco una decisión manual no pausa.
+                    aviso = f'[DRY] decisión manual: en seco se explora la rama "{primera.condition}"'
+                else:
+                    aviso = (
+                        f'[DRY] {node.variable} sin valor conocido; se explora la rama '
+                        f'"{primera.condition}"'
+                    )
+                run.log(aviso, "warning", node_id)
                 return primera.to
 
         run.fail(
@@ -456,6 +542,224 @@ def _step(
 
     run.fail(f'Tipo de nodo desconocido en "{node_id}"', node_id)
     return None
+
+
+def _pause_for_decision(
+    run: _Run,
+    graph: FlowGraph,
+    node_id: str,
+    node: DecisionNode,
+    *,
+    visit: int,
+    depth: int,
+    flow_name: str,
+) -> None:
+    """
+    Una decisión manual en una corrida real (issue #37): siempre pausa, aunque
+    la variable ya tenga valor -- si es manual es porque se quiere que decida
+    una persona. Deja `status="waiting"` y el payload de `waiting`; `_walk`
+    arma el checkpoint y vuelve.
+    """
+    if depth > 1:
+        run.fail(
+            f'Decisión manual en un subflujo ("{node_id}" en "{flow_name}"): '
+            "no soportado todavía",
+            node_id,
+            error_kind="manual_in_subflow",
+        )
+        return None
+
+    run.result.trace.append(
+        NodeTrace(
+            node_id=node_id,
+            node_type="decision",
+            display=node.display,
+            depth=depth,
+            visit=visit,
+            flow=flow_name,
+            message="esperando decisión manual",
+        )
+    )
+    run.result.status = STATUS_WAITING
+    run.result.waiting = waiting_payload(graph, node_id, context=run.context)
+    run.log(
+        f"Esperando decisión manual {node.variable}"
+        + (f' ("{node.display}")' if node.display else ""),
+        "warning",
+        node_id,
+    )
+    return None
+
+
+def waiting_payload(
+    graph: FlowGraph, node_id: str, *, context: RunContext | None = None
+) -> dict:
+    """
+    Lo que una UI necesita para preguntar, sin leer el .mmd (issue #37).
+
+    Una opción por arista **con condición**. `value` es lo que hay que mandar
+    para ir por esa arista: en una condición con coma (`a,b`), alcanza el
+    primero.
+
+    Con `context`, la ayuda sale resuelta con lo que el run tiene en ese
+    momento (issue #38); `ayuda_plantilla` es la original.
+    """
+    node = graph.nodes[node_id]
+    plantilla = getattr(node, "ayuda", "") or ""
+    opciones = []
+    for edge in graph.out_edges(node_id):
+        if edge.condition is None:
+            continue
+        destino = graph.nodes.get(edge.to)
+        opciones.append({
+            "value": edge.condition.split(",")[0].strip(),
+            "condition": edge.condition,
+            "to": edge.to,
+            "to_display": (
+                getattr(destino, "display", "") or getattr(destino, "label", "") or ""
+            ),
+            "to_fn": getattr(destino, "fn", None),
+        })
+    return {
+        "node_id": node_id,
+        "display": getattr(node, "display", ""),
+        "variable": getattr(node, "variable", ""),
+        "ayuda": _resolver_ayuda(plantilla, context) if context is not None else plantilla,
+        "ayuda_plantilla": plantilla,
+        "options": opciones,
+    }
+
+
+def _resolver_ayuda(plantilla: str, context: RunContext) -> str:
+    """
+    La ayuda con sus `{variables}` resueltas: fila, salidas planas y
+    `{NODO.salida...}`, con la misma precedencia que un param. Lo que no
+    resuelve queda literal.
+
+    **Sin `env` ni `config`** (issue #38): la ayuda viaja a la UI y queda en
+    `runs.data`, así que un `{env.SECRETO}` queda como plantilla en vez de
+    escribirse resuelto.
+    """
+    if "{" not in plantilla:
+        return plantilla
+    visible = RunContext(row=context.row, vars=context.vars)
+    resuelta = visible.resolve(plantilla)
+    return resuelta if isinstance(resuelta, str) else str(resuelta)
+
+
+def resume_flow(
+    checkpoint: dict,
+    value: str,
+    *,
+    run_id: str,
+    case_id: str,
+    registry: ToolRegistry,
+    decided_by: str,
+    prior_trace: list[NodeTrace] | None = None,
+    prior_logs: list[LogEntry] | None = None,
+    config: dict | None = None,
+    env: dict | None = None,
+    load_flow: Callable[[str], str] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+    resources: Callable[[str, str], list[dict]] | None = None,
+    policy: "RunPolicy | None" = None,
+    max_visits: int = MAX_VISITS,
+    on_step: Callable[..., None] | None = None,
+) -> RunResult:
+    """
+    Retoma un run pausado en una decisión manual (issue #37).
+
+    Mismo `run_id`, misma traza: se restaura el contexto (vars, row, visitas,
+    contadores) desde el checkpoint, `config` y `env` se leen de nuevo, se
+    anota la decisión y se sigue por la rama elegida con el flujo **del
+    checkpoint**, no con el que haya ahora guardado. Puede terminar `ok`,
+    `err`, o `waiting` otra vez si llega a otra decisión manual.
+
+    Quien llama ya validó `value` (`resolve_manual`); si igual no resuelve,
+    el run falla con un mensaje en vez de seguir por cualquier lado.
+    """
+    from ..users import RunPolicy as _RunPolicy
+
+    if checkpoint.get("version") != CHECKPOINT_VERSION:
+        raise ValueError(
+            f"checkpoint de versión {checkpoint.get('version')!r}; se esperaba {CHECKPOINT_VERSION}"
+        )
+
+    context = RunContext(
+        row=dict(checkpoint.get("row") or {}),
+        vars=dict(checkpoint.get("vars") or {}),
+        config=dict(config or {}),
+        env=dict(env or {}),
+    )
+    context._plain_keys.update(checkpoint.get("plain_keys") or [])
+    run = _Run(
+        policy=policy if policy is not None else _RunPolicy.sin_restricciones(),
+        run_id=run_id,
+        case_id=case_id,
+        registry=registry,
+        context=context,
+        load_flow=load_flow,
+        is_cancelled=is_cancelled or (lambda: False),
+        resources=resources or (lambda _plugin, _collection: []),
+        dry_run=False,
+        max_visits=max_visits,
+        on_step=on_step,
+    )
+    run.result.actor = checkpoint.get("actor") or run.policy.actor
+    run.result.trace = list(prior_trace or [])
+    run.result.logs = list(prior_logs or [])
+    run.steps = int(checkpoint.get("steps") or 0)
+    run.total_steps = int(checkpoint.get("total_steps") or 0)
+    run.retry_counters = dict(checkpoint.get("retry_counters") or {})
+    run.last_status = checkpoint.get("last_status") or STATUS_OK
+    run.last_loop = bool(checkpoint.get("last_loop"))
+
+    flow_text = checkpoint["flow_text"]
+    node_id = checkpoint["node_id"]
+    graph = parse_flow(flow_text)
+    node = graph.nodes.get(node_id)
+    variable = getattr(node, "variable", "") or node_id
+
+    elegido = str(value)
+    context.vars[variable] = elegido
+    decision = next(
+        (
+            t for t in reversed(run.result.trace)
+            if t.node_id == node_id and t.node_type == "decision" and t.decision_value is None
+        ),
+        None,
+    )
+    if decision is not None:
+        decision.decision_value = elegido
+        decision.decided_by = decided_by
+        decision.message = ""
+    run.log(f'Decisión manual {variable} = "{elegido}" (por {decided_by})', node_id=node_id)
+
+    siguiente = resolve_manual(graph, node_id, elegido)
+    if siguiente is None:
+        run.fail(f'Sin rama para "{variable} = {elegido}" en el nodo "{node_id}"', node_id)
+        return run.result
+
+    _walk(
+        run,
+        flow_text,
+        depth=1,
+        flow_name="",
+        start=siguiente,
+        visits=dict(checkpoint.get("visits") or {}),
+    )
+    return run.result
+
+
+def resolve_manual(graph: FlowGraph, node_id: str, value) -> str | None:
+    """
+    A qué nodo lleva elegir `value` en la decisión manual `node_id`, o None
+    si no es una rama de esa decisión. Misma lógica que una decisión común.
+    """
+    node = graph.nodes.get(node_id)
+    if not isinstance(node, DecisionNode):
+        return None
+    return _resolve_decision(graph, node_id, value)
 
 
 def _run_action(
@@ -790,10 +1094,14 @@ def _fmt(params: dict) -> str:
 
 
 __all__ = [
+    "CHECKPOINT_VERSION",
     "MAX_DEPTH",
     "MAX_VISITS",
     "LogEntry",
     "NodeTrace",
     "RunResult",
     "execute_flow",
+    "resolve_manual",
+    "resume_flow",
+    "waiting_payload",
 ]

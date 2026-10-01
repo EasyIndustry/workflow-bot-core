@@ -21,6 +21,9 @@ en el problema de dos motores divergiendo.
     python -m backend.core run mi-flujo --case 42 --dry-run
     python -m backend.core action mi_plugin probar --params '{"url": "..."}'
     python -m backend.core trace <run_id>
+    python -m backend.core runs --status waiting
+    python -m backend.core resume <run_id> <valor>
+    python -m backend.core discard <run_id>
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ from .doctor import format_text, run_checks
 from .flow.parser import Severity, parse_flow
 from .instance import Instance, WorkflowNotFound
 from .resources import ResourceError
+from .stores import StoreError
 from .users import KINDS, UserError
 
 # La raíz de la instalación es `backend/`: ahí vive `data/`.
@@ -163,12 +167,21 @@ def cmd_flow(inst: Instance, args) -> int:
 
 def cmd_runs(inst: Instance, args) -> int:
     """Runs ya ejecutados, resumidos (issue #17): "qué corrió y cómo terminó"."""
-    runs = inst.list_runs(
-        case_id=args.case,
-        source=args.source,
-        only_failed=args.only_failed,
-        limit=args.limit,
-    )
+    try:
+        if args.status == "waiting":
+            # Con el `waiting` de cada uno: lo que hace falta para retomarlo.
+            runs = inst.list_waiting(limit=args.limit, case_id=args.case)
+        else:
+            runs = inst.list_runs(
+                case_id=args.case,
+                source=args.source,
+                only_failed=args.only_failed,
+                limit=args.limit,
+                status=args.status,
+            )
+    except StoreError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     if args.json:
         print(json.dumps(runs, indent=2, ensure_ascii=False))
         return 0
@@ -365,12 +378,55 @@ def cmd_run(inst: Instance, args) -> int:
         marca = {"info": " ", "warning": "!", "error": "×"}.get(entrada.level, " ")
         print(f"{entrada.t} {marca} {entrada.message}")
 
+    _imprimir_final(resultado)
+    return 0 if not resultado.failed else 1
+
+
+def _imprimir_final(resultado) -> None:
     print()
     print(f"run {resultado.run_id} · {resultado.status}"
           + (" (dry run)" if resultado.dry_run else ""))
     if resultado.failed:
         print(f"falló en {resultado.failed_node}: {resultado.message}")
+    if resultado.waiting:
+        espera = resultado.waiting
+        print(f"esperando decisión en {espera['node_id']} ({espera['variable']})")
+        if espera.get("ayuda"):
+            print(f"  {espera['ayuda']}")
+        for opcion in espera["options"]:
+            print(f"  {opcion['value']:<12} → {opcion['to']} {opcion['to_display']}".rstrip())
+        print(f"retomar: resume {resultado.run_id} <valor>")
+
+
+def cmd_resume(inst: Instance, args) -> int:
+    """Retoma un run pausado en una decisión manual (issue #37)."""
+    try:
+        resultado = inst.resume(args.run_id, args.value, actor=args.actor)
+    except (UserError, StoreError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 3
+    if args.json:
+        print(json.dumps(resultado.to_dict(), indent=2, ensure_ascii=False))
+        return 0 if not resultado.failed else 1
+    for entrada in resultado.logs:
+        marca = {"info": " ", "warning": "!", "error": "×"}.get(entrada.level, " ")
+        print(f"{entrada.t} {marca} {entrada.message}")
+    _imprimir_final(resultado)
     return 0 if not resultado.failed else 1
+
+
+def cmd_discard(inst: Instance, args) -> int:
+    """Cierra una espera sin seguir (issue #37)."""
+    try:
+        resultado = inst.discard_wait(args.run_id, actor=args.actor)
+    except (UserError, StoreError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 3
+    if args.json:
+        print(json.dumps(resultado.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        print(f"run {resultado.run_id} · {resultado.status}: {resultado.message}")
+    return 0
 
 
 def cmd_action(inst: Instance, args) -> int:
@@ -757,6 +813,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--case", help="Filtra por case_id.")
     p.add_argument("--source", help="Filtra por origen del run.")
     p.add_argument("--only-failed", action="store_true", help="Sólo los que fallaron.")
+    p.add_argument(
+        "--status",
+        choices=("ok", "err", "waiting"),
+        help="Filtra por status. `waiting` incluye las opciones de cada decisión pendiente.",
+    )
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_runs)
@@ -888,6 +949,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--params", help='Params ya elegidos, como JSON: \'{"connection": "..."}\'')
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_extra_params)
+
+    p = sub.add_parser("resume", help="Retoma un run que espera una decisión manual.")
+    p.add_argument("run_id")
+    p.add_argument("value", help="La rama elegida: el `value` de una de sus opciones.")
+    p.add_argument("--json", action="store_true", help="El resultado completo, con la traza.")
+    p.set_defaults(fn=cmd_resume)
+
+    p = sub.add_parser("discard", help="Cierra sin seguir un run que espera una decisión.")
+    p.add_argument("run_id")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_discard)
 
     p = sub.add_parser("trace", help="La traza de un run ya ejecutado.")
     p.add_argument("run_id")

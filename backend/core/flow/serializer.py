@@ -39,6 +39,8 @@ from .parser import (
     CITA_ENTIDAD,
     DISPLAY_SEP,
     ESCAPE_COMILLA,
+    LLAVE_ABRE,
+    LLAVE_CIERRA,
     ActionNode,
     DecisionNode,
     FlowEdge,
@@ -136,6 +138,8 @@ def from_dict(datos: dict) -> FlowGraph:
                 variable=crudo.get("variable") or "",
                 display=crudo.get("display") or "",
                 line=linea,
+                manual=bool(crudo.get("manual")),
+                ayuda=str(crudo.get("ayuda") or ""),
             )
         else:
             grafo.nodes[node_id] = UnknownNode(line=linea)
@@ -198,6 +202,37 @@ def verificar(grafo: FlowGraph) -> list[str]:
                         f'{node_id} › {clave}: el valor contiene "{DISPLAY_SEP}", '
                         f"que separa el nombre visible de la definición"
                     )
+
+        if isinstance(nodo, DecisionNode):
+            if nodo.manual and not any(
+                a.condition for a in grafo.edges if a.from_ == node_id
+            ):
+                problemas.append(
+                    f'La decisión manual "{node_id}" no tiene ninguna arista con '
+                    f"condición: no habría nada que elegir"
+                )
+            # La ayuda vive adentro de `{...}`: `§` partiría la etiqueta. Las
+            # llaves de una `{variable}` (issue #38) se escriben como entidad,
+            # y coma, pipe y comilla se citan igual que el valor de un param;
+            # lo que no sobrevive es la secuencia literal de alguna de esas
+            # entidades.
+            ayuda = nodo.ayuda or ""
+            if DISPLAY_SEP in ayuda:
+                problemas.append(
+                    f'La ayuda de "{node_id}" contiene "{DISPLAY_SEP}", que corta la etiqueta'
+                )
+            if LLAVE_ABRE in ayuda or LLAVE_CIERRA in ayuda:
+                problemas.append(
+                    f'La ayuda de "{node_id}" contiene la secuencia literal '
+                    f'"{LLAVE_ABRE}" o "{LLAVE_CIERRA}", que se leería como una llave'
+                )
+            if any(c in ayuda for c in (",", "|", '"')) and (
+                CITA_ENTIDAD in ayuda or ESCAPE_COMILLA in ayuda
+            ):
+                problemas.append(
+                    f'La ayuda de "{node_id}" necesita citarse y contiene una '
+                    f"entidad ({CITA_ENTIDAD} o {ESCAPE_COMILLA}) que no sobrevive"
+                )
 
         etiqueta = getattr(nodo, "display", "") or getattr(nodo, "label", "") or ""
         if '"' in etiqueta or "]" in etiqueta:
@@ -263,7 +298,18 @@ def _nodo(node_id: str, nodo) -> str:
         return f"{node_id}({nodo.label})"
 
     if isinstance(nodo, DecisionNode):
-        cuerpo = _con_display(nodo.display, nodo.variable)
+        definicion = nodo.variable
+        # Issue #37: mismo `| clave=valor` que una acción. Con espacio a los
+        # dos lados del pipe: la ayuda se trimea al parsear, a diferencia del
+        # valor de un param.
+        if nodo.manual:
+            definicion += " | manual"
+        if nodo.ayuda:
+            ayuda = _citar_si_hace_falta(nodo.ayuda.strip())
+            # Issue #38: mermaid.js no acepta `{`/`}` sueltas en un rombo.
+            ayuda = ayuda.replace("{", LLAVE_ABRE).replace("}", LLAVE_CIERRA)
+            definicion += f" | ayuda={ayuda}"
+        cuerpo = _con_display(nodo.display, definicion)
         return f"{node_id}{{{cuerpo}}}"
 
     if isinstance(nodo, ActionNode):

@@ -178,7 +178,8 @@ class LogStore:
             return 0
         limite = time.time() - days * 86400
         afectadas = self.db.execute(
-            "DELETE FROM run_logs WHERE org = ? AND ts < ?", (self.org, limite)
+            "DELETE FROM run_logs WHERE org = ? AND ts < ?" + _SIN_ESPERAS,
+            (self.org, limite, self.org),
         )
         return afectadas
 
@@ -197,8 +198,8 @@ class LogStore:
         marcas = ",".join("?" * len(vivos))
         afectadas = self.db.execute(
             f"DELETE FROM run_logs WHERE org = ? AND source = ?"  # noqa: S608
-            f" AND case_id NOT IN ({marcas})",
-            [self.org, source, *vivos],
+            f" AND case_id NOT IN ({marcas})" + _SIN_ESPERAS,
+            [self.org, source, *vivos, self.org],
         )
         return afectadas
 
@@ -219,14 +220,20 @@ class LogStore:
             "      PARTITION BY case_id ORDER BY id DESC"
             "    ) AS fila FROM run_logs WHERE org = ?"
             "  ) WHERE fila > ?"
-            ")",
-            (self.org, max_per_case),
+            ")" + _SIN_ESPERAS,
+            (self.org, max_per_case, self.org),
         )
         return afectadas
 
     def total(self) -> int:
         fila = self.db.one("SELECT COUNT(*) AS n FROM run_logs WHERE org = ?", (self.org,))
         return fila["n"] if fila else 0
+
+
+# Issue #37: la limpieza automática nunca toca el log de un run pausado en una
+# decisión manual -- al retomarlo, la persona tiene que ver el log completo de
+# esa corrida. `clear_case` (el botón "Limpiar") sí, porque es explícito.
+_SIN_ESPERAS = " AND run_id NOT IN (SELECT run_id FROM run_waits WHERE org = ?)"
 
 
 def _linea(fila) -> LogLine:

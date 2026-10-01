@@ -398,6 +398,45 @@ def list_runs(
     return {"runs": _cli(*argv, root=root)}
 
 
+def list_waiting_runs(
+    case_id: str | None = None, limit: int = 50, root: str | None = None
+) -> dict:
+    """
+    Los runs pausados en una decisión manual (issue #37), cada uno con su
+    `waiting`: el nodo, la variable, la ayuda y una opción por rama (`value`
+    es lo que se le pasa a `resume_run`).
+    """
+    argv = ["runs", "--json", "--status", "waiting", "--limit", str(limit)]
+    if case_id:
+        argv += ["--case", case_id]
+    return {"runs": _cli(*argv, root=root)}
+
+
+def resume_run(
+    run_id: str,
+    value: str,
+    root: str,
+    actor: str = "agente-mcp",
+    plugins: dict | None = None,
+) -> dict:
+    """
+    Retoma un run pausado en una decisión manual, por la rama `value`
+    (issue #37). Ejecuta **de verdad** lo que sigue, así que tiene las
+    mismas guardas que `run_flow`: `root` obligatorio y los permisos del
+    actor -- que queda en la traza como `decided_by`.
+    """
+    if not str(root or "").strip():
+        raise OperationError(
+            "resume_run necesita `root`: retomar ejecuta de verdad lo que sigue "
+            "del flujo, igual que run_flow."
+        )
+    resultado = _cli("resume", run_id, value, "--json", root=root, plugins=plugins, actor=actor)
+    resumen = _resumen_de_run(resultado)
+    resumen["actor"] = resultado.get("actor", actor)
+    resumen["run_id"] = resultado.get("run_id", run_id)
+    return resumen
+
+
 def get_run(run_id: str, root: str | None = None) -> dict:
     """La traza completa de un run ya ejecutado, nodo por nodo, con sus params resueltos."""
     return _cli("trace", run_id, "--json", root=root)
@@ -458,6 +497,8 @@ def _resumen_de_run(resultado: dict) -> dict:
         # core; mañana, un agente vía este mismo tool) necesita distinguir la
         # causa de una falla más allá del texto libre de `message`.
         "error_kind": resultado.get("error_kind"),
+        # Issue #37: no es None si el run quedó pausado en una decisión manual.
+        "waiting": resultado.get("waiting"),
         "sin_resolver": sorted({
             entrada["message"].split("variables sin resolver: ", 1)[1]
             for entrada in resultado.get("logs", [])
@@ -471,6 +512,8 @@ def _resumen_de_run(resultado: dict) -> dict:
                 "status": t["status"],
                 "message": t["message"],
                 "error_kind": t.get("error_kind"),
+                "decision_value": t.get("decision_value"),
+                "decided_by": t.get("decided_by"),
             }
             for t in resultado.get("trace", [])
         ],

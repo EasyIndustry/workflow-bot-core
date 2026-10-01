@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .contract import STATUS_ERR, STATUS_OK, STATUS_WAITING
 from .flow.executor import RunResult
 from .flow.parser import parse_meta
 from .jsonio import dumps, loads
@@ -24,6 +25,10 @@ from .ports import StoragePort
 from .schema import LOCAL_ORG
 
 _NAME_RE = re.compile(r"^[\w\- ]{1,120}$")
+
+# Los status con los que puede quedar guardado un run (issue #37 suma
+# `waiting`). Filtrar por otro es un error de quien llama, no una lista vacía.
+RUN_STATUSES = (STATUS_OK, STATUS_ERR, STATUS_WAITING)
 
 
 class StoreError(Exception):
@@ -327,6 +332,40 @@ class RunStore:
         fila = self.db.one("SELECT data FROM runs WHERE run_id = ?", (run_id,))
         return loads(fila["data"], None) if fila else None
 
+    def summary(self, run_id: str) -> RunSummary | None:
+        fila = self.db.one(
+            "SELECT * FROM runs WHERE org = ? AND run_id = ?", (self.org, run_id)
+        )
+        return _summary(fila) if fila else None
+
+    def finish_wait(self, run_id: str, datos: dict, *, finished_at: float | None = None) -> None:
+        """
+        Reescribe un run que estaba en espera (issue #37). Es la **única**
+        excepción a append-only, y acotada: sólo pisa una fila con
+        `status='waiting'`, que todavía no terminó -- un run ya cerrado sigue
+        sin poder tocarse. Si la fila no está esperando (otro la retomó o la
+        descartó en el medio), levanta en vez de pisar.
+        """
+        guardado = {clave: valor for clave, valor in datos.items() if clave != "logs"}
+        afectadas = self.db.execute(
+            "UPDATE runs SET status = ?, failed_node = ?, message = ?, node_count = ?,"
+            " finished_at = ?, data = ?"
+            " WHERE org = ? AND run_id = ? AND status = ?",
+            (
+                guardado.get("status", ""),
+                guardado.get("failed_node"),
+                guardado.get("message", ""),
+                len(guardado.get("trace") or []),
+                finished_at if finished_at is not None else time.time(),
+                dumps(guardado),
+                self.org,
+                run_id,
+                STATUS_WAITING,
+            ),
+        )
+        if not afectadas:
+            raise StoreError(f"El run '{run_id}' ya no está esperando una decisión")
+
     def list(
         self,
         *,
@@ -336,9 +375,17 @@ class RunStore:
         source: str | None = None,
         actor: str | None = None,
         include_dry: bool = True,
+        status: str | None = None,
     ) -> list[RunSummary]:
         sql = "SELECT * FROM runs WHERE org = ?"
         params: list[Any] = [self.org]
+        if status is not None:
+            if status not in RUN_STATUSES:
+                raise StoreError(
+                    f"status inválido: {status!r} (se espera {', '.join(RUN_STATUSES)})"
+                )
+            sql += " AND status = ?"
+            params.append(status)
         if case_id is not None:
             sql += " AND case_id = ?"
             params.append(str(case_id))
@@ -349,7 +396,8 @@ class RunStore:
             sql += " AND source = ?"
             params.append(source)
         if only_failed:
-            sql += " AND status != 'ok'"
+            # Sólo `err`: un run en espera no falló (issue #37).
+            sql += " AND status = 'err'"
         if not include_dry:
             sql += " AND dry_run = 0"
         sql += " ORDER BY started_at DESC LIMIT ?"
@@ -381,14 +429,103 @@ class RunStore:
         params = [self.org, *[str(c) for c in case_ids], self.org]
         return {f["case_id"]: _summary(f) for f in self.db.query(sql, params)}
 
+    def count(self, *, status: str | None = None) -> int:
+        sql = "SELECT COUNT(*) AS n FROM runs WHERE org = ?"
+        params: list[Any] = [self.org]
+        if status is not None:
+            sql += " AND status = ?"
+            params.append(status)
+        fila = self.db.one(sql, params)
+        return fila["n"] if fila else 0
+
     def prune(self, keep: int = 5000) -> int:
-        """Borra los más viejos pasado un tope. La evidencia vale más que el disco."""
+        """
+        Borra los más viejos pasado un tope. La evidencia vale más que el disco.
+
+        Nunca uno en espera (issue #37): borrarlo dejaría a una persona sin
+        la corrida que tiene que decidir.
+        """
         afectadas = self.db.execute(
-            "DELETE FROM runs WHERE org = ? AND run_id NOT IN ("
+            "DELETE FROM runs WHERE org = ? AND status != ? AND run_id NOT IN ("
             "  SELECT run_id FROM runs WHERE org = ? ORDER BY started_at DESC LIMIT ?)",
-            (self.org, self.org, int(keep)),
+            (self.org, STATUS_WAITING, self.org, int(keep)),
         )
         return afectadas
+
+
+# ── Esperas (issue #37) ─────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class RunWait:
+    run_id: str
+    case_id: str
+    flow: str
+    source: str
+    node_id: str
+    checkpoint: dict
+    created_at: float
+
+
+class WaitStore:
+    """
+    Checkpoints de los runs pausados en una decisión manual.
+
+    Estado vivo, no historial: una fila existe mientras el run espera. Está en
+    la base y no en memoria para que reiniciar el proceso no pierda la
+    espera. `take` es cómo se reclama una para retomarla o descartarla: borra
+    y devuelve, así dos que retoman a la vez no la siguen los dos.
+    """
+
+    def __init__(self, db: StoragePort, org: str = LOCAL_ORG) -> None:
+        self.db = db
+        self.org = org
+
+    def save(
+        self, run_id: str, checkpoint: dict, *, case_id: str, flow: str, source: str = ""
+    ) -> None:
+        self.db.execute(
+            "INSERT INTO run_waits (run_id, org, case_id, flow, source, node_id, checkpoint, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT (run_id) DO UPDATE SET node_id = excluded.node_id,"
+            "   checkpoint = excluded.checkpoint, created_at = excluded.created_at",
+            (
+                run_id, self.org, str(case_id), flow, source,
+                str(checkpoint.get("node_id") or ""), dumps(checkpoint), time.time(),
+            ),
+        )
+
+    def get(self, run_id: str) -> RunWait | None:
+        fila = self.db.one(
+            "SELECT * FROM run_waits WHERE org = ? AND run_id = ?", (self.org, run_id)
+        )
+        return _wait(fila) if fila else None
+
+    def take(self, run_id: str) -> bool:
+        """Reclama la espera. False si ya no estaba (otro la tomó antes)."""
+        return self.db.execute(
+            "DELETE FROM run_waits WHERE org = ? AND run_id = ?", (self.org, run_id)
+        ) > 0
+
+    def for_case(self, case_id: str, flow: str) -> RunWait | None:
+        fila = self.db.one(
+            "SELECT * FROM run_waits WHERE org = ? AND case_id = ? AND flow = ?"
+            " ORDER BY created_at DESC LIMIT 1",
+            (self.org, str(case_id), flow),
+        )
+        return _wait(fila) if fila else None
+
+
+def _wait(fila) -> RunWait:
+    return RunWait(
+        run_id=fila["run_id"],
+        case_id=fila["case_id"],
+        flow=fila["flow"],
+        source=fila["source"],
+        node_id=fila["node_id"],
+        checkpoint=loads(fila["checkpoint"], {}) or {},
+        created_at=fila["created_at"],
+    )
 
 
 def _summary(fila) -> RunSummary:
