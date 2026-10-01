@@ -26,8 +26,9 @@ mundo.**
 | **Plugin** | lógica de negocio | los ports que necesita, nunca una librería directamente | se instala por entry point |
 
 Los ports que el núcleo define, con su adapter incluido: `http` (urllib), `fs`
-(os/shutil), `process` (subprocess), `clock` (time), `storage` (sqlite3) y
-`crypto` (cryptography).
+(os/shutil), `process` (subprocess), `clock` (time), `socket` (socket/ssl),
+`storage` (sqlite3), `crypto` (cryptography) y `sqlite_file` (sqlite3,
+sólo lectura contra un archivo externo).
 
 `storage` y `crypto` son los dos que un plugin **no** puede pedir: son del
 núcleo. Un plugin con acceso al almacenamiento elegiría dónde persisten sus

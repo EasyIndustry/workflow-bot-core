@@ -51,6 +51,8 @@ Los ports con adapter incluido:
 | `storage` | `SqliteStorageAdapter` | `sqlite3` |
 | `crypto` | `FernetCryptoAdapter` | `cryptography` |
 | `geometry` | `NullGeometryAdapter` (`available=False`) | — |
+| `socket` | `TcpSocketAdapter` | `socket` + `ssl` |
+| `sqlite_file` | `ExternalSqliteAdapter` | `sqlite3` |
 
 `browser` maneja un navegador real (navegar, clickear, leer lo que la pantalla
 ya muestra) pero **no** sabe de sesiones: perfil persistente y login son
@@ -90,6 +92,29 @@ este port pueda cargar igual (un port sin ningún adapter atado no carga) y
 falle explícito recién si un tool intenta usarlo de verdad. Una instalación
 que necesite cómputo geométrico escribe o instala su propio adapter y lo
 inyecta con `Instance(root, adapters={**build_default_adapters(), "geometry": ...})`.
+
+`socket` (issue #39) es TCP crudo con TLS opcional —`connect`, `send`, `recv`,
+`close`— y nada de protocolo de aplicación encima. Nace de un pedido de port
+para leer bases SQL externas (Postgres, MySQL) sin que un plugin importe el
+driver directo; un port que hablara SQL no cerraba porque, a diferencia de
+`http`, SQL no es un protocolo único —cada motor tiene su propio driver
+nativo—. Bajar un nivel sí cierra: TCP es un protocolo fijo igual que HTTP, así
+que el adapter se escribe una sola vez con `socket`/`ssl` de la stdlib, sin
+ninguna librería curada ni driver bundleado. Un plugin que quiera hablarle a
+Postgres (o a cualquier otro protocolo binario) implementa ese protocolo en
+Python puro sobre `send`/`recv`, igual que `UrllibHttpAdapter` implementa HTTP
+sin ninguna librería externa. `recv` devuelve hasta `size` bytes, nunca
+garantiza esa cantidad exacta —mismo comportamiento que `socket.recv`—: armar
+mensajes completos a partir del stream es trabajo del plugin, no del port.
+
+`sqlite_file` (issue #40) es sólo lectura contra **cualquier** archivo
+`.sqlite`/`.db` externo que el flujo indique por `path` —nada que ver con
+`storage`, que es sólo el `bot.db` del propio núcleo—. Nace de separar del
+`socket` de arriba el caso que no necesitaba nada de eso: SQLite es un archivo
+local, sin red ni protocolo de cable, así que se abre directo con `sqlite3` de
+la stdlib —cero dependencia nueva—, en modo `ro` de verdad (no una convención
+que un `INSERT` pudiera esquivar). Mismo límite honesto que `storage`: abstrae
+la *conexión*, no el *dialecto*.
 
 ## Escribir un plugin
 

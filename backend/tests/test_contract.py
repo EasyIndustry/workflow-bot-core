@@ -565,7 +565,9 @@ def test_el_catalogo_publica_que_ports_usa_cada_plugin():
     catalogo = _registry().catalog()
     plugin = catalogo["plugins"][0]
     assert set(plugin["ports"]) == {"http", "fs", "process", "clock"}
-    assert set(catalogo["ports"]) == {"http", "fs", "process", "clock", "browser", "window", "geometry"}
+    assert set(catalogo["ports"]) == {
+        "http", "fs", "process", "clock", "browser", "window", "geometry", "socket", "sqlite_file",
+    }
 
 
 # ── Dependencias de cómputo puro (issue #20) ─────────────────────────────

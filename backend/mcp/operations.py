@@ -194,6 +194,10 @@ def list_ports(**_) -> dict:
                   "click(window, control, button='left'), "
                   "type_text(window, control, text), read_text(window, control=None), "
                   "read_state(window, control) -> 'on'/'off'/'indeterminate'/None",
+        p.SOCKET: "connect(host, port, tls=False) -> SocketConnection, "
+                  "send(conn, data: bytes), recv(conn, size) -> bytes, close(conn)",
+        p.SQLITE_FILE: "query(path, sql, params) -> list[dict], one(path, sql, params), "
+                       "columns(path, table) -- siempre de sólo lectura",
     }
     return {
         "pedibles_por_un_plugin": [

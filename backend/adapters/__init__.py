@@ -28,6 +28,8 @@ from .fs_local import LocalFsAdapter
 from .geometry_null import NullGeometryAdapter
 from .http_urllib import UrllibHttpAdapter
 from .process_subprocess import SubprocessAdapter
+from .socket_tcp import TcpSocketAdapter
+from .sqlite_file import ExternalSqliteAdapter
 from .storage_sqlite import IN_MEMORY, SqliteStorageAdapter
 from .window_atspi import AtspiWindowAdapter
 from .window_pywinauto import PywinautoWindowAdapter
@@ -96,12 +98,15 @@ def build_default_adapters(
         # geométrico inyecta el suyo con
         # `Instance(adapters={**build_default_adapters(), "geometry": ...})`.
         ports.GEOMETRY: NullGeometryAdapter(),
+        ports.SOCKET: TcpSocketAdapter(),
+        ports.SQLITE_FILE: ExternalSqliteAdapter(),
     }
 
 
 __all__ = [
     "IN_MEMORY",
     "AtspiWindowAdapter",
+    "ExternalSqliteAdapter",
     "FernetCryptoAdapter",
     "LocalFsAdapter",
     "NullGeometryAdapter",
@@ -110,6 +115,7 @@ __all__ = [
     "SqliteStorageAdapter",
     "SubprocessAdapter",
     "SystemClockAdapter",
+    "TcpSocketAdapter",
     "UnsupportedWindowAdapter",
     "UrllibHttpAdapter",
     "build_default_adapters",

@@ -567,6 +567,72 @@ class GeometryPort(Protocol):
         ...
 
 
+# ── Socket TCP ──────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class SocketConnection:
+    """
+    Un handle opaco a una conexión TCP abierta — mismo patrón que `WindowInfo`:
+    lo devuelve `connect()` y se pasa tal cual a `send`/`recv`/`close`, nunca se
+    arma a mano ni se interpreta. Permite que el adapter guarde el socket real
+    sin que el plugin lo vea.
+    """
+
+    handle: str
+
+
+@runtime_checkable
+class SocketPort(Protocol):
+    """
+    TCP crudo, con TLS opcional. Nada de protocolo de aplicación encima.
+
+    Por qué existe (issue #39): se pidió un port para que un plugin lea bases
+    SQL externas (Postgres, MySQL) sin importar un driver directo. Un port que
+    hablara SQL no cerraba: a diferencia de `http`, SQL no es un protocolo
+    único -- cada motor tiene su propio driver nativo y su propio protocolo de
+    cable, así que ese port hubiera tenido que bundlear o dejar "null" varios
+    drivers heterogéneos, rompiendo la idea de "un port, una forma fija, sin
+    librería curada".
+
+    Bajar un nivel sí cierra: TCP **es** un protocolo único, igual que HTTP.
+    Este port da transporte -- abrir la conexión, mandar bytes, recibir
+    bytes -- y nada más. Un plugin que quiera hablarle a Postgres implementa el
+    protocolo de cable de Postgres (o el de Redis, o el de SMTP, o el que sea)
+    en Python puro sobre `send`/`recv`, exactamente como `UrllibHttpAdapter`
+    implementa HTTP sin ninguna librería curada. Es más trabajo que importar
+    `psycopg2`, pero es lo que mantiene al plugin del lado correcto de la regla
+    de arquitectura: un plugin nunca importa una librería externa, sólo pide
+    ports.
+
+    **Límite honesto:** no hay framing ni ayuda de protocolo. `recv` devuelve
+    hasta `size` bytes, nunca garantiza esa cantidad exacta -- mismo
+    comportamiento que `socket.recv` de la stdlib. Armar mensajes completos a
+    partir de un stream de bytes es trabajo del plugin, no de este port.
+    """
+
+    def connect(
+        self, host: str, port: int, *, tls: bool = False, timeout: float | None = None
+    ) -> SocketConnection:
+        """Abre la conexión. `PortError` si no se pudo conectar a tiempo."""
+        ...
+
+    def send(self, conn: SocketConnection, data: bytes) -> None:
+        """Manda `data` entero. `PortError` si la conexión se cortó."""
+        ...
+
+    def recv(self, conn: SocketConnection, size: int, *, timeout: float | None = None) -> bytes:
+        """
+        Hasta `size` bytes del otro lado. Cadena vacía si el otro lado cerró la
+        conexión (fin de stream) -- eso es un dato, no un `PortError`.
+        """
+        ...
+
+    def close(self, conn: SocketConnection) -> None:
+        """Cierra la conexión. No falla si ya estaba cerrada."""
+        ...
+
+
 # ── Almacenamiento ──────────────────────────────────────────────────────
 
 
@@ -622,6 +688,45 @@ class StoragePort(Protocol):
     def close(self) -> None: ...
 
 
+# ── Archivo SQLite externo ──────────────────────────────────────────────
+
+
+@runtime_checkable
+class SqliteFilePort(Protocol):
+    """
+    Lectura de sólo lectura contra un archivo SQLite externo, por `path`.
+
+    Por qué existe y por qué no es `StoragePort` (issue #40): `StoragePort` es
+    la base **del propio Bot** -- su schema, sus migraciones, un solo archivo
+    fijo (`bot.db`) -- y es del núcleo, no declarable por un plugin. Este port
+    es lo opuesto: no tiene schema propio, no migra nada, abre **cualquier**
+    archivo `.sqlite`/`.db` que el flujo le indique, y siempre de sólo
+    lectura -- para que un plugin no pueda escribir por accidente en una base
+    de negocio de otra aplicación.
+
+    Nace de evaluar el port genérico para SQL externo que pedía el issue #39.
+    Postgres/MySQL hablan por red con su propio protocolo de cable, y eso
+    terminó resuelto aparte con `SocketPort` -- transporte crudo, sin dialecto
+    bundleado. SQLite no tiene nada de eso: es un archivo local que ya se abre
+    con `sqlite3` de la stdlib, la misma librería que usa `StoragePort`. No
+    tiene sentido demorar este caso -- mucho más chico y ya resuelto -- detrás
+    del trabajo de Postgres.
+
+    Mismo límite honesto que `StoragePort`: abstrae la *conexión*, no el
+    *dialecto* -- el SQL que se manda sigue siendo responsabilidad del plugin.
+    """
+
+    def query(self, path: str, sql: str, params: Iterable = ()) -> list[dict]:
+        """Filas como dicts. Nunca el tipo de fila del driver."""
+        ...
+
+    def one(self, path: str, sql: str, params: Iterable = ()) -> dict | None: ...
+
+    def columns(self, path: str, table: str) -> list[str]:
+        """Nombres de columna de `table`, en orden. Lista vacía si no existe."""
+        ...
+
+
 # ── Catálogo de ports conocidos ─────────────────────────────────────────
 #
 # Los nombres con los que un plugin pide un port en su manifest. Están acá y no
@@ -636,6 +741,8 @@ WINDOW = "window"
 STORAGE = "storage"
 CRYPTO = "crypto"
 GEOMETRY = "geometry"
+SOCKET = "socket"
+SQLITE_FILE = "sqlite_file"
 
 PORTS: dict[str, type] = {
     HTTP: HttpPort,
@@ -647,13 +754,17 @@ PORTS: dict[str, type] = {
     STORAGE: StoragePort,
     CRYPTO: CryptoPort,
     GEOMETRY: GeometryPort,
+    SOCKET: SocketPort,
+    SQLITE_FILE: SqliteFilePort,
 }
 
 # Ports que un plugin puede pedir. `storage` y `crypto` no están: los dos son
 # del núcleo. Un plugin con acceso al almacenamiento elegiría dónde persisten
 # sus datos —exactamente lo que `Resource` existe para impedir— y uno con
 # acceso al cifrado podría leer secretos que no le corresponden.
-PLUGIN_PORTS = frozenset({HTTP, FS, PROCESS, CLOCK, BROWSER, WINDOW, GEOMETRY})
+PLUGIN_PORTS = frozenset(
+    {HTTP, FS, PROCESS, CLOCK, BROWSER, WINDOW, GEOMETRY, SOCKET, SQLITE_FILE}
+)
 
 
 __all__ = [
@@ -666,6 +777,8 @@ __all__ = [
     "PLUGIN_PORTS",
     "PORTS",
     "PROCESS",
+    "SOCKET",
+    "SQLITE_FILE",
     "STORAGE",
     "WINDOW",
     "BrowserPort",
@@ -680,6 +793,8 @@ __all__ = [
     "PortError",
     "ProcessPort",
     "ProcessResult",
+    "SocketConnection",
+    "SocketPort",
     "StoragePort",
     "WindowInfo",
     "WindowPort",

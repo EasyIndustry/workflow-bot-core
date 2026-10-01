@@ -13,6 +13,7 @@ efectivos y no decorativos.
 from __future__ import annotations
 
 import json
+import socket
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -26,6 +27,8 @@ from backend.adapters.fs_local import LocalFsAdapter
 from backend.adapters.geometry_null import NullGeometryAdapter
 from backend.adapters.http_urllib import UrllibHttpAdapter
 from backend.adapters.process_subprocess import SubprocessAdapter
+from backend.adapters.socket_tcp import TcpSocketAdapter
+from backend.adapters.sqlite_file import ExternalSqliteAdapter
 from backend.adapters.storage_sqlite import IN_MEMORY, SqliteStorageAdapter
 from backend.adapters.window_atspi import AtspiWindowAdapter
 from backend.adapters.window_pywinauto import PywinautoWindowAdapter
@@ -1043,3 +1046,183 @@ def test_geometry_null_no_tiene_ningun_computo_real_detras():
     assert adapter.available is False
     with pytest.raises(PortError, match="geometría"):
         adapter.nearest_on_surface(b"stl-falso", [(0.0, 0.0, 0.0)])
+
+
+# ── Socket TCP (issue #39) ─────────────────────────────────────────────
+
+
+@pytest.fixture
+def eco_tcp():
+    """
+    Un servidor TCP crudo que devuelve cada chunk que recibe, tal cual. Alcanza
+    para probar el adapter sin hablar ningún protocolo de aplicación de verdad.
+    """
+    servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    servidor.bind(("127.0.0.1", 0))
+    servidor.listen(1)
+    host, puerto = servidor.getsockname()
+
+    def _servir():
+        try:
+            conexion, _ = servidor.accept()
+        except OSError:
+            return
+        with conexion:
+            while True:
+                datos = conexion.recv(4096)
+                if not datos:
+                    break
+                conexion.sendall(datos)
+
+    hilo = threading.Thread(target=_servir, daemon=True)
+    hilo.start()
+    yield host, puerto
+    servidor.close()
+
+
+def test_socket_manda_y_recibe(eco_tcp):
+    host, puerto = eco_tcp
+    adapter = TcpSocketAdapter()
+    conn = adapter.connect(host, puerto, timeout=2.0)
+    try:
+        adapter.send(conn, b"hola")
+        assert adapter.recv(conn, 4, timeout=2.0) == b"hola"
+    finally:
+        adapter.close(conn)
+
+
+def test_socket_recv_devuelve_vacio_si_el_otro_lado_cierra():
+    """Fin de stream es un dato, no un `PortError`."""
+    servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    servidor.bind(("127.0.0.1", 0))
+    servidor.listen(1)
+    host, puerto = servidor.getsockname()
+
+    def _cerrar_apenas_conecta():
+        conexion, _ = servidor.accept()
+        conexion.close()
+
+    hilo = threading.Thread(target=_cerrar_apenas_conecta, daemon=True)
+    hilo.start()
+
+    adapter = TcpSocketAdapter()
+    conn = adapter.connect(host, puerto, timeout=2.0)
+    try:
+        hilo.join(timeout=2.0)
+        assert adapter.recv(conn, 4, timeout=2.0) == b""
+    finally:
+        adapter.close(conn)
+        servidor.close()
+
+
+def test_socket_usar_una_conexion_cerrada_es_port_error(eco_tcp):
+    host, puerto = eco_tcp
+    adapter = TcpSocketAdapter()
+    conn = adapter.connect(host, puerto, timeout=2.0)
+    adapter.close(conn)
+
+    with pytest.raises(PortError, match="cerrada o inexistente"):
+        adapter.send(conn, b"ya no hay nadie")
+
+
+def test_socket_no_conectar_es_port_error():
+    with pytest.raises(PortError, match="no se pudo conectar"):
+        # Puerto cerrado: no hay nadie escuchando.
+        TcpSocketAdapter().connect("127.0.0.1", 1, timeout=2.0)
+
+
+def test_socket_sin_host_es_port_error():
+    with pytest.raises(PortError, match="no se indicó un host"):
+        TcpSocketAdapter().connect("", 1234)
+
+
+def test_socket_usar_un_handle_desconocido_es_port_error():
+    adapter = TcpSocketAdapter()
+    from backend.core.ports import SocketConnection
+
+    with pytest.raises(PortError, match="cerrada o inexistente"):
+        adapter.send(SocketConnection(handle="no-existe"), b"x")
+
+
+def test_socket_cerrar_dos_veces_no_falla(eco_tcp):
+    host, puerto = eco_tcp
+    adapter = TcpSocketAdapter()
+    conn = adapter.connect(host, puerto, timeout=2.0)
+    adapter.close(conn)
+    adapter.close(conn)
+
+
+def test_socket_close_sin_argumento_cierra_todo(eco_tcp):
+    """
+    `Instance.close()` llama `adapter.close()` sin argumentos al apagar la
+    instancia entera, sin saber cuál adapter es cuál -- tiene que funcionar
+    aunque el port exija `conn` para el uso normal de un plugin.
+    """
+    host, puerto = eco_tcp
+    adapter = TcpSocketAdapter()
+    conn1 = adapter.connect(host, puerto, timeout=2.0)
+    conn2 = adapter.connect(host, puerto, timeout=2.0)
+
+    adapter.close()
+
+    with pytest.raises(PortError, match="cerrada o inexistente"):
+        adapter.send(conn1, b"x")
+    with pytest.raises(PortError, match="cerrada o inexistente"):
+        adapter.send(conn2, b"x")
+
+
+# ── Archivo SQLite externo (issue #40) ──────────────────────────────────
+
+
+@pytest.fixture
+def base_externa(tmp_path):
+    """Un `.sqlite` de verdad, ajeno al `bot.db` del núcleo, con una fila."""
+    import sqlite3 as _sqlite3
+
+    path = str(tmp_path / "externa.sqlite")
+    conexion = _sqlite3.connect(path)
+    conexion.execute("CREATE TABLE personas (id INTEGER PRIMARY KEY, nombre TEXT)")
+    conexion.execute("INSERT INTO personas (nombre) VALUES ('Ada')")
+    conexion.commit()
+    conexion.close()
+    return path
+
+
+def test_sqlite_file_query_devuelve_dicts(base_externa):
+    adapter = ExternalSqliteAdapter()
+    filas = adapter.query(base_externa, "SELECT * FROM personas")
+    assert filas == [{"id": 1, "nombre": "Ada"}]
+
+
+def test_sqlite_file_one(base_externa):
+    adapter = ExternalSqliteAdapter()
+    fila = adapter.one(base_externa, "SELECT nombre FROM personas WHERE id = ?", (1,))
+    assert fila == {"nombre": "Ada"}
+    assert adapter.one(base_externa, "SELECT nombre FROM personas WHERE id = ?", (99,)) is None
+
+
+def test_sqlite_file_columns(base_externa):
+    adapter = ExternalSqliteAdapter()
+    assert adapter.columns(base_externa, "personas") == ["id", "nombre"]
+
+
+def test_sqlite_file_es_de_solo_lectura_de_verdad(base_externa):
+    """
+    No es una convención que un SQL de escritura pudiera esquivar: el modo
+    `ro` de la URI de `sqlite3` lo hace fallar al nivel del propio motor.
+    """
+    adapter = ExternalSqliteAdapter()
+    with pytest.raises(PortError, match="consulta fallida"):
+        adapter.query(base_externa, "INSERT INTO personas (nombre) VALUES ('Grace')")
+
+
+def test_sqlite_file_inexistente_es_port_error(tmp_path):
+    adapter = ExternalSqliteAdapter()
+    with pytest.raises(PortError, match="no se pudo abrir"):
+        adapter.query(str(tmp_path / "no-existe.sqlite"), "SELECT 1")
+
+
+def test_sqlite_file_columns_rechaza_un_nombre_que_no_es_identificador(base_externa):
+    adapter = ExternalSqliteAdapter()
+    with pytest.raises(PortError, match="nombre de tabla inválido"):
+        adapter.columns(base_externa, "personas; DROP TABLE personas")

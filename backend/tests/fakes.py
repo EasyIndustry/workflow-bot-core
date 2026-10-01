@@ -20,6 +20,7 @@ from backend.core.ports import (
     NearestOnSurfaceResult,
     PortError,
     ProcessResult,
+    SocketConnection,
     WindowInfo,
 )
 
@@ -386,6 +387,85 @@ class FakeGeometry:
         )
 
 
+class FakeSocket:
+    """
+    Adapter de socket guionado (issue #39): nunca abre un socket de verdad.
+
+    `respuestas` mapea `(host, port)` a la lista de bytes que `recv` va
+    devolviendo en orden para esa conexión. Conectar a un destino no guionado
+    levanta `PortError` -- un test que no dijo qué esperaba de la red tiene un
+    agujero.
+    """
+
+    def __init__(self, respuestas: dict[tuple[str, int], list[bytes]] | None = None) -> None:
+        self.respuestas = {clave: list(v) for clave, v in (respuestas or {}).items()}
+        self.calls: list[dict] = []
+        self._contador = 0
+        self._abiertas: dict[str, tuple[str, int]] = {}
+
+    def connect(self, host, port, *, tls=False, timeout=None):
+        self.calls.append({"op": "connect", "host": host, "port": port, "tls": tls})
+        clave = (host, port)
+        if clave not in self.respuestas:
+            raise PortError(f"FakeSocket: nadie guionó {host}:{port}")
+        self._contador += 1
+        handle = str(self._contador)
+        self._abiertas[handle] = clave
+        return SocketConnection(handle=handle)
+
+    def _clave(self, conn: SocketConnection) -> tuple[str, int]:
+        clave = self._abiertas.get(conn.handle)
+        if clave is None:
+            raise PortError("FakeSocket: conexión cerrada o inexistente")
+        return clave
+
+    def send(self, conn: SocketConnection, data: bytes) -> None:
+        self._clave(conn)
+        self.calls.append({"op": "send", "handle": conn.handle, "data": data})
+
+    def recv(self, conn: SocketConnection, size: int, *, timeout=None) -> bytes:
+        clave = self._clave(conn)
+        self.calls.append({"op": "recv", "handle": conn.handle, "size": size})
+        cola = self.respuestas.get(clave, [])
+        return cola.pop(0) if cola else b""
+
+    def close(self, conn: SocketConnection | None = None) -> None:
+        if conn is None:
+            self._abiertas.clear()
+            return
+        self._abiertas.pop(conn.handle, None)
+
+
+class FakeSqliteFile:
+    """
+    Adapter de archivo SQLite externo guionado (issue #40): nunca abre un
+    archivo de verdad.
+
+    `filas` mapea `path` a la lista de dicts que devuelve `query` para
+    cualquier SQL sobre ese path -- no interpreta el SQL, como el resto de los
+    fakes de almacenamiento. Un `path` no guionado levanta `PortError`.
+    """
+
+    def __init__(self, filas: dict[str, list[dict]] | None = None) -> None:
+        self.filas = {clave: list(v) for clave, v in (filas or {}).items()}
+        self.calls: list[dict] = []
+
+    def query(self, path: str, sql: str, params=()) -> list[dict]:
+        self.calls.append({"op": "query", "path": path, "sql": sql, "params": tuple(params)})
+        if path not in self.filas:
+            raise PortError(f"FakeSqliteFile: nadie guionó {path!r}")
+        return list(self.filas[path])
+
+    def one(self, path: str, sql: str, params=()) -> dict | None:
+        filas = self.query(path, sql, params)
+        return filas[0] if filas else None
+
+    def columns(self, path: str, table: str) -> list[str]:
+        self.calls.append({"op": "columns", "path": path, "table": table})
+        filas = self.filas.get(path, [])
+        return list(filas[0].keys()) if filas else []
+
+
 class FakeWindow:
     """
     Ventana de escritorio guionada: nunca toca una de verdad.
@@ -465,6 +545,8 @@ def fake_adapters(**overrides) -> dict:
         "browser": FakeBrowser(),
         "window": FakeWindow(),
         "geometry": FakeGeometry(),
+        "socket": FakeSocket(),
+        "sqlite_file": FakeSqliteFile(),
     }
     adapters.update(overrides)
     return adapters
@@ -482,6 +564,8 @@ __all__ = [
     "FakeGeometry",
     "FakeHttp",
     "FakeProcess",
+    "FakeSocket",
+    "FakeSqliteFile",
     "FakeWindow",
     "fake_adapters",
 ]

@@ -50,7 +50,9 @@ def test_list_tools_trae_el_catalogo_y_los_nativos(raiz):
     ids = {t["id"] for t in resultado["tools"]}
     assert ids == {"core.log", "core.set_status", "core.wait"}
     assert {n["id"] for n in resultado["nativos"]} == {"flow.ejecutar", "flow.retry_gate"}
-    assert set(resultado["ports_disponibles"]) == {"http", "fs", "process", "clock", "browser", "window", "geometry"}
+    assert set(resultado["ports_disponibles"]) == {
+        "http", "fs", "process", "clock", "browser", "window", "geometry", "socket", "sqlite_file",
+    }
 
 
 def test_list_tools_incluye_un_plugin_local(raiz):
