@@ -208,6 +208,36 @@ def test_list_runs_filtra_por_caso_y_por_fallidos(raiz):
     assert ops.list_runs(only_failed=True, root=raiz)["runs"] == []
 
 
+def test_list_runs_filtra_por_status_actor_y_flujo_y_pagina(raiz):
+    _alta(raiz)
+    primero = ops.run_flow(str(FLOWS / "lineal.mmd"), root=raiz, row={"id": "1"})
+    segundo = ops.run_flow(str(FLOWS / "lineal.mmd"), root=raiz, row={"id": "2"})
+    flujo = ops.list_runs(root=raiz)["runs"][0]["flow"]
+
+    assert len(ops.list_runs(status="ok", actor="agente-mcp", flow=flujo, root=raiz)["runs"]) == 2
+    assert ops.list_runs(status="err", root=raiz)["runs"] == []
+    assert ops.list_runs(actor="otro", root=raiz)["runs"] == []
+    assert ops.list_runs(flow="no-existe", root=raiz)["runs"] == []
+
+    # Del más nuevo al más viejo, de a uno.
+    pagina_1 = ops.list_runs(limit=1, root=raiz)["runs"]
+    pagina_2 = ops.list_runs(limit=1, offset=1, root=raiz)["runs"]
+    assert [r["run_id"] for r in pagina_1 + pagina_2] == [segundo["run_id"], primero["run_id"]]
+    assert ops.list_runs(limit=1, offset=2, root=raiz)["runs"] == []
+
+
+def test_get_run_se_puede_leer_por_partes(raiz):
+    _alta(raiz)
+    ejecutado = ops.run_flow(str(FLOWS / "lineal.mmd"), root=raiz, row={"id": "0044"})
+    entera = ops.get_run(ejecutado["run_id"], root=raiz)["trace"]
+    assert len(entera) > 1
+
+    parte = ops.get_run(ejecutado["run_id"], offset=1, limit=1, root=raiz)
+
+    assert parte["trace_total"] == len(entera)
+    assert [n["node_id"] for n in parte["trace"]] == [entera[1]["node_id"]]
+
+
 def test_get_case_log_cruza_todos_los_runs_de_una_fila(raiz):
     _alta(raiz)
     ops.run_flow(str(FLOWS / "lineal.mmd"), root=raiz, row={"id": "0044"})

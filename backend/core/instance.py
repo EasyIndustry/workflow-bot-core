@@ -809,13 +809,22 @@ class Instance:
         except (StoreError, OSError):
             pass
 
-    def list_waiting(self, *, limit: int = 50, case_id: str | None = None) -> list[dict]:
+    def list_waiting(
+        self,
+        *,
+        limit: int = 50,
+        case_id: str | None = None,
+        flow: str | None = None,
+        offset: int = 0,
+    ) -> list[dict]:
         """
         Los runs pausados en una decisión manual, cada uno con su `waiting`
         (nodo, ayuda, opciones): lo que hace falta para preguntar y retomar.
         """
         filas = []
-        for r in self.runs.list(status=STATUS_WAITING, limit=limit, case_id=case_id):
+        for r in self.runs.list(
+            status=STATUS_WAITING, limit=limit, case_id=case_id, flow=flow, offset=offset
+        ):
             datos = self.runs.get(r.run_id) or {}
             filas.append({**r.to_dict(), "waiting": datos.get("waiting")})
         return filas
@@ -947,8 +956,13 @@ class Instance:
         actor: str | None = None,
         include_dry: bool = True,
         status: str | None = None,
+        flow: str | None = None,
+        offset: int = 0,
     ) -> list[dict]:
-        """Runs ya ejecutados, resumidos -- "qué corrió y cómo terminó" sin abrir cada traza."""
+        """
+        Runs ya ejecutados, resumidos -- "qué corrió y cómo terminó" sin abrir
+        cada traza. Del más nuevo al más viejo; `offset` pagina.
+        """
         resumenes = self.runs.list(
             case_id=case_id,
             limit=limit,
@@ -957,20 +971,34 @@ class Instance:
             actor=actor,
             include_dry=include_dry,
             status=status,
+            flow=flow,
+            offset=offset,
         )
         return [r.to_dict() for r in resumenes]
 
-    def run_detail(self, run_id: str) -> dict | None:
+    def run_detail(
+        self, run_id: str, *, trace_offset: int = 0, trace_limit: int | None = None
+    ) -> dict | None:
         """
         Un run con su log pegado de vuelta.
 
         El blob de `runs` guarda el trace y no el log —el log vive en su propia
         tabla, una fila por línea— así que se junta al leer.
+
+        `trace_offset`/`trace_limit` recortan la traza, para quien la lee por
+        partes (un run con cien reintentos tiene cien nodos); `trace_total`
+        dice cuántos hay en total. Sin ellos, la traza entera, como siempre.
         """
         datos = self.runs.get(run_id)
         if datos is None:
             return None
         datos["logs"] = [linea.to_dict() for linea in self.logs.for_run(run_id)]
+        if trace_offset or trace_limit is not None:
+            traza = datos.get("trace") or []
+            desde = max(0, int(trace_offset))
+            hasta = None if trace_limit is None else desde + max(0, int(trace_limit))
+            datos["trace_total"] = len(traza)
+            datos["trace"] = traza[desde:hasta]
         return datos
 
     def case_log(self, case_id: str, limit: int = 500) -> dict:

@@ -347,7 +347,18 @@ TOOLS: list[types.Tool] = [
             "case_id": {"type": "string", "description": "Filtra por caso."},
             "source": {"type": "string", "description": "Filtra por origen del run."},
             "only_failed": {"type": "boolean"},
+            "status": {
+                "type": "string",
+                "enum": ["ok", "err", "waiting"],
+                "description": "Filtra por status. Con 'waiting', igual que list_waiting_runs.",
+            },
+            "actor": {"type": "string", "description": "Filtra por quién lo ejecutó."},
+            "flow": {"type": "string", "description": "Filtra por nombre de flujo."},
             "limit": {"type": "integer"},
+            "offset": {
+                "type": "integer",
+                "description": "Saltea los N más nuevos: para pedir la página siguiente.",
+            },
             "root": _ROOT,
         },
     ),
@@ -388,9 +399,16 @@ TOOLS: list[types.Tool] = [
     ),
     _tool(
         "get_run",
-        "La traza completa de un run ya ejecutado: cada nodo, sus params "
-        "resueltos y su resultado. Los secretos salen tapados con ***.",
-        {"run_id": {"type": "string"}, "root": _ROOT},
+        "La traza de un run ya ejecutado: cada nodo, sus params resueltos y "
+        "su resultado. Los secretos salen tapados con ***. Un run largo se "
+        "puede leer por partes con offset/limit; trace_total dice cuántos "
+        "nodos tiene.",
+        {
+            "run_id": {"type": "string"},
+            "offset": {"type": "integer", "description": "Saltea los primeros N nodos."},
+            "limit": {"type": "integer", "description": "Como mucho N nodos. Sin esto, todos."},
+            "root": _ROOT,
+        },
         ["run_id"],
     ),
     _tool(

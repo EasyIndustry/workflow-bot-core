@@ -411,20 +411,31 @@ pip install mcp
 python -m backend.mcp      # habla por stdio
 ```
 
-Expone el motor a un agente para **escribir** flujos y plugins. No es una
-interfaz de operación: no ejecuta flujos de verdad.
+Expone el motor a un agente para **escribir** flujos y plugins, y para
+**leer** qué corrió y por qué falló. Ejecutar de verdad (`run_flow`,
+`resume_run`) pide `root` explícito y un actor con permisos; leer corridas no
+pide actor.
 
 | Tool | Qué hace |
 |---|---|
+| `describe_installation` | la foto de la instalación en una llamada: el primer paso si no se la conoce |
 | `list_tools` | el catálogo, con params tipados y outputs |
 | `list_plugins` | plugins cargados, sus settings, colecciones y ports |
 | `list_resource_items` | items guardados de una colección ("sources"), secrets tapados |
+| `write_resource_item` / `delete_resource_item` | ABM de un item; un `secret` nunca vuelve en claro |
+| `describe_extra_params` | los params extra que ofrece un tool según lo que el nodo ya eligió |
 | `list_ports` | qué puede declarar un plugin, y qué le da cada port |
 | `check_flow` | valida un `.mmd`: severidad, línea y nodo |
 | `dry_run_flow` | recorre entero con un row, sin ejecutar un solo tool |
+| `list_flows` / `get_flow` | flujos guardados; uno con su contenido y diagnósticos |
+| `save_flow` | guarda un `.mmd` en la instalación, sin ejecutarlo |
 | `load_plugin` | ¿el núcleo acepta este plugin? sin ejecutarlo |
+| `install_plugin` | copia a `plugins_dir` un plugin que `load_plugin` ya aceptó |
 | `run_action` | ejecuta una `Action` declarada por un plugin. `item=` resuelve params desde un item guardado |
 | `run_flow` | ejecución real. `root` obligatorio, y el actor limita qué puede |
+| `list_runs` | runs ya ejecutados, resumidos. Filtra por caso, status, actor, flujo y origen; `offset` pagina |
+| `get_run` | la traza de un run, nodo por nodo, con los secretos tapados. `offset`/`limit` la recortan |
+| `get_case_log` | el registro de una fila, cruzando todos sus runs |
 | `list_waiting_runs` | runs pausados en una decisión manual, con sus opciones (issue #37) |
 | `resume_run` | retoma uno por la rama elegida. Mismas guardas que `run_flow` |
 | `list_users` | qué puede cada actor, para entender una denegación |

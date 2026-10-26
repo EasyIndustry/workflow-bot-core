@@ -376,6 +376,8 @@ class RunStore:
         actor: str | None = None,
         include_dry: bool = True,
         status: str | None = None,
+        flow: str | None = None,
+        offset: int = 0,
     ) -> list[RunSummary]:
         sql = "SELECT * FROM runs WHERE org = ?"
         params: list[Any] = [self.org]
@@ -395,13 +397,18 @@ class RunStore:
         if source is not None:
             sql += " AND source = ?"
             params.append(source)
+        if flow is not None:
+            sql += " AND flow = ?"
+            params.append(flow)
         if only_failed:
             # Sólo `err`: un run en espera no falló (issue #37).
             sql += " AND status = 'err'"
         if not include_dry:
             sql += " AND dry_run = 0"
-        sql += " ORDER BY started_at DESC LIMIT ?"
-        params.append(int(limit))
+        # `run_id` desempata: dos runs en el mismo instante no pueden cambiar
+        # de página entre una consulta y la siguiente.
+        sql += " ORDER BY started_at DESC, run_id DESC LIMIT ? OFFSET ?"
+        params += [int(limit), max(0, int(offset))]
         return [_summary(f) for f in self.db.query(sql, params)]
 
     def last_for_case(self, case_id: str, include_dry: bool = False) -> dict | None:

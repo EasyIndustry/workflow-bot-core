@@ -170,7 +170,9 @@ def cmd_runs(inst: Instance, args) -> int:
     try:
         if args.status == "waiting":
             # Con el `waiting` de cada uno: lo que hace falta para retomarlo.
-            runs = inst.list_waiting(limit=args.limit, case_id=args.case)
+            runs = inst.list_waiting(
+                limit=args.limit, case_id=args.case, flow=args.flow, offset=args.offset
+            )
         else:
             runs = inst.list_runs(
                 case_id=args.case,
@@ -178,6 +180,9 @@ def cmd_runs(inst: Instance, args) -> int:
                 only_failed=args.only_failed,
                 limit=args.limit,
                 status=args.status,
+                actor=args.actor,
+                flow=args.flow,
+                offset=args.offset,
             )
     except StoreError as exc:
         print(str(exc), file=sys.stderr)
@@ -648,7 +653,7 @@ def cmd_boot(inst: Instance, args) -> int:
 
 
 def cmd_trace(inst: Instance, args) -> int:
-    detalle = inst.run_detail(args.run_id)
+    detalle = inst.run_detail(args.run_id, trace_offset=args.offset, trace_limit=args.limit)
     if detalle is None:
         print(f"No existe el run {args.run_id}", file=sys.stderr)
         return 2
@@ -818,7 +823,10 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("ok", "err", "waiting"),
         help="Filtra por status. `waiting` incluye las opciones de cada decisión pendiente.",
     )
+    p.add_argument("--actor", help="Filtra por quién lo ejecutó.")
+    p.add_argument("--flow", help="Filtra por nombre de flujo.")
     p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--offset", type=int, default=0, help="Saltea los N más nuevos (paginar).")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_runs)
 
@@ -963,6 +971,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("trace", help="La traza de un run ya ejecutado.")
     p.add_argument("run_id")
+    p.add_argument("--offset", type=int, default=0, help="Saltea los primeros N nodos.")
+    p.add_argument("--limit", type=int, help="Como mucho N nodos (default: todos).")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_trace)
 
