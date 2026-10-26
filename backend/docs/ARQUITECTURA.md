@@ -169,6 +169,11 @@ limpiar sin reescribir ni parsear nada.
   `null`: la clave directamente no existe en la respuesta).
 - No hay edición de un secreto, solo reemplazo.
 - Cifrados en reposo; la llave vive fuera de la base de datos.
+- **Nunca quedan en una traza ni en un log.** La traza guarda los params ya
+  resueltos, así que antes de guardar o devolver un run el núcleo reemplaza
+  por `***` todo valor declarado secreto (variable `secret` de `env`,
+  `Setting`/`Field` con `secret=True`), donde aparezca: params, mensajes,
+  outputs, tracebacks y log. Ver `backend/core/redact.py`.
 
 ---
 

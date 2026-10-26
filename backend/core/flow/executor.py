@@ -92,7 +92,8 @@ class NodeTrace:
 
     params guarda los valores **ya resueltos**, que es lo que hace falta para
     entender un fallo: no sirve saber que el nodo pedía {filesFolder} sino a qué
-    ruta se resolvió esa vez.
+    ruta se resolvió esa vez. Salvo un secreto: `Instance` lo tapa con `***`
+    antes de guardar o devolver el run (ver `core/redact.py`).
     """
 
     node_id: str

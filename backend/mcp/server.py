@@ -389,7 +389,7 @@ TOOLS: list[types.Tool] = [
     _tool(
         "get_run",
         "La traza completa de un run ya ejecutado: cada nodo, sus params "
-        "resueltos y su resultado.",
+        "resueltos y su resultado. Los secretos salen tapados con ***.",
         {"run_id": {"type": "string"}, "root": _ROOT},
         ["run_id"],
     ),

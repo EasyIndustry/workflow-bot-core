@@ -438,7 +438,10 @@ def resume_run(
 
 
 def get_run(run_id: str, root: str | None = None) -> dict:
-    """La traza completa de un run ya ejecutado, nodo por nodo, con sus params resueltos."""
+    """
+    La traza completa de un run ya ejecutado, nodo por nodo, con sus params
+    resueltos -- los secretos, tapados con `***`.
+    """
     return _cli("trace", run_id, "--json", root=root)
 
 
