@@ -74,7 +74,7 @@ def test_sin_secretos_no_cambia_nada():
 FLUJO = """\
 flowchart TD
     SN1(inicio)
-    N1["Llamar § s.llamar | auth=Bearer {env.API_TOKEN} | base={env.BASE_URL}"]
+    N1["Llamar § s.llamar | auth=Bearer {env.API_TOKEN}| base={env.BASE_URL}"]
     SN1 --> N1
 """
 
@@ -155,7 +155,7 @@ def test_la_traza_guardada_no_tiene_los_secretos(instance):
 
     assert resultado.status == "ok", resultado.message
     # El tool recibió los valores reales: tapar es para lo que se guarda.
-    assert recibido["auth"].strip() == f"Bearer {TOKEN}"
+    assert recibido["auth"] == f"Bearer {TOKEN}"
     assert recibido["clave"] == CLAVE
     assert recibido["deposito"] == DEPOSITO
 
@@ -164,7 +164,7 @@ def test_la_traza_guardada_no_tiene_los_secretos(instance):
         assert secreto not in salida
 
     nodo = instance.run_detail(resultado.run_id)["trace"][-1]
-    assert nodo["params"]["auth"].strip() == "Bearer ***"
+    assert nodo["params"]["auth"] == "Bearer ***"
     assert nodo["params"]["clave"] == TAPADO
     assert nodo["outputs"]["deposito"] == TAPADO
     assert nodo["message"] == "usé ***"
