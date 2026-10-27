@@ -519,10 +519,6 @@ eso es para lo que existe el `ClockPort`.
 - **El `StoragePort` abstrae la conexión, no el dialecto.** El SQL sigue escrito
   en los stores del núcleo, así que portar a Postgres exige revisar las
   sentencias (`ON CONFLICT`, `AUTOINCREMENT`), no sólo escribir otro adapter.
-- **Los campos `secret` de un `Resource` no se cifran en reposo.** Se declaran y
-  el catálogo los marca, y las referencias `{env.CLAVE}` sí se resuelven en el
-  servidor al ejecutar; pero el cifrado a nivel item todavía no está. Sólo la
-  tabla `env` cifra.
 - **No hay panel de plugin (nivel 3 de UI).** Están el esquema y las acciones;
   el iframe con puente acotado queda para cuando el esquema no alcance.
 - **Los permisos de port son por plugin, no por tool.** Denegar de más es la
