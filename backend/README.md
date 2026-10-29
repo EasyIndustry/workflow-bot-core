@@ -3,7 +3,7 @@
 Motor de workflows con trazas, sin interfaz. Se escribe un flujo en Mermaid, el
 núcleo lo parsea, lo ejecuta y deja registro de qué pasó en cada nodo.
 
-Para personas no técnicas: [docs/descripcion/que-es-bot-core.md](docs/descripcion/que-es-bot-core.md)
+Qué es y cómo se usa, sin detalle técnico: [docs/descripcion/que-es-bot-core.md](docs/descripcion/que-es-bot-core.md)
 (también en `.docx`, con los diagramas como imágenes; se regenera con
 `python backend/docs/descripcion/generar.py`).
 

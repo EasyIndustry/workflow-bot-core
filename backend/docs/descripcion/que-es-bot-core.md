@@ -1,8 +1,7 @@
 # bot-core: qué es y cómo se usa
 
-Descripción para personas no técnicas. Explica qué hace esta pieza de
-software, cómo se usa y qué controles trae, sin entrar en detalles de
-programación. El detalle técnico está en `backend/README.md` y
+Qué hace esta pieza de software, cómo se usa y qué controles trae, sin
+entrar en detalles de programación. El detalle técnico está en `backend/README.md` y
 `backend/docs/ARQUITECTURA.md`.
 
 Este documento describe el software en sí, no un uso en particular. bot-core
