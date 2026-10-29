@@ -28,6 +28,7 @@ from .contract import (
     CONTRACT_VERSION,
     STATUS_ERR,
     STATUS_OK,
+    STATUS_WAITING,
     Action,
     ActionHandler,
     Field,
@@ -49,12 +50,15 @@ from .contract import (
     ToolResult,
 )
 from .ports import (
+    BROWSER,
     CLOCK,
     FS,
     HTTP,
     PLUGIN_PORTS,
     PROCESS,
     STORAGE,
+    WINDOW,
+    BrowserPort,
     ClockPort,
     FileInfo,
     FsPort,
@@ -64,11 +68,14 @@ from .ports import (
     ProcessPort,
     ProcessResult,
     StoragePort,
+    WindowInfo,
+    WindowPort,
 )
 from .registry import ToolRegistry, build_default_registry
 from .resources import ResourceError, TableStore, store_for
 
 __all__ = [
+    "BROWSER",
     "CLOCK",
     "CONTRACT_VERSION",
     "FS",
@@ -77,9 +84,12 @@ __all__ = [
     "PROCESS",
     "STATUS_ERR",
     "STATUS_OK",
+    "STATUS_WAITING",
     "STORAGE",
+    "WINDOW",
     "Action",
     "ActionHandler",
+    "BrowserPort",
     "ClockPort",
     "Field",
     "FileInfo",
@@ -109,6 +119,8 @@ __all__ = [
     "ToolManifest",
     "ToolRegistry",
     "ToolResult",
+    "WindowInfo",
+    "WindowPort",
     "build_default_registry",
     "store_for",
 ]

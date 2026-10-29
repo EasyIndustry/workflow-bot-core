@@ -3,6 +3,10 @@
 Motor de workflows con trazas, sin interfaz. Se escribe un flujo en Mermaid, el
 núcleo lo parsea, lo ejecuta y deja registro de qué pasó en cada nodo.
 
+Qué es y cómo se usa, sin detalle técnico: [docs/descripcion/que-es-bot-core.md](docs/descripcion/que-es-bot-core.md)
+(también en `.docx`, con los diagramas como imágenes; se regenera con
+`python backend/docs/descripcion/generar.py`).
+
 ```bash
 python -m backend.core doctor                       # ¿levanta todo?
 python -m backend.core tools                        # catálogo de tools
@@ -11,8 +15,11 @@ python -m backend.core workflows                    # flujos guardados
 python -m backend.core add flujo.mmd                # guarda un .mmd en la instalación
 python -m backend.core check flujo.mmd              # validar sin ejecutar
 python -m backend.core run flujo.mmd --row '{"id":"42"}'
-python -m backend.core run flujo.mmd --dry-run      # recorrer sin tocar el mundo
+python -m backend.core run flujo.mmd --dry-run      # recorrer sin tocar el mundo (salvo lo que declare dry_run="run", issue #34)
 python -m backend.core trace <run_id>               # la traza de una corrida
+python -m backend.core runs --status waiting        # runs esperando una decisión manual (issue #37)
+python -m backend.core resume <run_id> <valor>      # retomar por la rama elegida
+python -m backend.core discard <run_id>             # cerrar la espera sin seguir
 ```
 
 ## Las cuatro capas
@@ -38,7 +45,7 @@ mundo.**
 escritorio, un formato de archivo— se escribe como plugin y se instala por
 entry point.
 
-Los cuatro ports con adapter incluido:
+Los ports con adapter incluido:
 
 | Port | Adapter | Librería |
 |---|---|---|
@@ -46,13 +53,75 @@ Los cuatro ports con adapter incluido:
 | `fs` | `LocalFsAdapter` | `os` + `shutil` |
 | `process` | `SubprocessAdapter` | `subprocess` |
 | `clock` | `SystemClockAdapter` | `time` |
+| `browser` | `PlaywrightBrowserAdapter` | `playwright` |
+| `window` | según el sistema operativo | `pywinauto` (Windows) / AT-SPI (Linux) |
 | `storage` | `SqliteStorageAdapter` | `sqlite3` |
 | `crypto` | `FernetCryptoAdapter` | `cryptography` |
+| `geometry` | `NullGeometryAdapter` (`available=False`) | — |
+| `socket` | `TcpSocketAdapter` | `socket` + `ssl` |
+| `sqlite_file` | `ExternalSqliteAdapter` | `sqlite3` |
+
+`browser` maneja un navegador real (navegar, clickear, leer lo que la pantalla
+ya muestra) pero **no** sabe de sesiones: perfil persistente y login son
+responsabilidad del plugin que lo use, nunca del adapter. El adapter por
+defecto no persiste nada entre corridas; una instalación que necesite sesión
+entre corridas inyecta su propio `PlaywrightBrowserAdapter(user_data_dir=...)`
+vía `Instance(root, adapters={...})`.
+
+`window` maneja una ventana nativa de escritorio (encontrarla, clickear,
+tipear, leer un control o su estado tildado/destildado) y se declara una sola
+vez: `build_default_adapters()` enruta al adapter del sistema operativo donde
+corre la instalación — `pywinauto` en Windows, AT-SPI en Linux— así el plugin
+no sabe, ni le importa, cuál de los dos hay detrás. En un sistema sin adapter
+propio, `available` es False y usarlo levanta un error explícito en vez de
+fallar a ciegas.
+
+`click` acepta `button` (`"left"` por defecto): un click distinto del
+principal no siempre tiene un patrón de accesibilidad propio —un menú
+contextual es un evento de mouse, no una acción del control—, así que en
+Windows cae a simular el mouse (con la misma exposición a `SetCursorPos` que
+el click de siempre evita) y en Linux directamente no está disponible, porque
+AT-SPI no tiene noción de qué botón. `read_state` es aparte de `read_text`
+porque en UI Automation son cosas distintas: el estado de un checkbox vive en
+`TogglePattern`, no en su nombre accesible.
 
 `storage` y `crypto` son del núcleo: un plugin no los puede pedir. Uno con
 acceso al almacenamiento elegiría dónde persisten sus datos —exactamente lo que
 `Resource` existe para impedir— y uno con acceso al cifrado podría leer secretos
 que no le corresponden.
+
+`geometry` (issue #19) es "vacío" a propósito: el núcleo declara la forma
+(`nearest_on_surface`, punto más cercano en una superficie) pero nunca
+bundlea un adapter real detrás —ningún `trimesh` ni ninguna otra librería
+"curada" de geometría—. `build_default_adapters()` bindea siempre
+`NullGeometryAdapter`, con `available=False`, para que un plugin que pida
+este port pueda cargar igual (un port sin ningún adapter atado no carga) y
+falle explícito recién si un tool intenta usarlo de verdad. Una instalación
+que necesite cómputo geométrico escribe o instala su propio adapter y lo
+inyecta con `Instance(root, adapters={**build_default_adapters(), "geometry": ...})`.
+
+`socket` (issue #39) es TCP crudo con TLS opcional —`connect`, `send`, `recv`,
+`close`— y nada de protocolo de aplicación encima. Nace de un pedido de port
+para leer bases SQL externas (Postgres, MySQL) sin que un plugin importe el
+driver directo; un port que hablara SQL no cerraba porque, a diferencia de
+`http`, SQL no es un protocolo único —cada motor tiene su propio driver
+nativo—. Bajar un nivel sí cierra: TCP es un protocolo fijo igual que HTTP, así
+que el adapter se escribe una sola vez con `socket`/`ssl` de la stdlib, sin
+ninguna librería curada ni driver bundleado. Un plugin que quiera hablarle a
+Postgres (o a cualquier otro protocolo binario) implementa ese protocolo en
+Python puro sobre `send`/`recv`, igual que `UrllibHttpAdapter` implementa HTTP
+sin ninguna librería externa. `recv` devuelve hasta `size` bytes, nunca
+garantiza esa cantidad exacta —mismo comportamiento que `socket.recv`—: armar
+mensajes completos a partir del stream es trabajo del plugin, no del port.
+
+`sqlite_file` (issue #40) es sólo lectura contra **cualquier** archivo
+`.sqlite`/`.db` externo que el flujo indique por `path` —nada que ver con
+`storage`, que es sólo el `bot.db` del propio núcleo—. Nace de separar del
+`socket` de arriba el caso que no necesitaba nada de eso: SQLite es un archivo
+local, sin red ni protocolo de cable, así que se abre directo con `sqlite3` de
+la stdlib —cero dependencia nueva—, en modo `ro` de verdad (no una convención
+que un `INSERT` pudiera esquivar). Mismo límite honesto que `storage`: abstrae
+la *conexión*, no el *dialecto*.
 
 ## Escribir un plugin
 
@@ -86,7 +155,15 @@ mi_plugin = "mi_paquete:PLUGIN"
 
 Reglas que el núcleo hace cumplir, no sugerencias:
 
-- Un plugin **nunca importa una librería externa**: pide un port.
+- Un plugin **nunca importa una librería que hace I/O** (red, disco,
+  procesos, ventanas, reloj): pide un port. Es lo que el núcleo puede acotar
+  por actor y por `boot.env`, y lo que un test necesita poder fakear.
+- **Cómputo puro** (numpy, un parser, una librería de geometría) no es un
+  port —no hay nada que acotar ni que fakear— y se declara en
+  `PluginManifest.requires`, una línea por librería como en un
+  `requirements.txt`. El plugin la importa adentro del tool, perezosa, con un
+  `ToolResult.err` legible si falta; quién la instala y cómo (versión fija,
+  runtime propio) es decisión de la instalación, no del núcleo (issue #19/#20).
 - Un plugin que pide un port sin adapter **no carga**, y queda reportado.
 - Un tool que usa un port que su manifest no declara **falla**.
 - Toda salida es un `ToolResult`. Una excepción se convierte en `err` con su
@@ -95,6 +172,19 @@ Reglas que el núcleo hace cumplir, no sugerencias:
   `ctx.resource(...)`.
 - Un plugin **no escribe HTML**: declara `Setting`, `Resource.fields` y
   `Action`, y quien construya la UI los renderiza desde `registry.catalog()`.
+
+Un tool que **sólo lee** puede declarar `ToolManifest(dry_run="run")` (issue
+#34): en un dry run corre de verdad, en vez del default `"skip"` (se asume
+`STATUS_OK` sin ejecutar nada). Es lo único que le da a una decisión
+posterior algo real con qué decidir —"leer un archivo y ramificar según lo
+que dice" no tiene forma de resolverse sin correr ese tool— y el núcleo lo
+hace cumplir, no confía en la declaración: `ctx.port("fs")`/`ctx.port("http")`
+llegan en un modo de sólo lectura (consulta pasa, escritura levanta
+`PortError`), así que un tool que declara `run` y escribe igual falla en
+seco en vez de escribir. Un tool que pide `process`/`window`/`browser` no
+tiene ningún modo de sólo lectura posible: `registry` lo reporta al cargar
+si declara `run` de todos modos, y el executor lo trata como `"skip"` pase
+lo que pase con ese diagnóstico.
 
 ## Para quien construya la interfaz
 
@@ -110,9 +200,98 @@ plugin: settings, colecciones con su esquema, acciones y qué ports usa. No hay
 que mantener ninguna lista propia — ese fue el error de la versión anterior, con
 el catálogo escrito a mano en tres archivos distintos.
 
+Un `Param` puede declarar `options_from`: el nombre de un `Resource` del
+mismo plugin cuyos items son sus valores típicos (`Param("connection",
+options_from="connections")`, para un tool que opera sobre una conexión
+guardada). Es sólo un hint para quien dibuje el campo —un buscador contra
+`GET /resources/{plugin}/{resource}` en vez de un texto pelado—, no una
+restricción: a diferencia de `choices`, no se valida contra él al resolver
+params, porque un `{variable}` tiene que poder seguir resolviendo a cualquier
+valor. Un `options_from` que no nombra un `Resource` que el plugin declara
+se reporta al cargar, igual que un alias en conflicto: no impide que el tool
+ande, pero un typo no debería verse recién como un buscador vacío.
+
+`options_from` también acepta el namespace `core:` (issue #32), para un param
+que nombra algo del lado del núcleo en vez de una colección del propio
+plugin —el caso de `bots.migrar`/`bots.comparar`, cuyos params `plugin` y
+`coleccion` nombran una colección de *otro* plugin y no tienen `Resource`
+propio al que apuntar—: `options_from="core:plugins"` para los plugins
+instalados, o `options_from="core:resources:{plugin}"` para las colecciones
+del plugin que valga el param `plugin` en ese momento. El placeholder es
+siempre uno solo, nombrando un solo param de la misma declaración, sin
+expresiones ni anidado; `registry` valida esa sintaxis y ese nombre al
+cargar, con el mismo criterio que el resto de `options_from` — pero no ve los
+params que un tool agrega en runtime vía `describe_extra_params`, que nunca
+pasan por acá.
+
+Un `Param` también puede declarar `placeholder` (issue #29): un ejemplo del
+valor, para dibujar adentro del campo vacío (`Param("ruta", placeholder=
+r"D:\casos\AP962\stl")`). Convive con `doc` —`doc` explica qué es el param,
+`placeholder` muestra cómo se escribe— y, como `options_from`, es puramente
+informativo: no se valida contra él, no reemplaza a `default`, y viaja
+tal cual en el `to_dict()` que ve el catálogo.
+
+Un tool con `extra_params=True` puede además describir esos extras según lo
+que el nodo ya eligió (issue #27): `FunctionTool.describe_extra_params`, un
+callable opcional `(params_del_nodo, leer_item) -> tuple[Param, ...]`.
+`connections.llamar` acepta `{variable}` de más porque son las de la Action
+elegida —`{id_externo}`, `{pais}`—; con esto, elegida la conexión, el tool le
+dice a quien edita el flujo exactamente cuáles son, en vez de que la única
+forma de saberlo sea abrir la pantalla del plugin y copiarlas a mano.
+`leer_item` (mismo shape que `ctx.resource`) sólo ve items con los campos
+`secret` tapados —nunca en claro, ni siquiera acá— y corre mientras se edita
+el flujo, no en un run: una excepción del lado del plugin vuelve vacío, no
+tumba nada. `Instance.describe_extra_params(tool_id, node_params)` es la
+fachada; CLI (`extra-params`) y MCP (`describe_extra_params`) son capas
+delgadas encima.
+
 `Instance` es la fachada: `run()`, `diagnose()`, `run_action()`, `case_log()`,
 `run_detail()`, más los stores. Un servidor HTTP encima de esto es una capa
 delgada, no un segundo motor.
+
+### Decisiones manuales (issue #37)
+
+Una decisión que toma una persona, no un dato:
+
+```
+D1{Revisión del diseño § aprobado | manual | ayuda=Mirá el PDF antes de elegir}
+D1 -->|si| N5
+D1 -->|rehacer| N2
+```
+
+- **En una corrida real siempre pausa**, aunque la variable ya tenga valor.
+  `run()` vuelve con `status="waiting"` y `resultado.waiting` (también en
+  `to_dict()`): `node_id`, `display`, `variable`, `ayuda` y `options`, una por
+  arista con condición (`value` es lo que hay que mandar; en `a,b` alcanza el
+  primero). El hilo queda libre: el run vuelve, y las demás filas siguen.
+- El **checkpoint** queda en la tabla `run_waits`: el texto del flujo, vars,
+  row, visitas, contadores. **Nunca** `env` ni `config`, que se vuelven a leer
+  al retomar. Sobrevive a un reinicio.
+- `Instance.resume(run_id, value, actor=)` sigue por esa rama con el **mismo
+  `run_id`** y el flujo del checkpoint (no el editado mientras esperaba). La
+  traza del nodo guarda `decision_value` y `decided_by`. Un `value` que no es
+  rama, o un run que no espera, es `UserError` sin tocar nada. Termina
+  `ok`/`err`, o `waiting` otra vez en la próxima decisión manual.
+- `Instance.discard_wait(run_id, actor=)` cierra sin seguir: `err`,
+  `error_kind="discarded"`.
+- Mientras un caso espera en un flujo, `run()` de ese caso y flujo levanta
+  `PendingDecision` (con `.run_id`), en vez de arrancar otra corrida encima.
+- `list_waiting()` / `list_runs(status="waiting")` las listan; la retención de
+  logs y `runs.prune` no tocan un run en espera.
+- En **dry run** no pausa: sigue por la rama de la fila, o por la primera con
+  un warning.
+- Dentro de un **subflujo** (`flow.ejecutar`) no está soportado todavía: el run
+  falla con `error_kind="manual_in_subflow"`.
+- `RunResult.failed` es sólo `status == "err"`: un run en espera no falló.
+- La app sabe que el núcleo lo soporta por
+  `catalog()["capabilities"]["manual_decisions"]`, sin comparar versiones.
+- La **ayuda acepta `{variables}`** (issue #38): `waiting.ayuda` sale resuelta
+  con el contexto del run al pausar (fila, salidas, `{NODO.salida...}`), y
+  `waiting.ayuda_plantilla` es la original. Lo que no resuelve queda literal.
+  `{env.X}` **nunca** se resuelve en la ayuda, porque viaja a la UI y queda en
+  `runs.data`. En el `.mmd` las llaves de la ayuda se escriben `#123;`/`#125;`
+  (mermaid.js no acepta llaves sueltas en un rombo); el parser acepta también
+  llaves crudas. Capacidad: `capabilities["manual_decision_help_vars"]`.
 
 ## Quién ejecuta: actores y permisos
 
@@ -142,6 +321,12 @@ conservador, y habilitarlo tiene que ser deliberado. Ampliar permisos es un
 Un flujo vedado falla **antes** de ejecutar nada, y dice qué nodo y qué regla lo
 impidió. El chequeo se repite por nodo dentro del executor, porque un subflujo
 que `flow.ejecutar` resuelve en runtime no se puede inspeccionar de antemano.
+
+Lo mismo si el flujo llama a un tool que no está instalado: `run` frena antes
+de ejecutar, con el mismo criterio (`check_graph` sobre el grafo entero). Sin
+esto, el nodo fallaba, el executor seguía por `|err|` —pensada para fallas de
+*runtime*, no de configuración— y el run terminaba `status: ok` con el trabajo
+real sin hacer. `allow_broken=True` (`--allow-broken` en la CLI) lo saltea.
 
 **La granularidad de ports es por plugin, no por tool.** Los ports se declaran
 en `PluginManifest` y se inyectan a todos los tools de ese plugin, así que
@@ -177,6 +362,15 @@ ignorarlas: `desconocidas()` para una **clave** que no existe, y `validar()`
 para un **valor** que no va a hacer lo que dice —una carpeta que no está, un
 timeout que no es un número—. Las dos las muestran `boot` y `doctor`.
 
+De los valores que `validar()` reporta, un subconjunto es fatal —`fatal()`—:
+un `fs_root`/`plugins_dir` que no resuelve a una carpeta real deja inutilizable
+un límite de seguridad de la instalación, así que `Instance.__init__` lo
+levanta como `BootError` en vez de arrancar a medias y fallar recién adentro de
+un run, con un error que apunta al flujo en lugar de a la configuración. El
+resto —un ejecutable ausente en `process_allowlist`, un `http_timeout`
+inválido— es una degradación: se ignora el valor, se sigue con el default, y
+sólo lo avisa `doctor`.
+
 Dos detalles de los límites, que no son cosméticos:
 
 - `process_allowlist` **ausente** es "cualquier ejecutable"; **presente y
@@ -186,6 +380,26 @@ Dos detalles de los límites, que no son cosméticos:
   instalación, no contra el directorio desde el que se arrancó: `fs_root` es un
   límite de seguridad, y el mismo `boot.env` tiene que dar la misma caja
   siempre.
+
+Cuando una sola raíz no alcanza —un workspace local y un share de red a la
+vez, por ejemplo—, `fs_roots` declara varias con alias
+(`fs_roots = casa=C:\Bot\workspace, origen=\\servidor\share`): la primera es
+la raíz por defecto, y el resto se alcanzan con `alias:resto`
+(`origen:MODELOS/pieza.stl`) o con la ruta absoluta si cae bajo alguna de las
+declaradas. Gana sobre `fs_root` singular si los dos están presentes; cada
+raíz se valida igual que `fs_root` —la regla vale para todas, no sólo la
+primera.
+
+**Una raíz puede contener la instalación entera** (`fs_root=D:\` con la
+instalación en `D:\User\Bot`), y eso no expone `data/`, `plugins/` ni
+`boot.env`: `LocalFsAdapter` los niega siempre, sin importar qué raíz se
+declare ni con qué alias se llegue (issue #26). Antes, la única forma de
+proteger esa carpeta era prohibir toda raíz que la contuviera —`validar()`
+lo trataba como fatal—, así que el acotamiento era todo o nada: o la
+instalación vivía en un rincón aparte, o alguien terminaba vaciando `fs_root`
+—"todo el disco"— para poder trabajar. La lista de negadas la arma
+`_default_adapters` sola, de lo que el núcleo ya sabe de sí mismo: no es una
+clave de `boot.env` que alguien tenga que acordarse de poner.
 
 El archivo se lee respetando el BOM que traiga —UTF-8, UTF-16 o UTF-32—, y una
 codificación que no se pueda adivinar se lee igual en vez de tumbar el arranque.
@@ -201,19 +415,33 @@ pip install mcp
 python -m backend.mcp      # habla por stdio
 ```
 
-Expone el motor a un agente para **escribir** flujos y plugins. No es una
-interfaz de operación: no ejecuta flujos de verdad.
+Expone el motor a un agente para **escribir** flujos y plugins, y para
+**leer** qué corrió y por qué falló. Ejecutar de verdad (`run_flow`,
+`resume_run`) pide `root` explícito y un actor con permisos; leer corridas no
+pide actor.
 
 | Tool | Qué hace |
 |---|---|
+| `describe_installation` | la foto de la instalación en una llamada: el primer paso si no se la conoce |
 | `list_tools` | el catálogo, con params tipados y outputs |
 | `list_plugins` | plugins cargados, sus settings, colecciones y ports |
+| `list_resource_items` | items guardados de una colección ("sources"), secrets tapados |
+| `write_resource_item` / `delete_resource_item` | ABM de un item; un `secret` nunca vuelve en claro |
+| `describe_extra_params` | los params extra que ofrece un tool según lo que el nodo ya eligió |
 | `list_ports` | qué puede declarar un plugin, y qué le da cada port |
 | `check_flow` | valida un `.mmd`: severidad, línea y nodo |
 | `dry_run_flow` | recorre entero con un row, sin ejecutar un solo tool |
+| `list_flows` / `get_flow` | flujos guardados; uno con su contenido y diagnósticos |
+| `save_flow` | guarda un `.mmd` en la instalación, sin ejecutarlo |
 | `load_plugin` | ¿el núcleo acepta este plugin? sin ejecutarlo |
-| `run_action` | ejecuta una `Action` declarada por un plugin |
+| `install_plugin` | copia a `plugins_dir` un plugin que `load_plugin` ya aceptó |
+| `run_action` | ejecuta una `Action` declarada por un plugin. `item=` resuelve params desde un item guardado |
 | `run_flow` | ejecución real. `root` obligatorio, y el actor limita qué puede |
+| `list_runs` | runs ya ejecutados, resumidos. Filtra por caso, status, actor, flujo y origen; `offset` pagina |
+| `get_run` | la traza de un run, nodo por nodo, con los secretos tapados. `offset`/`limit` la recortan |
+| `get_case_log` | el registro de una fila, cruzando todos sus runs |
+| `list_waiting_runs` | runs pausados en una decisión manual, con sus opciones (issue #37) |
+| `resume_run` | retoma uno por la rama elegida. Mismas guardas que `run_flow` |
 | `list_users` | qué puede cada actor, para entender una denegación |
 | `plugin_template` | esqueleto con los ports ya declarados |
 
@@ -295,10 +523,6 @@ eso es para lo que existe el `ClockPort`.
 - **El `StoragePort` abstrae la conexión, no el dialecto.** El SQL sigue escrito
   en los stores del núcleo, así que portar a Postgres exige revisar las
   sentencias (`ON CONFLICT`, `AUTOINCREMENT`), no sólo escribir otro adapter.
-- **Los campos `secret` de un `Resource` no se cifran en reposo.** Se declaran y
-  el catálogo los marca, y las referencias `{env.CLAVE}` sí se resuelven en el
-  servidor al ejecutar; pero el cifrado a nivel item todavía no está. Sólo la
-  tabla `env` cifra.
 - **No hay panel de plugin (nivel 3 de UI).** Están el esquema y las acciones;
   el iframe con puente acotado queda para cuando el esquema no alcance.
 - **Los permisos de port son por plugin, no por tool.** Denegar de más es la

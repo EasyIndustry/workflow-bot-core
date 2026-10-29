@@ -9,9 +9,11 @@ de existir, son del núcleo.
 Se llamaban `webapp.*`, por una UI que ya no existe. El nombre nuevo dice lo que
 son: primitivas del núcleo.
 
-`flow.ejecutar` y `flow.retry_gate` NO están acá: los resuelve el executor,
-porque necesitan estado del run (recursión y contadores) que el contrato
-deliberadamente no le expone a un tool.
+`flow.ejecutar` y `flow.retry_gate` no son tools de este plugin: los resuelve
+el executor, porque necesitan estado del run (recursión y contadores) que el
+contrato deliberadamente no le expone a un tool. Sí se **declaran** acá
+(`NATIVE_MANIFESTS`, con `native=True`) para que el catálogo diga todo lo que se
+puede escribir en un `.mmd`; declararlos no los vuelve invocables.
 
 El núcleo se registra como un plugin más —mismo manifest, mismo contrato, mismos
 ports declarados—. No es cosmético: es lo que garantiza que el camino del plugin
@@ -19,6 +21,9 @@ esté siempre ejercitado, porque el propio núcleo lo transita.
 """
 
 from __future__ import annotations
+
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 
 from . import ports as port_names
 from .contract import (
@@ -32,6 +37,45 @@ from .contract import (
     ToolManifest,
     ToolResult,
 )
+
+# `backend/VERSION`, que `release.yml` escribe con el tag (pelado del "v")
+# antes de empaquetar. Constante de módulo y no inline en la función para que
+# un test pueda apuntarla a un archivo temporal sin tocar el repo real.
+_ARCHIVO_VERSION = Path(__file__).resolve().parents[1] / "VERSION"
+
+
+def _version_del_nucleo() -> str:
+    """
+    La versión de `bot-core`, para que este manifest no declare una constante
+    que se desincroniza del tag apenas se corta un release (issue #5:
+    `pyproject.toml` decía 0.1.0 con tags ya en v0.2.1-beta1, y acá había otra
+    constante más, "0.2.0", sin relación con ninguna de las dos).
+
+    Dos fuentes, en orden:
+
+    1. **`importlib.metadata`**, que lee el `.dist-info` que deja
+       `pip install` —de un release bajado o de un editable install—, la
+       misma fuente que `pip show bot-core`. Es la autoritativa cuando existe.
+    2. **`backend/VERSION`**, para cuando no: un `backend/` vendorizado desde
+       el tarball de un release —copiado a mano, sin pasar por pip— no tiene
+       `.dist-info` de dónde leer nada (seguimiento del issue #5, visto en la
+       webapp). `release.yml` deja ese archivo en el árbol antes de
+       empaquetar justo para este caso.
+
+    Sin ninguna de las dos, el fallback explícito: mejor una versión que dice
+    "no sé" que fingir un número.
+    """
+    try:
+        return version("bot-core")
+    except PackageNotFoundError:
+        pass
+
+    try:
+        contenido = _ARCHIVO_VERSION.read_text(encoding="utf-8").strip()
+    except OSError:
+        contenido = ""
+    return contenido or "0.0.0+sin-instalar"
+
 
 LOG = ToolManifest(
     id="core.log",
@@ -113,7 +157,7 @@ def _wait(ctx: ToolContext) -> ToolResult:
 MANIFEST = PluginManifest(
     name="core",
     label="Núcleo",
-    version="0.2.0",
+    version=_version_del_nucleo(),
     doc="Primitivas del motor de flujos. No se puede desinstalar.",
     ports=(port_names.CLOCK,),
     settings=(
@@ -161,6 +205,51 @@ _DEFINITIONS = (
 )
 
 
+FLOW_EJECUTAR = ToolManifest(
+    id="flow.ejecutar",
+    label="ejecutar flujo",
+    category="FLUJO",
+    native=True,
+    doc=(
+        "Ejecuta otro flujo por nombre. Comparte contexto, traza y contadores "
+        "de reintentos con el flujo que lo llama."
+    ),
+    params=(
+        Param(
+            "flowName",
+            doc="Nombre del flujo a ejecutar. Vacío: el flujo por defecto configurado.",
+        ),
+    ),
+)
+
+FLOW_RETRY_GATE = ToolManifest(
+    id="flow.retry_gate",
+    label="puerta de reintentos",
+    category="FLUJO",
+    native=True,
+    doc=(
+        "Contador de reintentos por run. Mientras queden intentos sale por la "
+        "arista |loop|; al llegar al límite sale por err."
+    ),
+    params=(
+        Param(
+            "retryGateKey",
+            default="retryCount",
+            doc="Nombre del contador. Dos puertas con la misma clave comparten intentos.",
+        ),
+        Param(
+            "retryGateMax",
+            ParamType.INT,
+            default=10,
+            doc="Cantidad de intentos antes de dar err.",
+        ),
+    ),
+)
+
+# Declarados para el catálogo; los ejecuta el executor (ver flow/executor.py).
+NATIVE_MANIFESTS = (FLOW_EJECUTAR, FLOW_RETRY_GATE)
+
+
 def build_builtin_plugin() -> Plugin:
     """Los tools nativos, con la misma forma que cualquier plugin externo."""
     return Plugin(
@@ -169,4 +258,4 @@ def build_builtin_plugin() -> Plugin:
     )
 
 
-__all__ = ["MANIFEST", "build_builtin_plugin"]
+__all__ = ["MANIFEST", "NATIVE_MANIFESTS", "build_builtin_plugin"]

@@ -20,7 +20,7 @@ from backend.core.contract import (
     ToolResult,
 )
 from backend.core.flow import RunContext, execute_flow, parse_flow
-from backend.tests.fakes import fake_adapters
+from backend.tests.fakes import FakeFs, fake_adapters
 
 # Ports que se le dan al plugin de prueba. Los cuatro, para que un test pueda
 # ejercer cualquiera sin declarar un plugin distinto cada vez.
@@ -42,10 +42,15 @@ def _registry(*extra, adapters=None) -> ToolRegistry:
     return reg
 
 
-def _tool(tool_id: str, fn, params=(), outputs=()) -> FunctionTool:
+def _tool(tool_id: str, fn, params=(), outputs=(), dry_run="skip") -> FunctionTool:
     return FunctionTool(
         manifest=ToolManifest(
-            id=tool_id, label=tool_id, category="TEST", params=tuple(params), outputs=tuple(outputs)
+            id=tool_id,
+            label=tool_id,
+            category="TEST",
+            params=tuple(params),
+            outputs=tuple(outputs),
+            dry_run=dry_run,
         ),
         fn=fn,
     )
@@ -90,10 +95,61 @@ def test_variable_sin_resolver_queda_literal_y_se_reporta():
     assert ctx.unresolved("a {noExiste} b {tampoco}") == ["noExiste", "tampoco"]
 
 
+def test_placeholder_unico_devuelve_lista_o_dict_sin_convertir_a_str():
+    ctx = RunContext(vars={"rutas": ["a.stl", "b.stl"], "info": {"n": 3}})
+    assert ctx.resolve("{rutas}") == ["a.stl", "b.stl"]
+    assert ctx.resolve("{info}") == {"n": 3}
+
+
+def test_placeholder_con_texto_alrededor_sigue_interpolando_como_string():
+    ctx = RunContext(vars={"rutas": ["a.stl", "b.stl"]})
+    assert ctx.resolve("hay {rutas} archivos") == "hay ['a.stl', 'b.stl'] archivos"
+
+
+def test_traversal_a_lista_o_dict_solo_pasa_por_placeholder_unico():
+    ctx = RunContext(vars={"parseo": {"secciones": {"inf_00": [1, 2, 3]}}})
+    assert ctx.resolve("{parseo.secciones}") == {"inf_00": [1, 2, 3]}
+    # embebido en texto, no hay forma de interpolar una colección como string útil
+    assert ctx.resolve("ver {parseo.secciones}") == "ver {parseo.secciones}"
+
+
+def test_placeholder_de_coleccion_no_se_reporta_como_sin_resolver():
+    ctx = RunContext(vars={"rutas": ["a.stl"]})
+    assert ctx.unresolved("{rutas}") == []
+
+
 def test_decision_prioriza_el_row():
     """el motor anterior miraba context antes que state; se preserva."""
     ctx = RunContext(row={"referencia": "CNC4"}, vars={"referencia": "CNC2"})
     assert ctx.decision_value("referencia") == "CNC4"
+
+
+def test_decision_value_acepta_nodo_calificado_y_recursivo():
+    """
+    Issue #35: una decisión puede ramificar sobre un campo *adentro* de un
+    output agrupado por nodo, no sólo sobre un output plano de nivel
+    superior -- mismo `_deep_get` que ya usaba `resolve()` para un param de
+    Acción (issue #30), tantos niveles como haga falta.
+    """
+    ctx = RunContext(vars={"LAYA": {"matriz": {"eleccion": "regar"}}})
+    assert ctx.decision_value("LAYA.matriz.eleccion") == "regar"
+
+
+def test_decision_value_indexa_una_lista_con_un_segmento_numerico():
+    ctx = RunContext(vars={"LAYA": {"opciones": [{"eleccion": "regar"}, {"eleccion": "esperar"}]}})
+    assert ctx.decision_value("LAYA.opciones.1.eleccion") == "esperar"
+
+
+def test_decision_value_calificado_prioriza_clave_plana_exacta():
+    """Un output que de casualidad se llame igual que la expresión calificada gana, sin ambigüedad."""
+    ctx = RunContext(vars={"LAYA.eleccion": "literal", "LAYA": {"eleccion": "anidado"}})
+    assert ctx.decision_value("LAYA.eleccion") == "literal"
+
+
+def test_decision_value_calificado_sin_match_devuelve_none():
+    ctx = RunContext(vars={"LAYA": {"eleccion": "regar"}})
+    assert ctx.decision_value("LAYA.no_existe") is None
+    assert ctx.decision_value("OTRO.eleccion") is None
 
 
 # ── Recorrido del grafo ─────────────────────────────────────────────────
@@ -131,6 +187,33 @@ def test_decision_toma_la_rama_del_valor():
     assert [t.node_id for t in _run(flow, row={"referencia": "CNC3"}).trace] == ["D", "C"]
 
 
+def test_decision_ramifica_sobre_un_campo_calificado_de_un_output():
+    """
+    Issue #35, de punta a punta: un tool deja un output estructurado (una
+    "matriz de decisiones") y el nodo de Decisión ramifica sobre un campo de
+    adentro, sin que el tool tenga que desglosarlo aparte como output plano.
+    """
+    tool = _tool(
+        "test.decide",
+        lambda ctx: ToolResult.ok(matriz={"eleccion": "regar", "confianza": 0.9}),
+        outputs=[Output("matriz", ParamType.JSON)],
+    )
+    flow = (
+        "flowchart TD\n"
+        "    B(inicio)\n"
+        '    LAYA["test.decide"]\n'
+        "    D{LAYA.matriz.eleccion}\n"
+        '    A["core.log | message=regando"]\n'
+        '    C["core.log | message=esperando"]\n'
+        "    B --> LAYA\n"
+        "    LAYA --> D\n"
+        "    D -->|regar| A\n"
+        "    D -->|esperar| C\n"
+    )
+    result = _run(flow, registry=_registry(tool))
+    assert [t.node_id for t in result.trace] == ["LAYA", "D", "A"]
+
+
 def test_decision_sin_rama_falla_con_el_nodo():
     result = _run(
         "flowchart TD\n"
@@ -166,6 +249,56 @@ def test_outputs_de_un_nodo_alimentan_al_siguiente():
     assert result.trace[1].params == {"message": "quedo en /tmp/salida", "level": "info"}
 
 
+def test_nodo_qualificado_elige_entre_dos_outputs_homonimos():
+    """
+    Issue #30: dos nodos que corren el mismo tool dejan el mismo output
+    (`ruta`), y `{ruta}` sólo puede resolver a la del último. Con
+    `{NODO.salida}` se elige cuál, sin dejar de poder escribir `{ruta}`.
+    """
+    tool = _tool(
+        "test.produce",
+        lambda ctx: ToolResult.ok(ruta=f"/tmp/{ctx.params['valor']}"),
+        params=[Param("valor")],
+        outputs=[Output("ruta", ParamType.PATH)],
+    )
+    result = _run(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    PRIMERO["test.produce | valor=uno"]\n'
+        '    SEGUNDO["test.produce | valor=dos"]\n'
+        '    L["core.log | message={PRIMERO.ruta} / {SEGUNDO.ruta} / {ruta}"]\n'
+        '    B --> PRIMERO\n'
+        '    PRIMERO --> SEGUNDO\n'
+        '    SEGUNDO --> L\n',
+        registry=_registry(tool),
+    )
+    assert result.status == "ok"
+    assert result.trace[-1].params["message"] == "/tmp/uno / /tmp/dos / /tmp/dos"
+
+
+def test_nodo_qualificado_no_pisa_una_variable_plana_del_mismo_nombre():
+    """
+    Issue #30, colisión: si un nodo se llama igual que un output de otro nodo,
+    gana la variable plana -- el dict agrupado bajo ese id no se escribe.
+    """
+    tool = _tool(
+        "test.produce",
+        lambda ctx: ToolResult.ok(ruta="/tmp/salida"),
+        outputs=[Output("ruta", ParamType.PATH)],
+    )
+    result = _run(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    ruta["test.produce"]\n'
+        '    L["core.log | message={ruta}"]\n'
+        '    B --> ruta\n'
+        '    ruta --> L\n',
+        registry=_registry(tool),
+    )
+    assert result.status == "ok"
+    assert result.trace[-1].params["message"] == "/tmp/salida"
+
+
 # ── Fallos: lo que antes seguía por la rama de éxito ────────────────────
 
 
@@ -183,6 +316,28 @@ def test_error_sin_arista_err_corta_el_flujo():
     assert result.failed
     assert result.failed_node == "F"
     assert [t.node_id for t in result.trace] == ["F"]  # L nunca se ejecutó
+
+
+def test_error_kind_del_tool_llega_al_trace_y_al_resultado_del_run():
+    """
+    Issue #4: quien dispara el run (hoy Task Scheduler, fuera del core) no ve
+    el `message` de texto libre -- necesita `error_kind` en el resultado
+    final, no sólo en la traza del nodo que falló.
+    """
+    tool = _tool(
+        "test.falla_clasificada",
+        lambda ctx: ToolResult.err("la sesión ya no sirve", error_kind="sesion_vencida"),
+    )
+    result = _run(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    F["test.falla_clasificada"]\n'
+        '    B --> F\n',
+        registry=_registry(tool),
+    )
+    assert result.failed
+    assert result.error_kind == "sesion_vencida"
+    assert result.trace[0].error_kind == "sesion_vencida"
 
 
 def test_error_con_arista_err_ramifica_y_sigue():
@@ -384,6 +539,72 @@ def test_dry_run_reporta_variables_sin_resolver():
     assert "noExiste" in result.trace[0].message
 
 
+def test_dry_run_no_rechaza_un_param_json_que_depende_de_un_output_no_producido():
+    """
+    Issue #24: `rutas={rutas}` -donde `rutas` es el output de un nodo
+    anterior que el dry run no ejecuta- no tiene todavía nada que juzgar.
+    Antes esto fallaba en el dry run y andaba en la corrida real, porque el
+    placeholder sin resolver ('{rutas}') llegaba tal cual a `_coerce(JSON)`.
+    """
+    productor = _tool(
+        "test.produce_lista",
+        lambda ctx: ToolResult.ok(rutas=["a.stl", "b.stl"]),
+        outputs=[Output("rutas", ParamType.JSON)],
+    )
+    consumidor = _tool(
+        "test.consume_json",
+        lambda ctx: ToolResult.ok(),
+        params=[Param("rutas", ParamType.JSON, required=True)],
+    )
+    result = _run(
+        "flowchart TD\n"
+        "    B(inicio)\n"
+        '    N1["test.produce_lista"]\n'
+        '    N2["test.consume_json | rutas={rutas}"]\n'
+        "    B --> N1 --> N2\n",
+        registry=_registry(productor, consumidor),
+        dry_run=True,
+    )
+    assert result.status == "ok"
+    assert not result.failed
+    n2 = result.trace[-1]
+    assert n2.status == "ok"
+    assert n2.params["rutas"] == "{rutas}"  # sin tipar: nada que juzgar todavía
+    assert "rutas" in n2.message  # sigue avisando que quedó sin resolver
+
+
+def test_dry_run_sigue_rechazando_un_literal_mal_escrito_a_mano():
+    """El caso que el comentario original defiende: un valor concreto y mal tipado sigue fallando."""
+    tool = _tool(
+        "test.espera",
+        lambda ctx: ToolResult.ok(),
+        params=[Param("seconds", ParamType.INT, required=True)],
+    )
+    result = _run(
+        'flowchart TD\n    B(inicio)\n    N["test.espera | seconds=abc"]\n    B --> N\n',
+        registry=_registry(tool),
+        dry_run=True,
+    )
+    assert result.failed
+    assert "no es un entero" in result.message
+
+
+def test_dry_run_no_rechaza_json_valido_ya_resuelto():
+    """Un literal JSON válido en el .mmd, o un output ya conocido, se sigue tipando como siempre."""
+    tool = _tool(
+        "test.consume_json",
+        lambda ctx: ToolResult.ok(),
+        params=[Param("items", ParamType.JSON, required=True)],
+    )
+    result = _run(
+        'flowchart TD\n    B(inicio)\n    N["test.consume_json | items="[1, 2, 3]""]\n    B --> N\n',
+        registry=_registry(tool),
+        dry_run=True,
+    )
+    assert result.status == "ok"
+    assert result.trace[-1].params["items"] == [1, 2, 3]
+
+
 def test_dry_run_detecta_tool_inexistente():
     result = _run(
         'flowchart TD\n    B(inicio)\n    X["plugin.no_instalado"]\n    B --> X\n',
@@ -391,6 +612,124 @@ def test_dry_run_detecta_tool_inexistente():
     )
     assert result.failed
     assert "no existe" in result.message
+
+
+# ── dry_run="run" (issue #34) ────────────────────────────────────────────
+
+
+def _registry_solo_lectura(*tools, adapters=None) -> ToolRegistry:
+    """
+    Como `_registry()`, pero el plugin de prueba sólo declara `fs`/`http` --
+    sin `process`/`window`/`browser`, que no tienen modo de sólo lectura y
+    harían que `dry_run_ok` diera False siempre (issue #34).
+    """
+    reg = ToolRegistry(adapters=adapters or fake_adapters())
+    reg._add_plugin("core", "builtin", build_builtin_plugin())
+    reg._add_plugin(
+        "test",
+        "test",
+        Plugin(manifest=PluginManifest(name="test", label="Test", ports=("fs", "http")), tools=list(tools)),
+    )
+    return reg
+
+
+def test_dry_run_run_ejecuta_de_verdad_y_alimenta_una_decision():
+    """
+    Caso real del issue: un tool que sólo LEE un archivo y dice qué encontró.
+    Sin `dry_run="run"` la decisión posterior no tiene valor y siempre va por
+    la primera rama; con él, corre de verdad y decide como en una corrida real.
+    """
+    fs = FakeFs(files={"/casos/0044/id_externo.txt": "5 fallidos"})
+    tool = _tool(
+        "test.leer_log",
+        lambda ctx: ToolResult.ok(
+            fallidos="si" if "fallidos" in ctx.port("fs").read_text("/casos/0044/id_externo.txt") else "no"
+        ),
+        outputs=[Output("fallidos", ParamType.STR)],
+        dry_run="run",
+    )
+    flow = (
+        "flowchart TD\n"
+        "    B(inicio)\n"
+        '    LEER["test.leer_log"]\n'
+        "    D{fallidos}\n"
+        '    SI["core.log | message=hubo fallidos"]\n'
+        '    NO["core.log | message=todo bien"]\n'
+        "    B --> LEER --> D\n"
+        "    D -->|si| SI\n"
+        "    D -->|no| NO\n"
+    )
+    reg = _registry_solo_lectura(tool, adapters=fake_adapters(fs=fs))
+    result = execute_flow(flow, registry=reg, case_id="0044", dry_run=True)
+    assert [t.node_id for t in result.trace] == ["LEER", "D", "SI"]
+    assert result.trace[0].dry_executed is True
+    assert result.trace[0].outputs == {"fallidos": "si"}
+
+
+def test_dry_run_run_bloquea_una_escritura_de_verdad():
+    """
+    El núcleo lo hace cumplir, no confía en la declaración: un tool que dice
+    `dry_run="run"` pero escribe igual falla con PortError, en vez de escribir.
+    """
+    fs = FakeFs()
+
+    def _escribe(ctx):
+        ctx.port("fs").write_text("/tmp/x.txt", "no debería")
+        return ToolResult.ok()
+
+    tool = _tool("test.escribe_igual", _escribe, dry_run="run")
+    reg = _registry_solo_lectura(tool, adapters=fake_adapters(fs=fs))
+    result = execute_flow(
+        'flowchart TD\n    B(inicio)\n    N["test.escribe_igual"]\n    B --> N\n',
+        registry=reg,
+        case_id="0044",
+        dry_run=True,
+    )
+    assert result.failed
+    assert "escritura en dry run" in result.trace[0].message
+    assert "/tmp/x.txt" not in fs.files
+
+
+def test_dry_run_run_sin_modo_lectura_posible_se_trata_como_skip():
+    """
+    Issue #34: un tool que pide `process` no tiene modo de sólo lectura --
+    aunque declare `dry_run="run"`, el executor lo trata como "skip" y nunca
+    lo ejecuta de verdad en seco.
+    """
+    ejecutado = []
+    tool = _tool(
+        "test.corre_proceso",
+        lambda ctx: ejecutado.append(1) or ToolResult.ok(),
+        dry_run="run",
+    )
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("core", "builtin", build_builtin_plugin())
+    reg._add_plugin(
+        "test", "test",
+        Plugin(manifest=PluginManifest(name="test", label="Test", ports=("process",)), tools=[tool]),
+    )
+    result = execute_flow(
+        'flowchart TD\n    B(inicio)\n    N["test.corre_proceso"]\n    B --> N\n',
+        registry=reg,
+        case_id="0044",
+        dry_run=True,
+    )
+    assert result.status == "ok"
+    assert ejecutado == []  # no corrió de verdad
+    assert result.trace[0].dry_executed is False
+
+
+def test_dry_run_skip_sigue_sin_ejecutar_nada():
+    """Retrocompatibilidad: un tool sin declarar (default 'skip') sigue exactamente igual."""
+    ejecutado = []
+    tool = _tool("test.default", lambda ctx: ejecutado.append(1) or ToolResult.ok())
+    result = _run(
+        'flowchart TD\n    B(inicio)\n    N["test.default"]\n    B --> N\n',
+        registry=_registry(tool),
+        dry_run=True,
+    )
+    assert ejecutado == []
+    assert result.trace[0].dry_executed is False
 
 
 # ── Builtins ────────────────────────────────────────────────────────────
@@ -453,10 +792,11 @@ def test_resultado_es_serializable():
 # ── El footgun de la coma ───────────────────────────────────────────────
 
 
-def test_valor_con_coma_avisa_en_lugar_de_perderse():
+def test_valor_con_coma_sin_comillas_es_error_no_warning():
     """
-    La coma separa params, así que un valor no puede contenerla. el motor anterior
-    descartaba el sobrante en silencio.
+    Issue #10: la coma sigue separando params fuera de comillas —ningún flujo
+    existente cambia—, pero perder texto a mitad de palabra ya no deja el
+    flujo "runnable": es peor que no ejecutar nada.
     """
     graph = parse_flow(
         'flowchart TD\n'
@@ -464,9 +804,21 @@ def test_valor_con_coma_avisa_en_lugar_de_perderse():
         '    L["core.log | message=Hola, mundo"]\n'
         '    B --> L\n'
     )
-    assert graph.runnable  # es warning, no error
+    assert not graph.runnable
     assert graph.nodes["L"].params["message"] == "Hola"
-    assert any("mundo" in d.message for d in graph.warnings)
+    assert any("mundo" in d.message for d in graph.errors)
+
+
+def test_valor_con_coma_entre_comillas_se_preserva_entero():
+    """La forma de escribir la coma a propósito: no se pierde nada."""
+    graph = parse_flow(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    L["core.log | message="Hola, mundo""]\n'
+        '    B --> L\n'
+    )
+    assert graph.runnable
+    assert graph.nodes["L"].params["message"] == "Hola, mundo"
 
 
 if __name__ == "__main__":
@@ -552,3 +904,143 @@ def test_el_dry_run_tambien_tipa_los_params():
     )
     assert result.failed
     assert "no es un número" in result.trace[0].message
+
+
+# ── Progreso en vivo (issue #15) ────────────────────────────────────────
+
+
+def test_on_step_avisa_cada_nodo_con_su_display_y_su_posicion():
+    """
+    Sin esto, una UI sólo puede decir "está corriendo" y desde cuándo: el run
+    bloquea hasta el final y nadie afuera sabe en qué nodo está.
+    """
+    pasos = []
+    execute_flow(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    UNO["primero § core.log | message=a"]\n'
+        '    DOS["segundo § core.log | message=b"]\n'
+        "    B --> UNO\n"
+        "    UNO --> DOS\n",
+        case_id="0044",
+        registry=_registry(),
+        on_step=lambda node_id, **datos: pasos.append((node_id, datos)),
+    )
+
+    assert [p[0] for p in pasos] == ["UNO", "DOS"]
+    assert pasos[0][1] == {"display": "primero", "index": 1, "total": 2}
+    assert pasos[1][1] == {"display": "segundo", "index": 2, "total": 2}
+
+
+def test_on_step_no_cuenta_el_nodo_de_inicio():
+    """El nodo de inicio no hace nada que se pueda mostrar como un paso."""
+    pasos = []
+    execute_flow(
+        'flowchart TD\n    B(inicio)\n    N["core.log | message=a"]\n    B --> N\n',
+        case_id="0044",
+        registry=_registry(),
+        on_step=lambda node_id, **_: pasos.append(node_id),
+    )
+    assert pasos == ["N"]
+
+
+def test_on_step_cuenta_tambien_las_decisiones():
+    pasos = []
+    execute_flow(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        "    D{¿tipo? § tipo}\n"
+        '    N["core.log | message=a"]\n'
+        "    B --> D\n"
+        "    D -->|x| N\n",
+        case_id="0044",
+        registry=_registry(),
+        row={"tipo": "x"},
+        on_step=lambda node_id, **_: pasos.append(node_id),
+    )
+    assert pasos == ["D", "N"]
+
+
+def test_con_un_bucle_el_indice_supera_al_total():
+    """
+    `index` cuenta visitas, no nodos distintos: con reintentos, el mismo nodo
+    se anuncia varias veces. Quien dibuja la barra lo topa a 100%; el motor no
+    miente sobre cuántas veces pasó de verdad.
+    """
+    intentos = {"n": 0}
+
+    def _a_veces(ctx):
+        intentos["n"] += 1
+        return ToolResult.ok() if intentos["n"] > 2 else ToolResult.again("todavía no")
+
+    pasos = []
+    execute_flow(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    C["chequear § test.chequear"]\n'
+        '    FIN["core.log | message=listo"]\n'
+        "    B --> C\n"
+        "    C -->|loop| C\n"
+        "    C -->|ok| FIN\n",
+        case_id="0044",
+        registry=_registry(_tool("test.chequear", _a_veces)),
+        on_step=lambda node_id, **datos: pasos.append(datos["index"]),
+    )
+
+    assert pasos == [1, 2, 3, 4]
+    assert len(pasos) > 2  # el total del grafo son 2 nodos de acción
+
+
+def test_un_on_step_que_revienta_no_tumba_el_run():
+    """
+    Quien escucha está dibujando una barra: que se caiga dibujando no puede
+    costar la ejecución que ya está a mitad de camino. Mismo criterio que un
+    logger.
+    """
+    def _explota(node_id, **_):
+        raise RuntimeError("la UI se cayó")
+
+    resultado = execute_flow(
+        'flowchart TD\n    B(inicio)\n    N["core.log | message=a"]\n    B --> N\n',
+        case_id="0044",
+        registry=_registry(),
+        on_step=_explota,
+    )
+    assert resultado.status == "ok"
+
+
+def test_sin_on_step_el_comportamiento_es_identico():
+    """El default es None: nada cambia para quien no lo usa."""
+    flujo = 'flowchart TD\n    B(inicio)\n    N["core.log | message=a"]\n    B --> N\n'
+    con = execute_flow(flujo, case_id="0044", registry=_registry(), on_step=lambda *a, **k: None)
+    sin = execute_flow(flujo, case_id="0044", registry=_registry())
+
+    assert con.status == sin.status
+    assert [t.node_id for t in con.trace] == [t.node_id for t in sin.trace]
+
+
+def test_un_subflujo_sigue_contando_sobre_el_mismo_indice():
+    """
+    Para quien mira el progreso es una sola corrida: si el índice se reiniciara
+    al entrar a un subflujo, la barra volvería para atrás.
+    """
+    subflujo = 'flowchart TD\n    B(inicio)\n    S["sub § core.log | message=x"]\n    B --> S\n'
+    pasos = []
+
+    execute_flow(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    UNO["core.log | message=a"]\n'
+        '    SUB["flow.ejecutar | flowName=hijo"]\n'
+        "    B --> UNO\n"
+        "    UNO --> SUB\n",
+        case_id="0044",
+        registry=_registry(),
+        load_flow=lambda nombre: subflujo,
+        on_step=lambda node_id, **datos: pasos.append((node_id, datos["index"], datos["total"])),
+    )
+
+    assert [p[0] for p in pasos] == ["UNO", "SUB", "S"]
+    assert [p[1] for p in pasos] == [1, 2, 3]
+    # El total sigue siendo el del flujo principal, no el del subflujo.
+    assert {p[2] for p in pasos} == {2}

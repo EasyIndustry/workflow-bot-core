@@ -17,6 +17,7 @@ puerta de atrás aunque el import estuviera acá.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
 from pathlib import Path
@@ -27,6 +28,9 @@ from backend.core.ports import PortError
 # Ruta especial de SQLite para una base que vive en RAM. Es lo que hace que la
 # suite corra sin tocar el disco ni dejar archivos atrás.
 IN_MEMORY = ":memory:"
+
+# Nombre de tabla válido para interpolar en un PRAGMA (ver `columns`).
+_IDENTIFICADOR_SQL = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class SqliteStorageAdapter:
@@ -158,6 +162,20 @@ class SqliteStorageAdapter:
         except sqlite3.Error as exc:
             raise PortError(f"escritura fallida: {exc}") from exc
         return cursor.rowcount
+
+    def columns(self, table: str) -> list[str]:
+        # PRAGMA no acepta parámetros posicionales como el resto de las
+        # sentencias -- `table` va interpolado sí o sí. Validar que sea un
+        # identificador simple antes de armar el string es lo que impide que
+        # esto sea una puerta de inyección si algún día `table` deja de venir
+        # sólo de `schema.SCHEMA` y empieza a viajar más cerca de un input.
+        if not _IDENTIFICADOR_SQL.match(table):
+            raise PortError(f"nombre de tabla inválido: {table!r}")
+        try:
+            filas = self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+        except sqlite3.Error as exc:
+            raise PortError(f"no se pudieron leer las columnas de {table!r}: {exc}") from exc
+        return [f["name"] for f in filas]
 
     def close(self) -> None:
         if self._memoria:

@@ -26,8 +26,9 @@ mundo.**
 | **Plugin** | lógica de negocio | los ports que necesita, nunca una librería directamente | se instala por entry point |
 
 Los ports que el núcleo define, con su adapter incluido: `http` (urllib), `fs`
-(os/shutil), `process` (subprocess), `clock` (time), `storage` (sqlite3) y
-`crypto` (cryptography).
+(os/shutil), `process` (subprocess), `clock` (time), `socket` (socket/ssl),
+`storage` (sqlite3), `crypto` (cryptography) y `sqlite_file` (sqlite3,
+sólo lectura contra un archivo externo).
 
 `storage` y `crypto` son los dos que un plugin **no** puede pedir: son del
 núcleo. Un plugin con acceso al almacenamiento elegiría dónde persisten sus
@@ -168,6 +169,11 @@ limpiar sin reescribir ni parsear nada.
   `null`: la clave directamente no existe en la respuesta).
 - No hay edición de un secreto, solo reemplazo.
 - Cifrados en reposo; la llave vive fuera de la base de datos.
+- **Nunca quedan en una traza ni en un log.** La traza guarda los params ya
+  resueltos, así que antes de guardar o devolver un run el núcleo reemplaza
+  por `***` todo valor declarado secreto (variable `secret` de `env`,
+  `Setting`/`Field` con `secret=True`), donde aparezca: params, mensajes,
+  outputs, tracebacks y log. Ver `backend/core/redact.py`.
 
 ---
 

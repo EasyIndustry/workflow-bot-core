@@ -129,6 +129,15 @@ class EnvStore:
         )
         return None if fila is None else self._desde_fila(fila, con_valor=False)
 
+    def secret_names(self) -> set[str]:
+        """Los nombres marcados secretos. Sin valores: es lo que hay que tapar."""
+        return {
+            fila["name"]
+            for fila in self.db.query(
+                "SELECT name FROM env WHERE org = ? AND secret = 1", (self.org,)
+            )
+        }
+
     def resolve(self) -> dict[str, str]:
         """
         Nombre → valor en claro, para ejecutar un flujo.
@@ -175,6 +184,7 @@ class EnvStore:
         self,
         name: str,
         value: str,
+        *,
         secret: bool = False,
         updated_by: str = LOCAL_ORG,
     ) -> EnvVar:

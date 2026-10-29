@@ -121,18 +121,13 @@ def list_tools(plugins: dict | None = None, root: str | None = None) -> dict:
     return {
         "contract": catalogo["contract"],
         "ports_disponibles": catalogo["ports"],
-        "tools": catalogo["tools"],
+        "tools": [t for t in catalogo["tools"] if not t["native"]],
+        # Los resuelve el executor, no el registry: se declaran en el catálogo
+        # (native=True) y acá se separan para que se lean como control de flujo.
         "nativos": [
-            {
-                "id": "flow.ejecutar",
-                "doc": "Ejecuta otro flujo por nombre. Comparte contexto y traza.",
-                "params": ["flowName"],
-            },
-            {
-                "id": "flow.retry_gate",
-                "doc": "Contador de reintentos por run. Combina con una arista |loop|.",
-                "params": ["retryGateKey", "retryGateMax"],
-            },
+            {"id": t["id"], "doc": t["doc"], "params": [p["name"] for p in t["params"]]}
+            for t in catalogo["tools"]
+            if t["native"]
         ],
     }
 
@@ -145,6 +140,38 @@ def list_plugins(plugins: dict | None = None, root: str | None = None) -> dict:
         "plugins": catalogo["plugins"],
         "errors": catalogo["errors"],
     }
+
+
+def list_resource_items(
+    plugin: str, resource: str, plugins: dict | None = None, root: str | None = None
+) -> dict:
+    """
+    Los items guardados de una colección de un plugin ("sources"), con los
+    campos `secret` tapados.
+
+    Es el paso que faltaba antes de `run_action`: sin esto, un agente no tenía
+    forma de saber qué conexiones/fuentes ya existen para poder pedir una por
+    nombre. No ejecuta nada, y nunca devuelve un secreto en claro.
+    """
+    return _cli("resources", plugin, resource, "--json", root=root, plugins=plugins)
+
+
+def describe_extra_params(
+    tool: str, params: dict | None = None, plugins: dict | None = None, root: str | None = None
+) -> dict:
+    """
+    Los params extra que un tool puede ofrecer, dados los que el nodo ya
+    eligió (issue #27) — el caso de `connections.llamar`: elegida una Action,
+    los `{placeholders}` de su url/headers/payload son params concretos con
+    nombre, no algo que haya que adivinar abriendo la pantalla del plugin.
+
+    Vacío (no error) si el tool no describe una forma dinámica -la mayoría
+    no la necesita-, si no existe, o si no acepta params extra.
+    """
+    argv = ["extra-params", tool, "--json"]
+    if params:
+        argv += ["--params", json.dumps(params, ensure_ascii=False)]
+    return _cli(*argv, root=root, plugins=plugins)
 
 
 def list_ports(**_) -> dict:
@@ -162,6 +189,15 @@ def list_ports(**_) -> dict:
               "copy_tree, remove_file, remove_tree, rename, read_text, write_text",
         p.PROCESS: "run(command: Sequence[str], cwd, timeout, env) -> ProcessResult",
         p.CLOCK: "now(), monotonic(), sleep(seconds, is_cancelled)",
+        p.BROWSER: "goto(url), click(selector), leer_texto(selector), screenshot() -> bytes",
+        p.WINDOW: "find_window(title|process) -> WindowInfo, "
+                  "click(window, control, button='left'), "
+                  "type_text(window, control, text), read_text(window, control=None), "
+                  "read_state(window, control) -> 'on'/'off'/'indeterminate'/None",
+        p.SOCKET: "connect(host, port, tls=False) -> SocketConnection, "
+                  "send(conn, data: bytes), recv(conn, size) -> bytes, close(conn)",
+        p.SQLITE_FILE: "query(path, sql, params) -> list[dict], one(path, sql, params), "
+                       "columns(path, table) -- siempre de sólo lectura",
     }
     return {
         "pedibles_por_un_plugin": [
@@ -227,11 +263,12 @@ def run_flow(
     actor: str = "agente-mcp",
     plugins: dict | None = None,
     save: bool = False,
+    allow_broken: bool = False,
 ) -> dict:
     """
     Ejecuta un flujo **de verdad**: toca red, disco y procesos.
 
-    Dos guardas que no son opcionales:
+    Tres guardas que no son opcionales:
 
     **`root` es obligatorio, sin default.** Las demás operaciones caen en
     `backend/` si nadie dice nada, y en seco eso casi no molesta. Con ejecución
@@ -240,13 +277,19 @@ def run_flow(
     Usar un directorio temporal, o `:memory:` vía BOOTSTRAP_storage para no
     dejar rastro.
 
-    **El actor decide qué se puede.** Por defecto `agente-mcp`, que se da de alta
-    como `kind=agent` y nace sin permiso para tools `dangerous` ni para el port
-    `process`. Ampliarlo es un alta explícita del lado de quien opera la
-    instalación —`users allow`— y no algo que se pida desde acá.
+    **El actor decide qué se puede.** Por defecto `agente-mcp`, pensado como
+    `kind=agent`: sin permiso para tools `dangerous` ni para el port `process`.
+    No se autocrea —el actor no existe hasta que alguien lo da de alta a
+    propósito— así que hay que registrarlo una vez por instalación:
+    `python -m backend.core users add agente-mcp --kind agent`. Ampliar sus
+    permisos es un alta explícita del lado de quien opera la instalación
+    —`users allow`— y no algo que se pida desde acá.
 
     Un flujo que el actor no puede correr falla **antes** de ejecutar nada, y
-    dice qué nodo y qué regla lo impidió.
+    dice qué nodo y qué regla lo impidió. Lo mismo si el flujo llama a un tool
+    que no está instalado: sin `allow_broken`, falla antes de tocar nada en
+    vez de terminar `status: ok` con ese nodo silenciosamente saltado por la
+    arista `|err|`.
     """
     if not str(root or "").strip():
         raise OperationError(
@@ -262,6 +305,8 @@ def run_flow(
         argv += ["--case", case_id]
     if save:
         argv.append("--save")
+    if allow_broken:
+        argv.append("--allow-broken")
 
     resultado = _cli(*argv, root=root, plugins=plugins, actor=actor)
     resumen = _resumen_de_run(resultado)
@@ -270,7 +315,15 @@ def run_flow(
     return resumen
 
 
-def save_flow(flow: str, name: str | None = None, root: str | None = None) -> dict:
+def save_flow(
+    flow: str,
+    name: str | None = None,
+    folder: str | None = None,
+    state: str | None = None,
+    description: str | None = None,
+    source: str | None = None,
+    root: str | None = None,
+) -> dict:
     """
     Persiste un `.mmd` en la instalación, sin ejecutar nada.
 
@@ -279,13 +332,177 @@ def save_flow(flow: str, name: str | None = None, root: str | None = None) -> di
     bucle de autoría que `install_plugin` cubre para un plugin. A diferencia
     de `run_flow(..., save=True)`, no toca red, disco ni procesos del lado de
     sus tools, ni pide un actor con permisos: sólo escribe la fila en la base
-    de la instalación, tomando `folder`/`state`/`description` de la cabecera
-    `%%` del archivo si las tiene.
+    de la instalación.
+
+    `folder`/`state`/`description`/`source` son opcionales y pisan lo que
+    traiga la cabecera `%%` del archivo. Sin ninguno de los dos —ni parámetro
+    ni cabecera—, se conserva el valor que el flujo ya tenía guardado en vez
+    de resetearlo: volver a guardar un flujo existente sin repetir su
+    cabecera completa no le borra la carpeta, el estado ni la fuente.
     """
     argv = ["add", flow, "--json"]
     if name:
         argv += ["--name", name]
+    if folder is not None:
+        argv += ["--folder", folder]
+    if state is not None:
+        argv += ["--state", state]
+    if description is not None:
+        argv += ["--description", description]
+    if source is not None:
+        argv += ["--source", source]
     return _cli(*argv, root=root)
+
+
+def describe_installation(plugins: dict | None = None, root: str | None = None) -> dict:
+    """
+    La foto de la instalación en una llamada: flujos, plugins, actores,
+    configuración efectiva, ports y un resumen de runs recientes.
+
+    Es lo primero que conviene llamar cuando no se conoce la instalación
+    (issue #17) -- antes de esto, armar esta foto significaba pedir varias
+    cosas sueltas y cruzarlas a mano. Incluye un campo `resumen` en texto
+    plano para un cliente que sólo pueda mostrar texto.
+    """
+    return _cli("describe", "--json", root=root, plugins=plugins)
+
+
+def list_flows(plugins: dict | None = None, root: str | None = None) -> dict:
+    """Los flujos guardados: nombre, carpeta, estado y qué tools usa cada uno."""
+    return {"flows": _cli("workflows", "--json", root=root, plugins=plugins)}
+
+
+def get_flow(name: str, plugins: dict | None = None, root: str | None = None) -> dict:
+    """
+    Un flujo guardado, con su contenido y sus diagnósticos ya cruzados contra
+    lo instalado -- sin tener que adivinar en qué ruta vive el `.mmd`.
+    """
+    return _cli("flow", name, "--json", root=root, plugins=plugins)
+
+
+def list_runs(
+    case_id: str | None = None,
+    source: str | None = None,
+    only_failed: bool = False,
+    limit: int = 50,
+    status: str | None = None,
+    actor: str | None = None,
+    flow: str | None = None,
+    offset: int = 0,
+    root: str | None = None,
+) -> dict:
+    """
+    Runs ya ejecutados, resumidos: qué corrió y cómo terminó cada uno. Del
+    más nuevo al más viejo; `offset` pagina. Sólo lee: no pide actor.
+    """
+    argv = ["runs", "--json", "--limit", str(limit), "--offset", str(offset)]
+    if case_id:
+        argv += ["--case", case_id]
+    if source:
+        argv += ["--source", source]
+    if only_failed:
+        argv.append("--only-failed")
+    if status:
+        argv += ["--status", status]
+    if actor:
+        argv += ["--actor", actor]
+    if flow:
+        argv += ["--flow", flow]
+    return {"runs": _cli(*argv, root=root)}
+
+
+def list_waiting_runs(
+    case_id: str | None = None, limit: int = 50, root: str | None = None
+) -> dict:
+    """
+    Los runs pausados en una decisión manual (issue #37), cada uno con su
+    `waiting`: el nodo, la variable, la ayuda y una opción por rama (`value`
+    es lo que se le pasa a `resume_run`).
+    """
+    argv = ["runs", "--json", "--status", "waiting", "--limit", str(limit)]
+    if case_id:
+        argv += ["--case", case_id]
+    return {"runs": _cli(*argv, root=root)}
+
+
+def resume_run(
+    run_id: str,
+    value: str,
+    root: str,
+    actor: str = "agente-mcp",
+    plugins: dict | None = None,
+) -> dict:
+    """
+    Retoma un run pausado en una decisión manual, por la rama `value`
+    (issue #37). Ejecuta **de verdad** lo que sigue, así que tiene las
+    mismas guardas que `run_flow`: `root` obligatorio y los permisos del
+    actor -- que queda en la traza como `decided_by`.
+    """
+    if not str(root or "").strip():
+        raise OperationError(
+            "resume_run necesita `root`: retomar ejecuta de verdad lo que sigue "
+            "del flujo, igual que run_flow."
+        )
+    resultado = _cli("resume", run_id, value, "--json", root=root, plugins=plugins, actor=actor)
+    resumen = _resumen_de_run(resultado)
+    resumen["actor"] = resultado.get("actor", actor)
+    resumen["run_id"] = resultado.get("run_id", run_id)
+    return resumen
+
+
+def get_run(
+    run_id: str,
+    offset: int = 0,
+    limit: int | None = None,
+    root: str | None = None,
+) -> dict:
+    """
+    La traza de un run ya ejecutado, nodo por nodo, con sus params resueltos
+    -- los secretos, tapados con `***`. `offset`/`limit` la recortan, y
+    entonces `trace_total` dice cuántos nodos tiene entera.
+    """
+    argv = ["trace", run_id, "--json"]
+    if offset:
+        argv += ["--offset", str(offset)]
+    if limit is not None:
+        argv += ["--limit", str(limit)]
+    return _cli(*argv, root=root)
+
+
+def get_case_log(case_id: str, limit: int = 500, root: str | None = None) -> dict:
+    """Todo el registro de una fila, cruzando todos sus runs -- responde "por qué falló"."""
+    return _cli("case-log", case_id, "--limit", str(limit), "--json", root=root)
+
+
+def write_resource_item(
+    plugin: str,
+    resource: str,
+    key: str,
+    item: dict,
+    plugins: dict | None = None,
+    root: str | None = None,
+) -> dict:
+    """
+    Escribe (crea o reemplaza) un item de una colección de un plugin.
+
+    Mismas reglas que `list_resource_items`: un campo declarado `secret`
+    nunca vuelve en claro, ni siquiera al toque de guardarlo (issue #17, ver
+    también #8).
+    """
+    return _cli(
+        "resource-item", plugin, resource, key,
+        "--data", json.dumps(item, ensure_ascii=False), "--json",
+        root=root, plugins=plugins,
+    )
+
+
+def delete_resource_item(
+    plugin: str, resource: str, key: str, plugins: dict | None = None, root: str | None = None
+) -> dict:
+    """Borra un item de una colección de un plugin."""
+    return _cli(
+        "resource-item", plugin, resource, key, "--delete", "--json", root=root, plugins=plugins
+    )
 
 
 def list_users(root: str | None = None) -> dict:
@@ -303,6 +520,12 @@ def _resumen_de_run(resultado: dict) -> dict:
         "status": resultado["status"],
         "message": resultado["message"],
         "failed_node": resultado["failed_node"],
+        # Issue #4: quien dispara el run (hoy, Task Scheduler fuera del
+        # core; mañana, un agente vía este mismo tool) necesita distinguir la
+        # causa de una falla más allá del texto libre de `message`.
+        "error_kind": resultado.get("error_kind"),
+        # Issue #37: no es None si el run quedó pausado en una decisión manual.
+        "waiting": resultado.get("waiting"),
         "sin_resolver": sorted({
             entrada["message"].split("variables sin resolver: ", 1)[1]
             for entrada in resultado.get("logs", [])
@@ -315,6 +538,9 @@ def _resumen_de_run(resultado: dict) -> dict:
                 "params": t["params"],
                 "status": t["status"],
                 "message": t["message"],
+                "error_kind": t.get("error_kind"),
+                "decision_value": t.get("decision_value"),
+                "decided_by": t.get("decided_by"),
             }
             for t in resultado.get("trace", [])
         ],
@@ -389,6 +615,19 @@ def install_plugin(
     `source` es sólo metadata —de dónde salió esta carpeta ('agent', 'bucket',
     lo que corresponda—: no cambia la validación de arriba, que es la misma
     para cualquier valor.
+
+    Dos guardas contra un `path`/`plugins_dir` mal armados (issue #2: un
+    agente puede confundir el checkout de desarrollo con una instalación
+    separada):
+
+    - Si `origen` es igual a, contiene, o está contenido en `destino`, la
+      instalación se rechaza antes de tocar nada: copiar y después reemplazar
+      `destino` de por medio borraría archivos de `origen` que nunca se
+      llegaron a copiar (por ejemplo, un `__init__.py` de re-export o una
+      carpeta de fixtures al lado del archivo que sí se instala).
+    - Un `destino` existente nunca se borra: se renombra a
+      `<name>.reemplazado-<timestamp>` al lado, y ahí queda como red de
+      seguridad recuperable a mano. No se limpia solo.
     """
     resultado = load_plugin(name, path, root=root)
     if not resultado["ok"]:
@@ -399,6 +638,15 @@ def install_plugin(
     destino_base.mkdir(parents=True, exist_ok=True)
     destino = destino_base / name
     temporal = destino_base / f"{name}.instalando"
+
+    if origen == destino or origen in destino.parents or destino in origen.parents:
+        raise OperationError(
+            f'"{path}" y el destino de instalación "{destino}" se pisan: uno '
+            "contiene al otro. Instalar ahí borraría archivos de origen que "
+            "nunca se copian (todo lo que no sea el plugin instalable). Usar "
+            "un `plugins_dir` que sea una instalación separada del checkout "
+            "de desarrollo."
+        )
 
     if temporal.exists():
         shutil.rmtree(temporal)
@@ -422,8 +670,10 @@ def install_plugin(
         encoding="utf-8",
     )
 
+    backup = None
     if destino.exists():
-        shutil.rmtree(destino)
+        backup = destino_base / f"{name}.reemplazado-{time.time_ns()}"
+        destino.rename(backup)
     temporal.rename(destino)
 
     return {
@@ -433,6 +683,7 @@ def install_plugin(
         "ports": resultado["plugin"]["ports"],
         "path": str(destino),
         "source": source,
+        "backup": str(backup) if backup else None,
         "errors": [],
     }
 
@@ -444,6 +695,7 @@ def run_action(
     plugin: str,
     action: str,
     params: dict | None = None,
+    item: str | None = None,
     plugins: dict | None = None,
     root: str | None = None,
 ) -> dict:
@@ -455,12 +707,19 @@ def run_action(
     una persona fuera de un run. Un `Tool` no lo es —es un nodo de un flujo, y
     sin run no tiene contexto, ni traza, ni log de fila—.
 
+    `item` resuelve los params desde un item ya guardado de la colección que
+    declara la acción (ver `list_resource_items`), en vez de reconstruirlos a
+    mano: "previsualizar" contra una conexión guardada, por ejemplo. `params`
+    explícitos pisan lo que traiga el item.
+
     Para ejercitar un tool: escribir un `.mmd` de un nodo y pasarlo por
     `dry_run_flow`.
     """
     argv = ["action", plugin, action, "--json"]
     if params:
         argv += ["--params", json.dumps(params, ensure_ascii=False)]
+    if item:
+        argv += ["--item", item]
     return _cli(*argv, root=root, plugins=plugins)
 
 
@@ -578,13 +837,24 @@ PLUGIN = build_plugin()
 __all__ = [
     "OperationError",
     "check_flow",
+    "delete_resource_item",
+    "describe_installation",
     "dry_run_flow",
+    "get_case_log",
+    "get_flow",
+    "get_run",
     "install_plugin",
+    "list_flows",
     "list_plugins",
     "list_ports",
+    "list_resource_items",
+    "list_runs",
     "list_tools",
+    "list_users",
     "load_plugin",
     "plugin_template",
     "run_action",
+    "run_flow",
     "save_flow",
+    "write_resource_item",
 ]

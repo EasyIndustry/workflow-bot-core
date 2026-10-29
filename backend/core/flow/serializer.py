@@ -8,21 +8,39 @@ valor que la contenía se partía en dos — el flujo se guardaba roto y nadie s
 enteraba hasta la ejecución. Con el serializador acá, la gramática vive en un
 solo lugar y `parse_flow(to_mermaid(g))` es un test.
 
-Dos reglas que salen de eso:
+Tres reglas que salen de eso:
 
 1. **Los parámetros se unen con `|`, nunca con coma.** La coma se sigue
    aceptando al parsear —hay 30 nodos escritos así— pero no se escribe más.
-2. **Lo que no puede round-trippear se avisa, no se emite y se reza.**
+2. **Un valor con `,`, `|` o `"` se cita solo.** `message=Hola, mundo` se
+   escribe `message=#quot;Hola, mundo#quot;` (issue #37): `#quot;` es la
+   entidad que Mermaid ya reconoce en una etiqueta y dibuja como `"`, y no
+   una comilla cruda -- una comilla de más adentro de la etiqueta de un nodo
+   rompe mermaid.js apenas lo que sigue se parece a su sintaxis (`{`, `(`,
+   `[`, `>`), le pasaba ya a cualquier valor citado que empezara así, con o
+   sin comillas adentro (issue #10 resolvía sólo la coma/pipe; esto resuelve
+   la comilla del wrapper mismo). El formato viejo (comilla cruda) se sigue
+   leyendo -- son los ~30 nodos ya escritos así -- pero ya no se escribe.
+3. **Lo que no puede round-trippear se avisa, no se emite y se reza.**
    `verificar()` devuelve los problemas y `to_mermaid(..., strict=True)` levanta
-   antes de guardar. Un valor con `|`, con `,`, o con `"` no sobrevive al
-   parseo, y guardarlo en silencio es el defecto que este módulo existe para no
-   repetir.
+   antes de guardar. Un valor con `"` sobrevive desde issue #36: cada comilla
+   propia se escapa como `#34;` -- una entidad *distinta* de la del wrapper
+   (`#quot;`): las dos usan la misma en un primer intento y el propio parser
+   no podía distinguir "cierra la cita" de "una comilla más" (issue #37,
+   verificado por workflow-bot-app contra mermaid.js real). Lo que sigue sin
+   poder distinguirse es un valor citado que ya trae, sin querer decir una
+   comilla, la secuencia literal `#quot;` o `#34;` — mismo límite que tiene
+   el propio Mermaid con sus entidades.
 """
 
 from __future__ import annotations
 
 from .parser import (
+    CITA_ENTIDAD,
     DISPLAY_SEP,
+    ESCAPE_COMILLA,
+    LLAVE_ABRE,
+    LLAVE_CIERRA,
     ActionNode,
     DecisionNode,
     FlowEdge,
@@ -31,10 +49,6 @@ from .parser import (
     StartNode,
     UnknownNode,
 )
-
-# Un valor con estos caracteres no vuelve igual del parser: `|` y `,` son
-# separadores de parámetros, y `"` cierra la etiqueta del nodo.
-PROHIBIDOS_EN_VALOR = ('|', ',', '"')
 
 # Y en una condición de arista, la coma **sí** significa algo: es el operador
 # IN, que arma la lista de valores. Ahí lo que no puede aparecer es el pipe,
@@ -124,6 +138,8 @@ def from_dict(datos: dict) -> FlowGraph:
                 variable=crudo.get("variable") or "",
                 display=crudo.get("display") or "",
                 line=linea,
+                manual=bool(crudo.get("manual")),
+                ayuda=str(crudo.get("ayuda") or ""),
             )
         else:
             grafo.nodes[node_id] = UnknownNode(line=linea)
@@ -142,6 +158,7 @@ def from_dict(datos: dict) -> FlowGraph:
         folder=cabecera.get("folder") or "",
         state=cabecera.get("state") or "enabled",
         description=cabecera.get("description") or "",
+        source=cabecera.get("source") or "",
     )
     return grafo
 
@@ -166,18 +183,56 @@ def verificar(grafo: FlowGraph) -> list[str]:
             if not nodo.fn.strip():
                 problemas.append(f'El nodo "{node_id}" no tiene tool')
             for clave, valor in nodo.params.items():
-                for caracter in PROHIBIDOS_EN_VALOR:
-                    if caracter in str(valor):
-                        problemas.append(
-                            f'{node_id} › {clave}: el valor contiene "{caracter}", '
-                            f"que separa parámetros o cierra la etiqueta y no "
-                            f"sobrevive al volver a leer el flujo"
-                        )
-                if DISPLAY_SEP in str(valor):
+                texto = str(valor)
+                # Issue #36/#37: una comilla ya sobrevive (se cita con
+                # #quot; y se escapa con #34;). Lo único que sigue sin poder
+                # distinguirse es un valor citado que ya trae, sin querer
+                # decir eso, la secuencia literal de cualquiera de las dos
+                # entidades -- mismo límite que tiene el propio Mermaid.
+                necesita_cita = any(c in texto for c in (",", "|", '"'))
+                if necesita_cita and (CITA_ENTIDAD in texto or ESCAPE_COMILLA in texto):
+                    entidad = CITA_ENTIDAD if CITA_ENTIDAD in texto else ESCAPE_COMILLA
+                    problemas.append(
+                        f'{node_id} › {clave}: el valor necesita citarse y contiene la '
+                        f'secuencia "{entidad}", que se leería como parte de la cita '
+                        f"y no sobrevive al volver a leer el flujo"
+                    )
+                if DISPLAY_SEP in texto:
                     problemas.append(
                         f'{node_id} › {clave}: el valor contiene "{DISPLAY_SEP}", '
                         f"que separa el nombre visible de la definición"
                     )
+
+        if isinstance(nodo, DecisionNode):
+            if nodo.manual and not any(
+                a.condition for a in grafo.edges if a.from_ == node_id
+            ):
+                problemas.append(
+                    f'La decisión manual "{node_id}" no tiene ninguna arista con '
+                    f"condición: no habría nada que elegir"
+                )
+            # La ayuda vive adentro de `{...}`: `§` partiría la etiqueta. Las
+            # llaves de una `{variable}` (issue #38) se escriben como entidad,
+            # y coma, pipe y comilla se citan igual que el valor de un param;
+            # lo que no sobrevive es la secuencia literal de alguna de esas
+            # entidades.
+            ayuda = nodo.ayuda or ""
+            if DISPLAY_SEP in ayuda:
+                problemas.append(
+                    f'La ayuda de "{node_id}" contiene "{DISPLAY_SEP}", que corta la etiqueta'
+                )
+            if LLAVE_ABRE in ayuda or LLAVE_CIERRA in ayuda:
+                problemas.append(
+                    f'La ayuda de "{node_id}" contiene la secuencia literal '
+                    f'"{LLAVE_ABRE}" o "{LLAVE_CIERRA}", que se leería como una llave'
+                )
+            if any(c in ayuda for c in (",", "|", '"')) and (
+                CITA_ENTIDAD in ayuda or ESCAPE_COMILLA in ayuda
+            ):
+                problemas.append(
+                    f'La ayuda de "{node_id}" necesita citarse y contiene una '
+                    f"entidad ({CITA_ENTIDAD} o {ESCAPE_COMILLA}) que no sobrevive"
+                )
 
         etiqueta = getattr(nodo, "display", "") or getattr(nodo, "label", "") or ""
         if '"' in etiqueta or "]" in etiqueta:
@@ -208,12 +263,53 @@ def _orden(grafo: FlowGraph) -> list[str]:
     return [n for n, _ in con_linea] + sin_linea
 
 
+def _citar_si_hace_falta(valor: str) -> str:
+    """
+    Envuelve el valor con `#quot;` si tiene `,`, `|` o `"`: sin eso, el parser
+    lo leería como el arranque de otro parámetro (`,`/`|`) o cerraría la
+    etiqueta del nodo a mitad de camino (`"`). Un valor sin ninguno de los
+    tres se escribe tal cual, como siempre — no le agrega comillas a los ~30
+    nodos existentes que no las necesitan.
+
+    `#quot;` y no una comilla cruda (issue #37): una comilla de más adentro
+    de la etiqueta de un nodo (`["…"]`) rompe mermaid.js apenas lo que sigue
+    se parece a su sintaxis (`{`, `(`, `[`, `>`) -- le pasaba ya a cualquier
+    valor citado que empezara así, con o sin comillas adentro. `#quot;` es
+    texto plano para su gramática y además se dibuja como `"`.
+
+    Cada `"` propia del valor se escapa como `#34;` -- una entidad *distinta*
+    de la del wrapper (issue #36/#37): si las dos usaran `#quot;`, este mismo
+    parser no podría distinguir "cierra la cita" de "una comilla más del
+    valor" (el intento anterior, que rompía justo ahí). Es lo que deja pasar
+    un `ParamType.JSON` serializado con `json.dumps` —con sus propias
+    comillas— como valor de un param, sin dejar de ser un diagrama Mermaid
+    válido. `verificar()` señala el único caso que esto deja sin resolver --
+    un valor citado que ya trae la secuencia literal `#quot;` o `#34;` sin
+    querer decir eso.
+    """
+    valor = str(valor)
+    if "," in valor or "|" in valor or '"' in valor:
+        return CITA_ENTIDAD + valor.replace('"', ESCAPE_COMILLA) + CITA_ENTIDAD
+    return valor
+
+
 def _nodo(node_id: str, nodo) -> str:
     if isinstance(nodo, StartNode):
         return f"{node_id}({nodo.label})"
 
     if isinstance(nodo, DecisionNode):
-        cuerpo = _con_display(nodo.display, nodo.variable)
+        definicion = nodo.variable
+        # Issue #37: mismo `| clave=valor` que una acción. Con espacio a los
+        # dos lados del pipe: la ayuda se trimea al parsear, a diferencia del
+        # valor de un param.
+        if nodo.manual:
+            definicion += " | manual"
+        if nodo.ayuda:
+            ayuda = _citar_si_hace_falta(nodo.ayuda.strip())
+            # Issue #38: mermaid.js no acepta `{`/`}` sueltas en un rombo.
+            ayuda = ayuda.replace("{", LLAVE_ABRE).replace("}", LLAVE_CIERRA)
+            definicion += f" | ayuda={ayuda}"
+        cuerpo = _con_display(nodo.display, definicion)
         return f"{node_id}{{{cuerpo}}}"
 
     if isinstance(nodo, ActionNode):
@@ -225,7 +321,7 @@ def _nodo(node_id: str, nodo) -> str:
         # `k1=v1, k2=v2`.
         definicion = nodo.fn.strip()
         for clave, valor in nodo.params.items():
-            definicion += f"| {clave}={valor}"
+            definicion += f"| {clave}={_citar_si_hace_falta(valor)}"
         # El espacio va sólo delante del primer pipe, donde no puede pegarse a
         # ningún valor: `fn` ya está trimeado.
         definicion = definicion.replace("|", " |", 1) if nodo.params else definicion

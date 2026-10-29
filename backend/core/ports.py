@@ -154,8 +154,20 @@ class FsPort(Protocol):
         """Contenido directo de una carpeta, ordenado por nombre."""
         ...
 
-    def walk(self, path: str) -> Iterator[FileInfo]:
-        """Todas las entradas bajo una carpeta, recursivo."""
+    def walk(self, path: str, max_depth: int | None = None) -> Iterator[FileInfo]:
+        """
+        Todas las entradas bajo una carpeta, recursivo.
+
+        Una carpeta se emite sin statear (`size`/`modified_at` en su default);
+        un archivo sí se statea -- es el costo real de un `walk` sin límite.
+
+        `max_depth` (issue #33) recorta cuántos niveles bajo `path` recorre:
+        `1` son sólo sus hijos directos, sin bajar más. Sin él (default,
+        `None`) es el árbol entero, como siempre. Sirve para "necesito los
+        nombres de acá abajo, nada más": sobre un share con decenas de miles
+        de entradas por nivel, `walk` sin este límite paga minutos en stats
+        que después se descartan.
+        """
         ...
 
     # Escritura
@@ -291,6 +303,172 @@ class ClockPort(Protocol):
         ...
 
 
+# ── Navegador ───────────────────────────────────────────────────────────
+
+
+@runtime_checkable
+class BrowserPort(Protocol):
+    """
+    Un navegador real: navegar, clickear, leer lo que la pantalla ya muestra.
+
+    Sesión, perfil persistente y login son decisión de negocio de quien usa
+    este port —un plugin—, nunca del adapter: el adapter no sabe qué es "estar
+    logueado" para ninguna app en particular, sólo maneja el navegador.
+    """
+
+    def goto(self, url: str, *, timeout: float | None = None) -> None:
+        """Navega a `url`. `PortError` si no carga a tiempo."""
+        ...
+
+    def click(self, selector: str, *, timeout: float | None = None) -> None:
+        """Clickea el primer elemento que matchea `selector`. `PortError` si no aparece a tiempo."""
+        ...
+
+    def leer_texto(self, selector: str, *, timeout: float | None = None) -> str:
+        """El texto visible del primer elemento que matchea `selector`."""
+        ...
+
+    def screenshot(self) -> bytes:
+        """La pantalla actual, como PNG."""
+        ...
+
+    @property
+    def available(self) -> bool:
+        """
+        Si el adapter puede operar en esta máquina.
+
+        Igual que `CryptoPort.available`: existe para poder decir "falta
+        instalar Playwright" antes de que un plugin intente usarlo, en vez de
+        fallar recién ahí.
+        """
+        ...
+
+
+# ── Ventana de escritorio ───────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class WindowInfo:
+    """
+    Una ventana ya encontrada, para no tener que rebuscarla en cada llamada.
+
+    `handle` es un token opaco del adapter: se recibe de `find_window` y se
+    devuelve tal cual en las llamadas siguientes, nunca se arma a mano ni se
+    interpreta. Es lo que permite que el mismo objeto de valor sirva sin
+    importar qué hay detrás del adapter.
+    """
+
+    handle: str
+    title: str
+    process: str = ""
+
+
+@runtime_checkable
+class WindowPort(Protocol):
+    """
+    Una ventana nativa de escritorio: encontrarla, clickear, tipear, leer.
+
+    Deliberadamente sin nombrar sistema operativo ni librería —mismo criterio
+    que el resto de los ports—: un plugin escrito contra esta forma no sabe,
+    ni le importa, qué hay detrás. Cuál adapter usar lo decide quien arma la
+    instalación (`adapters.build_default_adapters`, según el sistema donde
+    corre), nunca el plugin: así se declara el port una sola vez y funciona
+    igual en cualquier sistema con adapter propio.
+
+    Sin gestión de foco entre llamadas ni de coordenadas de pantalla: igual
+    que `BrowserPort` no resuelve sesión, este port no resuelve qué pasa si
+    dos automatizaciones compiten por la misma ventana. Eso es decisión de
+    quien lo use.
+
+    **Cómo se nombra un control.** Por su título, y opcionalmente con un tipo
+    delante separado por `:`, que el adapter traduce a lo que su plataforma
+    entienda por "tipo de control"::
+
+        "Guardar"           el primer control titulado así, sea lo que sea
+        "Button:Guardar"    sólo si además es un botón
+        "Document:"         un control de ese tipo, sin título
+
+    El tipo es opcional porque casi nunca hace falta: un botón con un título
+    propio se encuentra solo. Se vuelve necesario en los diálogos estándar
+    del sistema, donde el mismo texto titula dos controles distintos -- el
+    rótulo "Carpeta:" y el campo que rotula-- y sin el tipo no hay forma de
+    decir a cuál de los dos se le quiere escribir. El corte es en el primer
+    `:`, así que un título puede contener los suyos (`"Edit:Carpeta:"`).
+    """
+
+    def find_window(
+        self,
+        *,
+        title: str | None = None,
+        process: str | None = None,
+        timeout: float | None = None,
+    ) -> WindowInfo:
+        """
+        Busca una ventana por (parte de) su título o por el nombre de su
+        proceso. `PortError` si no aparece a tiempo, o si no se da ninguno de
+        los dos criterios.
+        """
+        ...
+
+    def click(
+        self,
+        window: WindowInfo,
+        control: str,
+        *,
+        button: str = "left",
+        timeout: float | None = None,
+    ) -> None:
+        """
+        Clickea el control identificado por `control` dentro de la ventana.
+        `PortError` si no aparece a tiempo, o si el adapter no puede hacer
+        click con `button` en esta plataforma (issue #25): un click distinto
+        del principal no siempre tiene un patrón de accesibilidad equivalente
+        a Invoke, y ahí depende de simular el mouse -- lo que #13 evitó para
+        el click de siempre-- o directamente no está disponible.
+        """
+        ...
+
+    def type_text(
+        self, window: WindowInfo, control: str, text: str, *, timeout: float | None = None
+    ) -> None:
+        """Escribe `text` en el control identificado por `control`."""
+        ...
+
+    def read_text(
+        self, window: WindowInfo, control: str | None = None, *, timeout: float | None = None
+    ) -> str:
+        """El texto de `control`, o de la ventana entera si no se da `control`."""
+        ...
+
+    def read_state(
+        self, window: WindowInfo, control: str, *, timeout: float | None = None
+    ) -> str | None:
+        """
+        `"on"` / `"off"` / `"indeterminate"` para un control con estado
+        (checkbox, radio, toggle) -- issue #25. `None` si el control no tiene
+        estado (un botón, una etiqueta): distinto de `PortError`, porque
+        preguntarle a un control que no es un toggle no es un fallo, es una
+        pregunta sin respuesta.
+
+        Existe aparte de `read_text` porque en UI Automation son cosas
+        distintas: el estado de un checkbox vive en `TogglePattern`, no en su
+        `Name` -- `read_text` seguiría devolviendo la etiqueta ("Lip Flat"),
+        tildado o no.
+        """
+        ...
+
+    @property
+    def available(self) -> bool:
+        """
+        Si el adapter puede operar en esta máquina.
+
+        Mismo criterio que `BrowserPort.available`: existe para poder decir
+        "no hay automatización de ventanas en este sistema" antes de que un
+        plugin intente usarla, en vez de fallar recién ahí.
+        """
+        ...
+
+
 # ── Criptografía ────────────────────────────────────────────────────────
 
 
@@ -328,6 +506,130 @@ class CryptoPort(Protocol):
         **antes** de que alguien intente guardar un secreto, en vez de fallar
         recién al guardarlo.
         """
+        ...
+
+
+# ── Geometría ───────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class NearestOnSurfaceResult:
+    """
+    Resultado de proyectar puntos sobre una superficie.
+
+    `points` y `distances` van paralelos a los puntos de entrada: el i-ésimo
+    punto proyectado y su distancia corresponden al i-ésimo punto pedido.
+    """
+
+    points: tuple[tuple[float, float, float], ...]
+    distances: tuple[float, ...]
+
+
+@runtime_checkable
+class GeometryPort(Protocol):
+    """
+    Cómputo geométrico sobre mallas (issue #19).
+
+    A propósito "vacío": el núcleo declara la forma y nunca bundlea un
+    adapter real detrás (ningún `trimesh`, ni ninguna otra librería "curada"
+    de geometría). Cada instalación que necesite geometría de verdad escribe
+    o instala su propio adapter — un fork curado, no algo de fábrica —, igual
+    que decide su propia `BrowserPort` con sesión persistente. Lo que el core
+    sí bindea siempre es un adapter nulo (`available=False`): el registry no
+    carga un plugin que pide un port sin ningún adapter atado, así que sin
+    esto el plugin ni siquiera podría cargar para devolver un error claro.
+
+    Un tool que use este port tiene que chequear `available` primero y
+    devolver un `ToolResult.err` explícito si no hay adapter real, en vez de
+    dejar que un `ImportError` de una librería de geometría viva adentro del
+    plugin.
+    """
+
+    def nearest_on_surface(
+        self, mesh_bytes: bytes, points: list[tuple[float, float, float]]
+    ) -> NearestOnSurfaceResult:
+        """
+        El punto más cercano en la superficie de `mesh_bytes` (un STL) para
+        cada punto de `points`, con su distancia. `PortError` si la malla no
+        se puede leer.
+        """
+        ...
+
+    @property
+    def available(self) -> bool:
+        """
+        Si hay un adapter de geometría real detrás en esta instalación.
+
+        Mismo criterio que `CryptoPort.available`: existe para que un tool
+        pueda decir "no hay adapter de geometría configurado" antes de
+        intentar nada, en vez de fallar a mitad de un cómputo.
+        """
+        ...
+
+
+# ── Socket TCP ──────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class SocketConnection:
+    """
+    Un handle opaco a una conexión TCP abierta — mismo patrón que `WindowInfo`:
+    lo devuelve `connect()` y se pasa tal cual a `send`/`recv`/`close`, nunca se
+    arma a mano ni se interpreta. Permite que el adapter guarde el socket real
+    sin que el plugin lo vea.
+    """
+
+    handle: str
+
+
+@runtime_checkable
+class SocketPort(Protocol):
+    """
+    TCP crudo, con TLS opcional. Nada de protocolo de aplicación encima.
+
+    Por qué existe (issue #39): se pidió un port para que un plugin lea bases
+    SQL externas (Postgres, MySQL) sin importar un driver directo. Un port que
+    hablara SQL no cerraba: a diferencia de `http`, SQL no es un protocolo
+    único -- cada motor tiene su propio driver nativo y su propio protocolo de
+    cable, así que ese port hubiera tenido que bundlear o dejar "null" varios
+    drivers heterogéneos, rompiendo la idea de "un port, una forma fija, sin
+    librería curada".
+
+    Bajar un nivel sí cierra: TCP **es** un protocolo único, igual que HTTP.
+    Este port da transporte -- abrir la conexión, mandar bytes, recibir
+    bytes -- y nada más. Un plugin que quiera hablarle a Postgres implementa el
+    protocolo de cable de Postgres (o el de Redis, o el de SMTP, o el que sea)
+    en Python puro sobre `send`/`recv`, exactamente como `UrllibHttpAdapter`
+    implementa HTTP sin ninguna librería curada. Es más trabajo que importar
+    `psycopg2`, pero es lo que mantiene al plugin del lado correcto de la regla
+    de arquitectura: un plugin nunca importa una librería externa, sólo pide
+    ports.
+
+    **Límite honesto:** no hay framing ni ayuda de protocolo. `recv` devuelve
+    hasta `size` bytes, nunca garantiza esa cantidad exacta -- mismo
+    comportamiento que `socket.recv` de la stdlib. Armar mensajes completos a
+    partir de un stream de bytes es trabajo del plugin, no de este port.
+    """
+
+    def connect(
+        self, host: str, port: int, *, tls: bool = False, timeout: float | None = None
+    ) -> SocketConnection:
+        """Abre la conexión. `PortError` si no se pudo conectar a tiempo."""
+        ...
+
+    def send(self, conn: SocketConnection, data: bytes) -> None:
+        """Manda `data` entero. `PortError` si la conexión se cortó."""
+        ...
+
+    def recv(self, conn: SocketConnection, size: int, *, timeout: float | None = None) -> bytes:
+        """
+        Hasta `size` bytes del otro lado. Cadena vacía si el otro lado cerró la
+        conexión (fin de stream) -- eso es un dato, no un `PortError`.
+        """
+        ...
+
+    def close(self, conn: SocketConnection) -> None:
+        """Cierra la conexión. No falla si ya estaba cerrada."""
         ...
 
 
@@ -370,7 +672,59 @@ class StoragePort(Protocol):
 
     def executemany(self, sql: str, rows: Iterable[Iterable]) -> int: ...
 
+    def columns(self, table: str) -> list[str]:
+        """
+        Los nombres de columna de `table`, en orden. Lista vacía si la tabla
+        no existe: las tablas válidas ya salen de `schema.SCHEMA`, así que
+        quien llama no necesita distinguir "no existe" de "no tiene
+        columnas" —ninguna tabla real del núcleo tiene cero columnas—.
+
+        Mismo límite honesto que el resto del port: en SQLite se resuelve
+        con `PRAGMA table_info`, así que portar el dialecto sigue siendo
+        trabajo de quien escriba el adapter nuevo, no algo que esto evite.
+        """
+        ...
+
     def close(self) -> None: ...
+
+
+# ── Archivo SQLite externo ──────────────────────────────────────────────
+
+
+@runtime_checkable
+class SqliteFilePort(Protocol):
+    """
+    Lectura de sólo lectura contra un archivo SQLite externo, por `path`.
+
+    Por qué existe y por qué no es `StoragePort` (issue #40): `StoragePort` es
+    la base **del propio Bot** -- su schema, sus migraciones, un solo archivo
+    fijo (`bot.db`) -- y es del núcleo, no declarable por un plugin. Este port
+    es lo opuesto: no tiene schema propio, no migra nada, abre **cualquier**
+    archivo `.sqlite`/`.db` que el flujo le indique, y siempre de sólo
+    lectura -- para que un plugin no pueda escribir por accidente en una base
+    de negocio de otra aplicación.
+
+    Nace de evaluar el port genérico para SQL externo que pedía el issue #39.
+    Postgres/MySQL hablan por red con su propio protocolo de cable, y eso
+    terminó resuelto aparte con `SocketPort` -- transporte crudo, sin dialecto
+    bundleado. SQLite no tiene nada de eso: es un archivo local que ya se abre
+    con `sqlite3` de la stdlib, la misma librería que usa `StoragePort`. No
+    tiene sentido demorar este caso -- mucho más chico y ya resuelto -- detrás
+    del trabajo de Postgres.
+
+    Mismo límite honesto que `StoragePort`: abstrae la *conexión*, no el
+    *dialecto* -- el SQL que se manda sigue siendo responsabilidad del plugin.
+    """
+
+    def query(self, path: str, sql: str, params: Iterable = ()) -> list[dict]:
+        """Filas como dicts. Nunca el tipo de fila del driver."""
+        ...
+
+    def one(self, path: str, sql: str, params: Iterable = ()) -> dict | None: ...
+
+    def columns(self, path: str, table: str) -> list[str]:
+        """Nombres de columna de `table`, en orden. Lista vacía si no existe."""
+        ...
 
 
 # ── Catálogo de ports conocidos ─────────────────────────────────────────
@@ -382,42 +736,66 @@ HTTP = "http"
 FS = "fs"
 PROCESS = "process"
 CLOCK = "clock"
+BROWSER = "browser"
+WINDOW = "window"
 STORAGE = "storage"
 CRYPTO = "crypto"
+GEOMETRY = "geometry"
+SOCKET = "socket"
+SQLITE_FILE = "sqlite_file"
 
 PORTS: dict[str, type] = {
     HTTP: HttpPort,
     FS: FsPort,
     PROCESS: ProcessPort,
     CLOCK: ClockPort,
+    BROWSER: BrowserPort,
+    WINDOW: WindowPort,
     STORAGE: StoragePort,
     CRYPTO: CryptoPort,
+    GEOMETRY: GeometryPort,
+    SOCKET: SocketPort,
+    SQLITE_FILE: SqliteFilePort,
 }
 
 # Ports que un plugin puede pedir. `storage` y `crypto` no están: los dos son
 # del núcleo. Un plugin con acceso al almacenamiento elegiría dónde persisten
 # sus datos —exactamente lo que `Resource` existe para impedir— y uno con
 # acceso al cifrado podría leer secretos que no le corresponden.
-PLUGIN_PORTS = frozenset({HTTP, FS, PROCESS, CLOCK})
+PLUGIN_PORTS = frozenset(
+    {HTTP, FS, PROCESS, CLOCK, BROWSER, WINDOW, GEOMETRY, SOCKET, SQLITE_FILE}
+)
 
 
 __all__ = [
+    "BROWSER",
     "CLOCK",
     "CRYPTO",
     "FS",
+    "GEOMETRY",
     "HTTP",
     "PLUGIN_PORTS",
     "PORTS",
     "PROCESS",
+    "SOCKET",
+    "SQLITE_FILE",
     "STORAGE",
+    "WINDOW",
+    "BrowserPort",
     "ClockPort",
     "CryptoPort",
     "FileInfo",
     "FsPort",
+    "GeometryPort",
     "HttpPort",
     "HttpResponse",
+    "NearestOnSurfaceResult",
     "PortError",
     "ProcessPort",
     "ProcessResult",
+    "SocketConnection",
+    "SocketPort",
     "StoragePort",
+    "WindowInfo",
+    "WindowPort",
 ]

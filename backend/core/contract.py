@@ -24,6 +24,7 @@ consume ese catálogo en vez de mantener una lista propia.
 
 from __future__ import annotations
 
+import json
 import traceback
 from dataclasses import dataclass, field
 from enum import Enum
@@ -34,6 +35,10 @@ CONTRACT_VERSION = 1
 # Statuses que el núcleo entiende al resolver aristas del flujo.
 STATUS_OK = "ok"
 STATUS_ERR = "err"
+# Issue #37: un *run* (nunca un tool) pausado en una decisión manual, esperando
+# que una persona elija la rama. No es un status de ToolResult ni de arista:
+# los plugins no lo ven, por eso no sube CONTRACT_VERSION.
+STATUS_WAITING = "waiting"
 
 
 class ParamType(str, Enum):
@@ -98,7 +103,24 @@ def _coerce(name: str, raw: Any, ptype: ParamType, choices: Sequence[str]) -> An
             return False
         raise ParamError(f"{name}: '{raw}' no es un booleano")
 
-    # JSON: ya viene estructurado desde el store de configuración.
+    if ptype is ParamType.JSON:
+        # Ya viene estructurado: desde el store de configuración, o desde
+        # resolve() cuando el template era un único {placeholder} que
+        # apuntaba a una lista/dict (ver flow/context.py).
+        if not isinstance(raw, str):
+            return raw
+        # Desde un .mmd siempre llega como texto: un literal JSON en el nodo,
+        # o un {var} que no pudo resolverse como objeto (texto con más cosas
+        # alrededor, o variable inexistente).
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            raise ParamError(
+                f"{name}: '{raw}' no es JSON válido. Un param JSON en el .mmd "
+                "va como literal JSON (ej. [1,2,3] o {\"a\":1}) o como {var} "
+                "de un output que sea lista/dict."
+            ) from None
+
     return raw
 
 
@@ -121,6 +143,41 @@ class Param:
     # Nombres anteriores del parámetro, para renombrar sin romper flujos.
     aliases: tuple[str, ...] = ()
     doc: str = ""
+    # Nombre de un Resource del mismo plugin cuyos items son los valores
+    # típicos de este param -- "de qué colección lo llena un buscador en vez
+    # de un campo de texto pelado" (`connection` de un `Resource("connections")`,
+    # por ejemplo). A diferencia de `choices`, es puramente informativo: no se
+    # valida contra él acá, porque a diferencia de una lista cerrada un
+    # `{variable}` tiene que poder seguir resolviendo a cualquier valor del
+    # nodo. `registry` sí valida, al cargar el plugin, que el nombre exista
+    # entre los `Resource` que el plugin declara -- un typo acá no debería
+    # verse recién como un buscador vacío en la pantalla.
+    #
+    # `options_from="core:<namespace>"` (issue #32) es una fuente que provee
+    # el núcleo en vez de un `Resource` del plugin -- "core:plugins" para los
+    # plugins instalados, por ejemplo -- para un param que nombra algo del
+    # lado del núcleo y no tiene una colección propia a la que apuntar
+    # (`bots.migrar`/`bots.comparar` nombrando una colección de *otro*
+    # plugin, el caso que motiva esto). `registry` no la busca entre los
+    # `Resource` del plugin dueño.
+    #
+    # Puede depender del valor elegido en otro param del mismo tool/acción:
+    # `core:resources:{plugin}` ofrece las colecciones del plugin que valga
+    # `{plugin}` en ese momento. Un solo placeholder, nombrando un solo param
+    # -- nunca una expresión ni algo anidado --, y `registry` valida al
+    # cargar que ese nombre exista entre los params de la misma declaración
+    # (mismo criterio que el resto de `options_from`: un typo no debería
+    # verse recién como un buscador vacío). Los params que un tool agrega en
+    # runtime vía `describe_extra_params` quedan afuera de ese chequeo -- no
+    # pasan por acá, nunca lo hicieron.
+    options_from: str = ""
+    # Ejemplo del valor, para mostrar adentro del campo vacío -- issue #29.
+    # Puramente informativo, como `options_from`: nunca se envía, nunca se
+    # valida contra él, y no reemplaza a `doc`. `doc` explica qué es el
+    # param; `placeholder` muestra cómo se escribe (`D:\casos\AP962\stl`
+    # dice más que cualquier `doc` sobre la forma de un PATH). Conviven: el
+    # ejemplo adentro del campo, la explicación abajo.
+    placeholder: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -132,6 +189,8 @@ class Param:
             "config_key": self.config_key,
             "aliases": list(self.aliases),
             "doc": self.doc,
+            "options_from": self.options_from,
+            "placeholder": self.placeholder,
         }
 
     def read_from(self, node_params: dict) -> Any:
@@ -195,6 +254,24 @@ class ToolManifest:
     # marcaría como error toda variable que venga de ahí.
     extra_outputs: bool = False
     extra_outputs_doc: str = ""
+    # True: el tool se declara pero no se ejecuta como tool. Lo resuelve el
+    # executor porque necesita estado del run (flow.ejecutar, flow.retry_gate).
+    # Está en el catálogo para que una UI pueda ofrecerlo; no está en el
+    # registry, así que nada lo puede invocar por ahí.
+    native: bool = False
+    # "skip" (default): en dry run, el tool no corre -- el executor asume
+    # STATUS_OK y sigue, como siempre. "run" (issue #34): el tool corre de
+    # verdad, con sus ports fs/http envueltos en modo de sólo lectura
+    # (`registry.execute(..., read_only=True)`), para que una decisión que
+    # depende de su output tenga con qué decidir en seco -- "leer un archivo
+    # y decidir según lo que dice" no puede resolverse sin correr el tool.
+    # Lo declara el autor del tool, que es quien sabe si sólo lee; el núcleo
+    # lo hace cumplir (no confía sólo en la declaración): un intento de
+    # escritura en modo sólo-lectura levanta PortError, no se ignora.
+    # Un tool que pide process/window/browser no tiene ningún modo de sólo
+    # lectura posible -- `registry` lo reporta al cargar y el executor lo
+    # trata como "skip" pase lo que declare, nunca arriesga tocar el mundo.
+    dry_run: str = "skip"
     contract: int = CONTRACT_VERSION
 
     def __post_init__(self) -> None:
@@ -227,6 +304,8 @@ class ToolManifest:
             # que es exactamente lo que el flag existe para evitar.
             "extra_outputs": self.extra_outputs,
             "extra_outputs_doc": self.extra_outputs_doc,
+            "native": self.native,
+            "dry_run": self.dry_run,
             "contract": self.contract,
         }
 
@@ -247,7 +326,9 @@ class ToolManifest:
         extras = {k: v for k, v in node_params.items() if k not in conocidos}
         return declarados, extras
 
-    def resolve_params(self, node_params: dict, config: dict) -> dict:
+    def resolve_params(
+        self, node_params: dict, config: dict, *, sin_resolver: frozenset[str] = frozenset()
+    ) -> dict:
         """
         Aplica el orden de precedencia del contrato y convierte tipos:
             param del nodo  →  config de la instancia  →  default del manifest
@@ -255,11 +336,22 @@ class ToolManifest:
         Levanta ParamError si falta un obligatorio o si un valor no convierte.
         Los params no declarados en el manifest se descartan: sin eso, un param
         sobrante de un nodo se filtraría al siguiente.
+
+        `sin_resolver` son las claves del nodo (issue #24) cuyo valor todavía
+        es un `{placeholder}` sin resolver -el dry run, cuando el nodo que lo
+        produce no corrió-: para esas se salta `_coerce` y se deja el texto
+        crudo tal cual, en vez de tiparlo como si fuera un valor final. Un
+        `seconds=abc` escrito a mano sigue fallando -no está en
+        `sin_resolver`, nadie dijo que dependiera de nada-; `rutas={rutas}`
+        no, porque no hay nada que juzgar todavía.
         """
         resolved: dict = {}
         for p in self.params:
             if p.present_in(node_params):
                 raw = p.read_from(node_params)
+                if p.name in sin_resolver or any(a in sin_resolver for a in p.aliases):
+                    resolved[p.name] = raw
+                    continue
             elif p.config_key and p.config_key in config:
                 raw = config[p.config_key]
             else:
@@ -467,6 +559,11 @@ class PluginManifest:
     # en el catálogo la superficie de riesgo real de cada plugin — quién puede
     # salir a la red, quién puede tocar el disco, quién puede correr comandos.
     ports: tuple[str, ...] = ()
+    # Dependencias de cómputo puro, una línea por librería como en un
+    # requirements.txt ("numpy==1.26.0"): nunca de I/O -- eso es un port. La
+    # instalación decide cómo resolverlas (issue #20); el núcleo sólo las
+    # declara y, en el catálogo, dice si están presentes en este intérprete.
+    requires: tuple[str, ...] = ()
     doc: str = ""
     contract: int = CONTRACT_VERSION
 
@@ -515,6 +612,7 @@ class PluginManifest:
             "resources": [r.to_dict() for r in self.resources],
             "actions": [a.to_dict() for a in self.actions],
             "ports": list(self.ports),
+            "requires": list(self.requires),
             "doc": self.doc,
             "contract": self.contract,
         }
@@ -551,6 +649,13 @@ class ToolResult:
     outputs se mergea al contexto del run bajo los nombres declarados en el
     manifest. loop activa la arista |loop| del flujo (reemplaza el flag global
     loopNext que antes vivía en el estado del navegador).
+
+    error_kind clasifica un error para quien dispara el run y no puede ver el
+    `message` de texto libre (issue #4): "red", "sesion_vencida", lo que el
+    tool quiera. String libre y no un enum cerrado a propósito — cada plugin
+    conoce sus propias causas de falla, y una taxonomía impuesta desde acá
+    envejecería mal. `None` es "sin clasificar", no "sin error": un `status`
+    err con `error_kind=None` sigue siendo un error.
     """
 
     status: str = STATUS_OK
@@ -558,6 +663,7 @@ class ToolResult:
     message: str = ""
     loop: bool = False
     traceback: str | None = None
+    error_kind: str | None = None
 
     @property
     def failed(self) -> bool:
@@ -568,8 +674,8 @@ class ToolResult:
         return cls(status=STATUS_OK, outputs=outputs, message=message)
 
     @classmethod
-    def err(cls, message: str, **outputs: Any) -> "ToolResult":
-        return cls(status=STATUS_ERR, outputs=outputs, message=message)
+    def err(cls, message: str, *, error_kind: str | None = None, **outputs: Any) -> "ToolResult":
+        return cls(status=STATUS_ERR, outputs=outputs, message=message, error_kind=error_kind)
 
     @classmethod
     def again(cls, message: str = "", **outputs: Any) -> "ToolResult":
@@ -592,6 +698,7 @@ class ToolResult:
             "message": self.message,
             "loop": self.loop,
             "traceback": self.traceback,
+            "error_kind": self.error_kind,
         }
 
 
@@ -721,11 +828,36 @@ class Tool(Protocol):
 
     Los plugins exponen una lista de instancias de Tool vía su entry point. El
     núcleo nunca los importa por nombre.
+
+    `describe_extra_params` es opcional (issue #27): un tool con
+    `extra_params=True` puede, además, saber describir esos params según lo
+    que el nodo ya eligió -- para `connections.llamar`, elegida una Action,
+    los `{placeholders}` de su url/headers/payload son params concretos, no
+    texto libre que hay que adivinar. No es parte obligatoria del Protocol
+    (la mayoría de los tools no lo necesita); `registry`/`Instance` lo
+    detectan con `getattr(tool, "describe_extra_params", None)`, mismo
+    criterio que ya usan los adapters de ventana para un método optativo
+    (`invoke` en el adapter de Windows, issue #13).
+
+    La firma, si se implementa: `(node_params: dict, leer_item: ItemReader) ->
+    tuple[Param, ...]`. `leer_item` es de sólo lectura y sólo ve items **con
+    los campos `secret` tapados** -nunca los valores de una colección, sólo
+    sus claves y lo que no sea sensible (issue #27, punto 3)-; devolver
+    `Param`s ya declarados es lo que le permite a quien dibuje el flujo
+    tratarlos con el mismo campo que los declarados, con su `doc` y su
+    `required`.
     """
 
     manifest: ToolManifest
 
     def run(self, ctx: ToolContext) -> ToolResult: ...
+
+
+# `leer_item(coleccion, clave, key_field="name")` -- mismo shape que
+# `ToolContext.resource`, para que sea reconocible, pero de sólo lectura y sin
+# secretos: lo que `Instance.describe_extra_params` liga antes de llamar al
+# tool (issue #27).
+ItemReader = Callable[..., dict | None]
 
 
 @dataclass
@@ -734,10 +866,15 @@ class FunctionTool:
     Adaptador para escribir un tool como una función suelta.
 
         MOVER = FunctionTool(manifest=..., fn=lambda ctx: ToolResult.ok(...))
+
+    `describe_extra_params` es el mismo optativo de `Tool` (issue #27), acá
+    como campo en vez de método porque `FunctionTool` ya se escribe así: una
+    función suelta, no una clase.
     """
 
     manifest: ToolManifest
     fn: Callable[[ToolContext], ToolResult]
+    describe_extra_params: Callable[[dict, ItemReader], tuple[Param, ...]] | None = None
 
     def run(self, ctx: ToolContext) -> ToolResult:
         return self.fn(ctx)

@@ -12,21 +12,32 @@ no coincide; y el día que la base viva en otra parte, la mitad de la instalaci�
 se habría quedado en el disco local.
 
 Las claves son las que declaran los plugins como `Setting`. El núcleo no conoce
-ninguna.
+ninguna — ni siquiera cuáles son `secret`: eso se lo preguntan desde afuera en
+cada escritura (`secret_keys`, ver `ToolRegistry.secret_setting_keys`), y acá
+sólo se cifra lo que esa función marque, sin construir una noción propia de
+qué plugin declara qué (issue #8).
 """
 
 from __future__ import annotations
 
 import os
 import time
-from typing import Any
+from typing import Any, Callable, Iterable
 
 from .jsonio import dumps, loads
-from .ports import StoragePort
+from .ports import CryptoPort, PortError, StoragePort
 from .schema import LOCAL_ORG
 
 # Prefijo de las variables de entorno que pisan la configuración guardada.
 ENV_PREFIX = "BOT_"
+
+# Marca de un valor cifrado, para distinguirlo de un dict cualquiera que un
+# plugin guardó como valor de un Setting. Ver `_envolver`/`_desenvolver`.
+_CLAVE_CIFRADO = "__secret__"
+
+
+class ConfigError(Exception):
+    """Operación inválida sobre la configuración."""
 
 
 class ConfigStore:
@@ -38,10 +49,49 @@ class ConfigStore:
     cada `UPDATE` toca sólo lo suyo.
     """
 
-    def __init__(self, db: StoragePort, org: str = LOCAL_ORG) -> None:
+    def __init__(
+        self,
+        db: StoragePort,
+        crypto: CryptoPort | None = None,
+        *,
+        secret_keys: Callable[[], Iterable[str]] | None = None,
+        org: str = LOCAL_ORG,
+    ) -> None:
         self.db = db
         self.org = org
+        # El cifrado entra por un port, igual que en EnvStore. `secret_keys`
+        # es una función y no un set fijo (issue #8): qué Setting es
+        # `secret` lo declaran los plugins, y `ConfigStore` no los conoce —
+        # sólo le preguntan, en cada escritura, cuáles hay que cifrar.
+        self.crypto = crypto
+        self._secret_keys = secret_keys or (lambda: ())
         self._cache: dict | None = None
+
+    def _cifrar(self, valor: Any) -> str:
+        if self.crypto is None:
+            raise ConfigError(
+                "no hay cifrado configurado para guardar un setting secreto"
+            )
+        try:
+            return self.crypto.encrypt(dumps(valor))
+        except PortError as exc:
+            raise ConfigError(str(exc)) from exc
+
+    def _descifrar(self, cifrado: str) -> Any:
+        """El valor original, o None si no se puede descifrar (otra llave)."""
+        try:
+            return loads(self.crypto.decrypt(cifrado), None)
+        except Exception:
+            return None
+
+    def _envolver(self, valor: Any) -> dict:
+        return {_CLAVE_CIFRADO: self._cifrar(valor)}
+
+    def _desenvolver(self, valor: Any) -> Any:
+        """El valor en claro si venía cifrado; `valor` tal cual si no."""
+        if isinstance(valor, dict) and set(valor) == {_CLAVE_CIFRADO}:
+            return self._descifrar(valor[_CLAVE_CIFRADO])
+        return valor
 
     # ── Lectura ─────────────────────────────────────────────────────────
 
@@ -56,12 +106,19 @@ class ConfigStore:
         return dict(datos)
 
     def _stored(self) -> dict:
-        """Lo que hay en la base, sin el entorno encima."""
+        """
+        Lo que hay en la base, sin el entorno encima y ya descifrado.
+
+        Descifrar acá y no en un método aparte es lo que hace que `read()` —
+        y por lo tanto `effective_config()`, que es lo que arma `ctx.config`
+        para un tool— vea siempre el valor en claro, sin que quien llama
+        tenga que saber qué claves son secretas.
+        """
         filas = self.db.query(
             "SELECT key, value FROM settings WHERE org = ? ORDER BY key", (self.org,)
         )
         # Un valor corrupto no tumba la lectura: el doctor reporta lo que falte.
-        return {f["key"]: loads(f["value"], None) for f in filas}
+        return {f["key"]: self._desenvolver(loads(f["value"], None)) for f in filas}
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.read().get(key, default)
@@ -98,9 +155,16 @@ class ConfigStore:
             if k not in del_entorno
         }
 
+        secretas = set(self._secret_keys())
         ahora = time.time()
         filas = [
-            (self.org, clave, dumps(valor), ahora) for clave, valor in persistible.items()
+            (
+                self.org,
+                clave,
+                dumps(self._envolver(valor) if clave in secretas else valor),
+                ahora,
+            )
+            for clave, valor in persistible.items()
         ]
         if filas:
             self.db.executemany(

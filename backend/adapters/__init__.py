@@ -17,19 +17,47 @@ acá, junta y explícita: cambiar de `urllib` a `requests` es escribir
 
 from __future__ import annotations
 
+import platform
+
 from backend.core import ports
 
+from .browser_playwright import PlaywrightBrowserAdapter
 from .clock_system import SystemClockAdapter
 from .crypto_fernet import FernetCryptoAdapter
 from .fs_local import LocalFsAdapter
+from .geometry_null import NullGeometryAdapter
 from .http_urllib import UrllibHttpAdapter
 from .process_subprocess import SubprocessAdapter
+from .socket_tcp import TcpSocketAdapter
+from .sqlite_file import ExternalSqliteAdapter
 from .storage_sqlite import IN_MEMORY, SqliteStorageAdapter
+from .window_atspi import AtspiWindowAdapter
+from .window_pywinauto import PywinautoWindowAdapter
+from .window_unsupported import UnsupportedWindowAdapter
+
+
+def _build_window_adapter():
+    """
+    Un solo port (`window`), enrutado al adapter del sistema operativo donde
+    corre esta instalación.
+
+    Es lo que le ahorra a un plugin declarar el port dos veces: lo pide una
+    sola vez y en Windows le llega un adapter, en Linux otro, sin que el
+    plugin lo sepa ni lo elija.
+    """
+    sistema = platform.system()
+    if sistema == "Windows":
+        return PywinautoWindowAdapter()
+    if sistema == "Linux":
+        return AtspiWindowAdapter()
+    return UnsupportedWindowAdapter(sistema)
 
 
 def build_default_adapters(
     *,
     fs_root: str | None = None,
+    fs_roots: dict[str, str] | None = None,
+    fs_denied: list[str] | None = None,
     http_timeout: float | None = None,
     process_timeout: float | None = None,
     process_allowlist: list[str] | None = None,
@@ -38,31 +66,57 @@ def build_default_adapters(
     Los adapters que se le dan al registry, por nombre de port.
 
     Los parámetros acotan la superficie de riesgo de una instalación concreta:
-    `fs_root` encierra el filesystem en un subárbol y `process_allowlist` limita
-    qué ejecutables se pueden correr. Los dos son opcionales porque una
-    instalación legítima puede necesitar el disco entero, pero un entorno de
-    test o acotado debería usarlos.
+    `fs_root`/`fs_roots` encierra el filesystem en uno o varios subárboles,
+    `fs_denied` (issue #26) le saca subárboles a eso -gana sobre cualquier
+    raíz, incluida una que los contenga- y `process_allowlist` limita qué
+    ejecutables se pueden correr. Son opcionales porque una instalación
+    legítima puede necesitar el disco entero, pero un entorno de test o
+    acotado debería usarlos.
+
+    `fs_roots` (issue #23: varias raíces con alias) gana sobre `fs_root` si
+    los dos llegan — no debería pasar, `BootConfig.fs_roots_efectivos` ya
+    resuelve esa precedencia antes de llegar acá, pero conviene que esta
+    función sea igual de tolerante si alguien la llama directo.
     """
     return {
         ports.HTTP: UrllibHttpAdapter(
             **({"default_timeout": http_timeout} if http_timeout else {})
         ),
-        ports.FS: LocalFsAdapter(root=fs_root),
+        ports.FS: LocalFsAdapter(root=fs_root, roots=fs_roots, denied=fs_denied),
         ports.PROCESS: SubprocessAdapter(
             **({"default_timeout": process_timeout} if process_timeout else {}),
             allowlist=process_allowlist,
         ),
         ports.CLOCK: SystemClockAdapter(),
+        # Sin perfil persistente por defecto: una instalación que necesite
+        # sesión entre corridas inyecta su propio PlaywrightBrowserAdapter
+        # (ver docstring del adapter) en vez de configurarlo acá.
+        ports.BROWSER: PlaywrightBrowserAdapter(),
+        ports.WINDOW: _build_window_adapter(),
+        # "Vacío" a propósito (issue #19): el core no trae ningún adapter de
+        # geometría real de fábrica. Una instalación que necesite cómputo
+        # geométrico inyecta el suyo con
+        # `Instance(adapters={**build_default_adapters(), "geometry": ...})`.
+        ports.GEOMETRY: NullGeometryAdapter(),
+        ports.SOCKET: TcpSocketAdapter(),
+        ports.SQLITE_FILE: ExternalSqliteAdapter(),
     }
 
 
 __all__ = [
     "IN_MEMORY",
+    "AtspiWindowAdapter",
+    "ExternalSqliteAdapter",
     "FernetCryptoAdapter",
     "LocalFsAdapter",
+    "NullGeometryAdapter",
+    "PlaywrightBrowserAdapter",
+    "PywinautoWindowAdapter",
     "SqliteStorageAdapter",
     "SubprocessAdapter",
     "SystemClockAdapter",
+    "TcpSocketAdapter",
+    "UnsupportedWindowAdapter",
     "UrllibHttpAdapter",
     "build_default_adapters",
 ]

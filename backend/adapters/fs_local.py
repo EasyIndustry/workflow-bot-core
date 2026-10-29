@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
-from typing import Iterator
+from typing import Iterable, Iterator
 
 from backend.core.ports import FileInfo, PortError
 
@@ -29,24 +29,128 @@ class LocalFsAdapter:
     con él, salirse levanta `PortError` antes de tocar nada. Es opcional porque
     una instalación legítima puede necesitar todo el disco, pero un test o un
     entorno acotado debería usarlo siempre.
+
+    `roots` es la forma general (issue #23): varias raíces con alias, para
+    cuando una sola no alcanza —un workspace local y un share de red a la
+    vez—. La primera es la raíz por defecto, a la que resuelve una ruta
+    relativa y cualquier ruta absoluta sin alias que caiga adentro; el resto
+    se alcanzan con `alias:resto` (`origen:MODELOS/pieza.stl`). `root` sigue
+    siendo el atajo para el caso de una sola raíz —de hecho, es exactamente
+    `roots={"": root}`— y los dos son mutuamente excluyentes.
+
+    `denied` (issue #26) son subárboles que nunca se alcanzan, ganen a lo que
+    ganen: ni una raíz que los contenga, ni un alias. Es lo que permite que
+    una raíz sea `D:\\` entero sin exponer la carpeta de la propia instalación
+    —su base, sus secretos, los plugins que el núcleo carga, y `boot.env`,
+    que declara los límites mismos—: sin esto, la única forma de proteger esa
+    carpeta era prohibir toda raíz que la contuviera, y el acotamiento se
+    volvía todo o nada. `quien arma la instalación` (`build_default_adapters`)
+    la arma sola a partir de lo que ya sabe de sí misma; no es algo que un
+    plugin declare ni que dependa de una clave de `boot.env` que alguien se
+    pueda olvidar de poner.
     """
 
-    def __init__(self, root: str | Path | None = None) -> None:
-        self.root = Path(root).resolve() if root else None
+    def __init__(
+        self,
+        root: str | Path | None = None,
+        *,
+        roots: dict[str, str | Path] | None = None,
+        denied: Iterable[str | Path] | None = None,
+    ) -> None:
+        if roots:
+            self.roots: dict[str, Path] = {
+                alias: Path(ruta).resolve() for alias, ruta in roots.items()
+            }
+        elif root:
+            self.roots = {"": Path(root).resolve()}
+        else:
+            self.roots = {}
+        # Compatibilidad: código que ya leía `.root` (un adapter con una sola
+        # raíz, con o sin alias) sigue viendo la de por defecto.
+        self.root = next(iter(self.roots.values()), None)
+        self.denied: list[Path] = [Path(d).resolve() for d in (denied or ())]
 
     # ── Resolución de rutas ─────────────────────────────────────────────
+
+    def _alias_y_resto(self, crudo: str) -> tuple[str | None, str]:
+        """
+        `alias:resto` sólo si `alias` es una de las raíces declaradas —nunca
+        una letra de unidad de Windows (`C:\\...`), que no es un alias que
+        nadie haya declarado y tiene que seguir resolviendo como ruta
+        absoluta de siempre.
+
+        Un alias mal escrito (`origne:pieza.stl`) levanta `PortError` en vez
+        de tratarse en silencio como una ruta relativa a la raíz por
+        defecto: sin esto, un typo escribe donde no debía sin que nada avise
+        —en Linux crea el archivo `origne:pieza.stl` adentro del workspace;
+        sólo en Windows falla, y por el SO, no por el port— (issue #23,
+        verificado en QA sobre v0.3.1-beta.3). Se distingue de una letra de
+        unidad por longitud: ninguna es de una sola letra, y una ruta que de
+        casualidad tenga un ":" en medio de un segmento (no al principio) ni
+        siquiera llega a candidata, porque ya trae una barra antes.
+        """
+        if ":" not in crudo:
+            return None, crudo
+        posible, resto = crudo.split(":", 1)
+        posible = posible.strip()
+        if posible in self.roots:
+            return posible, resto.lstrip("\\/")
+        if not posible or len(posible) == 1 or "/" in posible or "\\" in posible:
+            return None, crudo
+        alias_declarados = [a for a in self.roots if a]
+        detalle = ", ".join(alias_declarados) if alias_declarados else "ninguno (sólo la raíz por defecto)"
+        raise PortError(f"raíz desconocida: '{posible}'. Alias declarados: {detalle}")
 
     def _p(self, path: str) -> Path:
         crudo = str(path or "").strip()
         if not crudo:
             raise PortError("ruta vacía")
-        resuelta = Path(crudo).expanduser()
-        if self.root is not None:
-            absoluta = (self.root / resuelta).resolve() if not resuelta.is_absolute() else resuelta.resolve()
-            if not _dentro(absoluta, self.root):
-                raise PortError(f"ruta fuera del árbol permitido: {crudo}")
+        if not self.roots:
+            candidata = Path(crudo).expanduser()
+            self._chequear_denegada(candidata.resolve(), crudo)
+            return candidata
+
+        alias, resto = self._alias_y_resto(crudo)
+        resuelta = Path(resto).expanduser()
+
+        if alias is not None:
+            base = self.roots[alias]
+            absoluta = (base / resuelta).resolve() if not resuelta.is_absolute() else resuelta.resolve()
+            if not _dentro(absoluta, base):
+                raise PortError(f"ruta fuera del árbol permitido de '{alias}': {crudo}")
+            self._chequear_denegada(absoluta, crudo)
             return absoluta
-        return resuelta
+
+        if resuelta.is_absolute():
+            absoluta = resuelta.resolve()
+            if not any(_dentro(absoluta, base) for base in self.roots.values()):
+                nombres = ", ".join(str(b) for b in self.roots.values())
+                raise PortError(f"ruta fuera del árbol permitido ({nombres}): {crudo}")
+            self._chequear_denegada(absoluta, crudo)
+            return absoluta
+
+        # Relativa, sin alias: resuelve contra la raíz por defecto — la
+        # primera declarada, ya sea `root` o la primera de `roots`. Se
+        # revalida igual que la absoluta: un "../../etc" también tiene que
+        # quedar adentro después de resolver los ".." — el chequeo no es
+        # sólo para lo que llega ya absoluto.
+        base_default = next(iter(self.roots.values()))
+        absoluta = (base_default / resuelta).resolve()
+        if not _dentro(absoluta, base_default):
+            raise PortError(f"ruta fuera del árbol permitido: {crudo}")
+        self._chequear_denegada(absoluta, crudo)
+        return absoluta
+
+    def _chequear_denegada(self, absoluta: Path, crudo: str) -> None:
+        """
+        Issue #26: gana sobre cualquier raíz, sin importar alias ni orden.
+        El mensaje se distingue a propósito de "fuera del árbol permitido":
+        no es que falte una raíz que lo cubra, es que esa carpeta no se da
+        nunca -- agregar una raíz no lo arregla, y el mensaje tiene que
+        decirlo para no mandar a buscar por el lado que no es.
+        """
+        if any(_dentro(absoluta, negada) for negada in self.denied):
+            raise PortError(f"ruta de la instalación, fuera del alcance de un flujo: {crudo}")
 
     # ── Consulta ────────────────────────────────────────────────────────
 
@@ -78,10 +182,11 @@ class LocalFsAdapter:
             raise PortError(f"no se pudo listar {destino}: {exc.strerror or exc}") from exc
         return [_info(e, _stat_o_none(e)) for e in entradas]
 
-    def walk(self, path: str) -> Iterator[FileInfo]:
+    def walk(self, path: str, max_depth: int | None = None) -> Iterator[FileInfo]:
         destino = self._p(path)
         if not destino.is_dir():
             raise PortError(f"no es una carpeta: {destino}")
+        profundidad_raiz = len(destino.parts)
         for base, carpetas, archivos in os.walk(destino):
             carpetas.sort()
             archivos.sort()
@@ -91,6 +196,12 @@ class LocalFsAdapter:
             for nombre in archivos:
                 entrada = raiz / nombre
                 yield _info(entrada, _stat_o_none(entrada), is_dir=False)
+            # Issue #33: podar en el lugar es lo que `os.walk` respeta para no
+            # bajar más -- los hijos de `raiz` ya se emitieron arriba (son el
+            # nivel `len(raiz.parts) - profundidad_raiz + 1`); si eso llega al
+            # límite, no hace falta entrar a ninguno de ellos.
+            if max_depth is not None and (len(raiz.parts) - profundidad_raiz + 1) >= max_depth:
+                carpetas.clear()
 
     # ── Escritura ───────────────────────────────────────────────────────
 

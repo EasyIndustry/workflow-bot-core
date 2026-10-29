@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
 
 permissions:
   contents: write
@@ -18,9 +19,17 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Escribir backend/VERSION desde el tag
+        # Issue #5 (seguimiento): un backend/ vendorizado desde este release
+        # -- copiado a mano, sin pasar por pip install -- no tiene .dist-info
+        # de dónde leer la versión. Este archivo viaja en el árbol (wheel,
+        # sdist, y el checkout de este mismo job) para que
+        # _version_del_nucleo() tenga de dónde leerla igual.
+        run: echo "${GITHUB_REF_NAME#v}" > backend/VERSION
+
       - name: Correr la suite antes de publicar
         run: |
-          pip install -e ".[crypto,mcp,dev]"
+          pip install -e ".[crypto,mcp,browser,window,dev]"
           pytest backend/tests -q
 
       - name: Armar el paquete (sdist + wheel)
@@ -32,6 +41,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" dist/* \
-            --title "${{ github.ref_name }}" \
-            --generate-notes
+          # Un tag con sufijo (v0.2.0-beta.1, v0.2.0-rc.1) es un pre-release:
+          # se corta desde develop para probar features en curso, sin tocar
+          # lo que instala quien pinea una versión estable.
+          flags=()
+          if [[ "${{ github.ref_name }}" == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+
+          # Si el tag se creó desde la web ("Draft a new release") el release
+          # ya existe antes de que este workflow corra: gh release create
+          # fallaría con "already exists". En ese caso sólo faltan subirle
+          # los artefactos armados acá.
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            gh release upload "${{ github.ref_name }}" dist/* --clobber
+          else
+            gh release create "${{ github.ref_name }}" dist/* \
+              --title "${{ github.ref_name }}" \
+              --generate-notes \
+              "${flags[@]}"
+          fi

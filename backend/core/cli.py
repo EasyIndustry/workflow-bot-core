@@ -21,6 +21,9 @@ en el problema de dos motores divergiendo.
     python -m backend.core run mi-flujo --case 42 --dry-run
     python -m backend.core action mi_plugin probar --params '{"url": "..."}'
     python -m backend.core trace <run_id>
+    python -m backend.core runs --status waiting
+    python -m backend.core resume <run_id> <valor>
+    python -m backend.core discard <run_id>
 """
 
 from __future__ import annotations
@@ -34,6 +37,8 @@ from . import boot
 from .doctor import format_text, run_checks
 from .flow.parser import Severity, parse_flow
 from .instance import Instance, WorkflowNotFound
+from .resources import ResourceError
+from .stores import StoreError
 from .users import KINDS, UserError
 
 # La raíz de la instalación es `backend/`: ahí vive `data/`.
@@ -107,6 +112,9 @@ def cmd_plugins(inst: Instance, args) -> int:
             print(f"   [{r['name']}] {r['label']} ({campos})")
         for a in p["actions"]:
             print(f"   ▸ {a['name']}: {a['label']}")
+        for r in p["requires"]:
+            estado = "ok" if r["present"] else "FALTA"
+            print(f"   · requiere {r['spec']} [{estado}]")
         print()
 
     if catalogo["errors"]:
@@ -119,6 +127,10 @@ def cmd_plugins(inst: Instance, args) -> int:
 
 def cmd_workflows(inst: Instance, args) -> int:
     flujos = inst.list_workflows()
+    if args.json:
+        print(json.dumps(flujos, indent=2, ensure_ascii=False))
+        return 0
+
     if not flujos:
         print("No hay flujos guardados. Agregá uno con: python -m backend.core add archivo.mmd")
         return 0
@@ -128,6 +140,119 @@ def cmd_workflows(inst: Instance, args) -> int:
         print(f"{carpeta}{w['name']}{estado}")
         if w.get("description"):
             print(f"  {w['description']}")
+    return 0
+
+
+def cmd_flow(inst: Instance, args) -> int:
+    """El .mmd guardado con sus diagnósticos, en una sola llamada (issue #17)."""
+    detalle = inst.get_flow(args.name)
+    if detalle is None:
+        mensaje = f'No existe el flujo "{args.name}"'
+        if args.json:
+            print(json.dumps({"error": mensaje}, ensure_ascii=False))
+        else:
+            print(mensaje, file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(detalle, indent=2, ensure_ascii=False))
+        return 0 if detalle["runnable"] else 1
+
+    print(f"{detalle['name']}: {'ok' if detalle['runnable'] else 'con errores'}")
+    for d in detalle["diagnostics"]:
+        etiqueta = "ERROR" if d["severity"] == "error" else "aviso"
+        print(f"  {etiqueta}: {d['message']}")
+    return 0 if detalle["runnable"] else 1
+
+
+def cmd_runs(inst: Instance, args) -> int:
+    """Runs ya ejecutados, resumidos (issue #17): "qué corrió y cómo terminó"."""
+    try:
+        if args.status == "waiting":
+            # Con el `waiting` de cada uno: lo que hace falta para retomarlo.
+            runs = inst.list_waiting(
+                limit=args.limit, case_id=args.case, flow=args.flow, offset=args.offset
+            )
+        else:
+            runs = inst.list_runs(
+                case_id=args.case,
+                source=args.source,
+                only_failed=args.only_failed,
+                limit=args.limit,
+                status=args.status,
+                actor=args.actor,
+                flow=args.flow,
+                offset=args.offset,
+            )
+    except StoreError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(runs, indent=2, ensure_ascii=False))
+        return 0
+
+    if not runs:
+        print("No hay runs.")
+        return 0
+    for r in runs:
+        print(f"{r['run_id']}  {r['flow']}  {r['status']}  case={r['case_id']}")
+    return 0
+
+
+def cmd_case_log(inst: Instance, args) -> int:
+    """El registro de una fila, cruzando todos sus runs (issue #17)."""
+    registro = inst.case_log(args.case_id, limit=args.limit)
+    if args.json:
+        print(json.dumps(registro, indent=2, ensure_ascii=False))
+        return 0
+
+    for entrada in registro["entries"]:
+        marca = {"info": " ", "warning": "!", "error": "×"}.get(entrada.get("level"), " ")
+        print(f"{entrada.get('t', '')} {marca} {entrada.get('message', '')}")
+    if registro["truncated"]:
+        print(f"... ({registro['total']} líneas en total)")
+    return 0
+
+
+def cmd_resource_item(inst: Instance, args) -> int:
+    """Escribe o borra un item de una colección de un plugin (issue #17)."""
+    try:
+        if args.delete:
+            inst.delete_resource_item(args.plugin, args.resource, args.key)
+            resultado = {"ok": True, "deleted": args.key}
+        else:
+            try:
+                item = json.loads(args.data) if args.data else {}
+            except json.JSONDecodeError as exc:
+                print(f"--data no es JSON válido: {exc}", file=sys.stderr)
+                return 2
+            if not isinstance(item, dict):
+                print("--data tiene que ser un objeto JSON", file=sys.stderr)
+                return 2
+            resultado = {"ok": True, "item": inst.write_resource_item(
+                args.plugin, args.resource, args.key, item
+            )}
+    except ResourceError as exc:
+        if args.json:
+            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+            return 2
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(resultado, indent=2, ensure_ascii=False))
+        return 0
+    print(resultado)
+    return 0
+
+
+def cmd_describe(inst: Instance, args) -> int:
+    """La foto de la instalación en una llamada (issue #17)."""
+    datos = inst.describe_installation()
+    if args.json:
+        print(json.dumps(datos, indent=2, ensure_ascii=False))
+        return 0
+    print(datos["resumen"])
     return 0
 
 
@@ -141,7 +266,14 @@ def cmd_add(inst: Instance, args) -> int:
         print(mensaje, file=sys.stderr)
         return 2
 
-    wf = inst.workflows.save_mmd(args.name or path.stem, path.read_text(encoding="utf-8"))
+    wf = inst.workflows.save_mmd(
+        args.name or path.stem,
+        path.read_text(encoding="utf-8"),
+        folder=args.folder,
+        state=args.state,
+        description=args.description,
+        source=args.source,
+    )
     if args.json:
         print(json.dumps({
             "ok": True,
@@ -149,6 +281,7 @@ def cmd_add(inst: Instance, args) -> int:
             "folder": wf.folder,
             "state": wf.state,
             "description": wf.description,
+            "source": wf.source,
         }, ensure_ascii=False))
         return 0
 
@@ -233,6 +366,7 @@ def cmd_run(inst: Instance, args) -> int:
             actor=args.actor,
             dry_run=args.dry_run,
             persist=not args.no_persist,
+            allow_broken=args.allow_broken,
         )
     except UserError as exc:
         print(str(exc), file=sys.stderr)
@@ -249,12 +383,55 @@ def cmd_run(inst: Instance, args) -> int:
         marca = {"info": " ", "warning": "!", "error": "×"}.get(entrada.level, " ")
         print(f"{entrada.t} {marca} {entrada.message}")
 
+    _imprimir_final(resultado)
+    return 0 if not resultado.failed else 1
+
+
+def _imprimir_final(resultado) -> None:
     print()
     print(f"run {resultado.run_id} · {resultado.status}"
           + (" (dry run)" if resultado.dry_run else ""))
     if resultado.failed:
         print(f"falló en {resultado.failed_node}: {resultado.message}")
+    if resultado.waiting:
+        espera = resultado.waiting
+        print(f"esperando decisión en {espera['node_id']} ({espera['variable']})")
+        if espera.get("ayuda"):
+            print(f"  {espera['ayuda']}")
+        for opcion in espera["options"]:
+            print(f"  {opcion['value']:<12} → {opcion['to']} {opcion['to_display']}".rstrip())
+        print(f"retomar: resume {resultado.run_id} <valor>")
+
+
+def cmd_resume(inst: Instance, args) -> int:
+    """Retoma un run pausado en una decisión manual (issue #37)."""
+    try:
+        resultado = inst.resume(args.run_id, args.value, actor=args.actor)
+    except (UserError, StoreError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 3
+    if args.json:
+        print(json.dumps(resultado.to_dict(), indent=2, ensure_ascii=False))
+        return 0 if not resultado.failed else 1
+    for entrada in resultado.logs:
+        marca = {"info": " ", "warning": "!", "error": "×"}.get(entrada.level, " ")
+        print(f"{entrada.t} {marca} {entrada.message}")
+    _imprimir_final(resultado)
     return 0 if not resultado.failed else 1
+
+
+def cmd_discard(inst: Instance, args) -> int:
+    """Cierra una espera sin seguir (issue #37)."""
+    try:
+        resultado = inst.discard_wait(args.run_id, actor=args.actor)
+    except (UserError, StoreError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 3
+    if args.json:
+        print(json.dumps(resultado.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        print(f"run {resultado.run_id} · {resultado.status}: {resultado.message}")
+    return 0
 
 
 def cmd_action(inst: Instance, args) -> int:
@@ -275,7 +452,9 @@ def cmd_action(inst: Instance, args) -> int:
         print("--params tiene que ser un objeto JSON", file=sys.stderr)
         return 2
 
-    resultado, registro = inst.run_action(args.plugin, args.action, params)
+    resultado, registro = inst.run_action(
+        args.plugin, args.action, params=params, item=args.item
+    )
 
     if args.json:
         print(json.dumps({
@@ -289,6 +468,74 @@ def cmd_action(inst: Instance, args) -> int:
         print(f"{marca} {mensaje}")
     print(f"\n{resultado.status}" + (f": {resultado.message}" if resultado.message else ""))
     return 0 if not resultado.failed else 1
+
+
+def cmd_resources(inst: Instance, args) -> int:
+    """
+    Items de una colección de un plugin, con los campos `secret` tapados.
+
+    Es lo que hace falta antes de poder pedir un item por nombre: sin esto, un
+    agente no tiene forma de saber qué "sources" existen ya guardadas. Nunca
+    ejecuta nada ni resuelve `{env.CLAVE}` — para eso está `action --item`.
+    """
+    definicion = inst.resource_definition(args.plugin, args.resource)
+    if definicion is None:
+        print(
+            f'no hay una colección "{args.resource}" en el plugin "{args.plugin}"',
+            file=sys.stderr,
+        )
+        return 2
+
+    items = inst.resource_items_masked(args.plugin, args.resource)
+
+    if args.json:
+        print(json.dumps({
+            "plugin": args.plugin,
+            "resource": args.resource,
+            "key_field": definicion.key_field,
+            "fields": [f.to_dict() for f in definicion.fields],
+            "items": items,
+        }, indent=2, ensure_ascii=False))
+        return 0
+
+    print(f"{args.plugin}.{args.resource}: {len(items)} item(s)")
+    for item in items:
+        print(f"  - {item.get(definicion.key_field, '?')}")
+    return 0
+
+
+def cmd_extra_params(inst: Instance, args) -> int:
+    """
+    Los params extra que un tool puede ofrecer, dados los que el nodo ya
+    eligió (issue #27) — para `connections.llamar`, elegida una Action, los
+    `{placeholders}` de su url/headers/payload en vez de tener que copiarlos
+    a mano desde la otra pantalla.
+
+    Vacío (no error) si el tool no describe una forma dinámica, si no existe,
+    o si no acepta params extra: la mayoría de los tools está en ese caso.
+    """
+    try:
+        params = json.loads(args.params) if args.params else {}
+    except json.JSONDecodeError as exc:
+        mensaje = f"--params no es JSON válido: {exc}"
+        if args.json:
+            print(json.dumps({"ok": False, "error": mensaje}, ensure_ascii=False))
+            return 2
+        print(mensaje, file=sys.stderr)
+        return 2
+
+    extras = inst.describe_extra_params(args.tool, params)
+    if args.json:
+        print(json.dumps({"tool": args.tool, "params": extras}, ensure_ascii=False))
+        return 0
+
+    if not extras:
+        print("sin params extra para describir")
+        return 0
+    for p in extras:
+        obligatorio = " (obligatorio)" if p["required"] else ""
+        print(f"  - {p['name']}{obligatorio}" + (f": {p['doc']}" if p["doc"] else ""))
+    return 0
 
 
 def cmd_users(inst: Instance, args) -> int:
@@ -406,7 +653,7 @@ def cmd_boot(inst: Instance, args) -> int:
 
 
 def cmd_trace(inst: Instance, args) -> int:
-    detalle = inst.run_detail(args.run_id)
+    detalle = inst.run_detail(args.run_id, trace_offset=args.offset, trace_limit=args.limit)
     if detalle is None:
         print(f"No existe el run {args.run_id}", file=sys.stderr)
         return 2
@@ -559,11 +806,72 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(fn=cmd_plugins)
 
     p = sub.add_parser("workflows", help="Flujos guardados.")
+    p.add_argument("--json", action="store_true", help="Lista estructurada.")
     p.set_defaults(fn=cmd_workflows)
+
+    p = sub.add_parser("flow", help="Un flujo guardado, con contenido y diagnósticos.")
+    p.add_argument("name")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_flow)
+
+    p = sub.add_parser("runs", help="Runs ya ejecutados, resumidos.")
+    p.add_argument("--case", help="Filtra por case_id.")
+    p.add_argument("--source", help="Filtra por origen del run.")
+    p.add_argument("--only-failed", action="store_true", help="Sólo los que fallaron.")
+    p.add_argument(
+        "--status",
+        choices=("ok", "err", "waiting"),
+        help="Filtra por status. `waiting` incluye las opciones de cada decisión pendiente.",
+    )
+    p.add_argument("--actor", help="Filtra por quién lo ejecutó.")
+    p.add_argument("--flow", help="Filtra por nombre de flujo.")
+    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--offset", type=int, default=0, help="Saltea los N más nuevos (paginar).")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_runs)
+
+    p = sub.add_parser("case-log", help="El registro de una fila, cruzando todos sus runs.")
+    p.add_argument("case_id")
+    p.add_argument("--limit", type=int, default=500)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_case_log)
+
+    p = sub.add_parser(
+        "resource-item", help="Escribe o borra un item de una colección de un plugin."
+    )
+    p.add_argument("plugin")
+    p.add_argument("resource")
+    p.add_argument("key")
+    p.add_argument("--data", help='El item, como JSON: \'{"campo": "valor"}\'')
+    p.add_argument("--delete", action="store_true", help="Borra en vez de escribir.")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_resource_item)
+
+    p = sub.add_parser("describe", help="La foto de la instalación en una llamada.")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_describe)
 
     p = sub.add_parser("add", help="Guarda un .mmd en la instalación.")
     p.add_argument("file")
     p.add_argument("--name", help="Nombre con el que guardarlo (default: el del archivo).")
+    p.add_argument(
+        "--folder",
+        help="Carpeta del flujo. Sin esta opción: la de la cabecera %% del "
+             "archivo si la trae, o si no la que el flujo ya tenía guardado.",
+    )
+    p.add_argument(
+        "--state",
+        choices=("enabled", "disabled"),
+        help="Estado del flujo. Misma regla de default que --folder.",
+    )
+    p.add_argument(
+        "--description",
+        help="Descripción del flujo. Misma regla de default que --folder.",
+    )
+    p.add_argument(
+        "--source",
+        help="Fuente para la que el flujo está pensado. Misma regla de default que --folder.",
+    )
     p.add_argument("--json", action="store_true", help="Resultado estructurado.")
     p.set_defaults(fn=cmd_add)
 
@@ -578,6 +886,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--case", help="Id del caso (default: row.id, o 'cli').")
     p.add_argument("--dry-run", action="store_true", help="Valida y recorre sin ejecutar tools.")
     p.add_argument("--no-persist", action="store_true", help="No guarda el run ni su log.")
+    p.add_argument(
+        "--allow-broken",
+        action="store_true",
+        help="Corre igual aunque el flujo tenga errores (tool sin instalar, etc.). "
+             "Sin esto, un flujo roto falla antes de ejecutar nada.",
+    )
     p.add_argument(
         "--save",
         action="store_true",
@@ -619,11 +933,46 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("plugin")
     p.add_argument("action")
     p.add_argument("--params", help='Parámetros, como JSON: \'{"url": "..."}\'')
+    p.add_argument(
+        "--item",
+        help="Clave de un item ya guardado: resuelve los params desde ahí. "
+             "--params explícitos pisan lo que traiga el item.",
+    )
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_action)
 
+    p = sub.add_parser(
+        "resources", help="Items de una colección de un plugin (secrets tapados)."
+    )
+    p.add_argument("plugin")
+    p.add_argument("resource")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_resources)
+
+    p = sub.add_parser(
+        "extra-params",
+        help="Params extra que un tool puede ofrecer, según los que el nodo ya eligió.",
+    )
+    p.add_argument("tool")
+    p.add_argument("--params", help='Params ya elegidos, como JSON: \'{"connection": "..."}\'')
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_extra_params)
+
+    p = sub.add_parser("resume", help="Retoma un run que espera una decisión manual.")
+    p.add_argument("run_id")
+    p.add_argument("value", help="La rama elegida: el `value` de una de sus opciones.")
+    p.add_argument("--json", action="store_true", help="El resultado completo, con la traza.")
+    p.set_defaults(fn=cmd_resume)
+
+    p = sub.add_parser("discard", help="Cierra sin seguir un run que espera una decisión.")
+    p.add_argument("run_id")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_discard)
+
     p = sub.add_parser("trace", help="La traza de un run ya ejecutado.")
     p.add_argument("run_id")
+    p.add_argument("--offset", type=int, default=0, help="Saltea los primeros N nodos.")
+    p.add_argument("--limit", type=int, help="Como mucho N nodos (default: todos).")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_trace)
 
@@ -639,7 +988,12 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
-    instancia = Instance(args.root, local_plugins=locales)
+    try:
+        instancia = Instance(args.root, local_plugins=locales)
+    except boot.BootError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
     try:
         return args.fn(instancia, args)
     finally:

@@ -50,7 +50,9 @@ def test_list_tools_trae_el_catalogo_y_los_nativos(raiz):
     ids = {t["id"] for t in resultado["tools"]}
     assert ids == {"core.log", "core.set_status", "core.wait"}
     assert {n["id"] for n in resultado["nativos"]} == {"flow.ejecutar", "flow.retry_gate"}
-    assert set(resultado["ports_disponibles"]) == {"http", "fs", "process", "clock"}
+    assert set(resultado["ports_disponibles"]) == {
+        "http", "fs", "process", "clock", "browser", "window", "geometry", "socket", "sqlite_file",
+    }
 
 
 def test_list_tools_incluye_un_plugin_local(raiz):
@@ -108,6 +110,191 @@ def test_check_flow_de_algo_inexistente_levanta(raiz):
         ops.check_flow("no-existe-ni-como-archivo", root=raiz)
 
 
+# ── Orientación (issue #17) ─────────────────────────────────────────────
+
+
+def test_describe_installation_es_la_foto_entera_en_una_llamada(raiz):
+    """
+    Un agente que no conoce la instalación necesita saber qué hay ANTES de
+    elegir qué tool usar. Hasta el #17, armar esta foto era pedir cinco cosas
+    sueltas y cruzarlas a mano — que es justamente lo que no puede hacer
+    quien no sabe que hay cinco cosas que pedir.
+    """
+    ops.save_flow(str(FLOWS / "mundo.mmd"), root=raiz)
+
+    resultado = ops.describe_installation(plugins={"demo": DEMO}, root=raiz)
+
+    flujo = next(f for f in resultado["flows"] if f["name"] == "mundo")
+    assert flujo["enabled"] is True
+    # Qué tools usa cada flujo, que es lo que liga un flujo con los plugins
+    # que necesita tener instalados.
+    assert "demo.mover" in flujo["tools"]
+
+    demo = next(p for p in resultado["plugins"] if p["name"] == "demo")
+    assert [c["name"] for c in demo["collections"]] == ["destinos"]
+    assert demo["collections"][0]["items"] == 0
+    assert "demo.mover" in [t["id"] for t in demo["tools"]]
+    # Issue #18: sin esto, run_action("probar_destino") era un tanteo a
+    # ciegas — el agente no tenía forma de saber que la acción existe.
+    assert {a["name"] for a in demo["actions"]} == {"ping", "probar_destino"}
+
+    assert {a["name"] for a in resultado["actors"]} == {"local", "system"}
+    # La configuración de arranque: qué puede tocar esta instalación. No sale
+    # de `effective_config` (que son los settings de los plugins).
+    assert resultado["boot"]["default_actor"] == "local"
+    assert "fs_root" in resultado["boot"]
+    assert "window" in resultado["ports_disponibles"]
+    assert resultado["runs"] == {
+        "recientes": 0, "fallidos": 0, "en_espera": 0, "ultimo_por_flujo": {}
+    }
+
+
+def test_describe_installation_trae_un_resumen_en_texto_plano(raiz):
+    """Para un cliente que sólo pueda mostrar texto, el JSON no sirve de nada."""
+    resumen = ops.describe_installation(root=raiz)["resumen"]
+    assert "flujo(s) guardado(s)" in resumen
+    assert "Actores:" in resumen
+    assert "actor por defecto: local" in resumen
+
+
+def test_list_flows_y_get_flow_evitan_adivinar_la_ruta_del_mmd(raiz):
+    ops.save_flow(str(FLOWS / "mundo.mmd"), root=raiz)
+
+    assert [f["name"] for f in ops.list_flows(root=raiz)["flows"]] == ["mundo"]
+
+    detalle = ops.get_flow("mundo", plugins={"demo": DEMO}, root=raiz)
+    assert detalle["runnable"] is True
+    assert detalle["diagnostics"] == []
+    assert "demo.mover" in detalle["content"]
+
+
+def test_get_flow_cruza_los_diagnosticos_contra_lo_instalado(raiz):
+    """
+    El mismo flujo es ejecutable o no según qué plugins haya: sin `demo`, sus
+    nodos apuntan a tools que no existen. Por eso el diagnóstico va con el
+    contenido y no aparte.
+    """
+    ops.save_flow(str(FLOWS / "mundo.mmd"), root=raiz)
+
+    detalle = ops.get_flow("mundo", root=raiz)
+    assert detalle["runnable"] is False
+    assert any("demo.mover" in d["message"] for d in detalle["diagnostics"])
+
+
+def test_get_flow_de_uno_que_no_existe_lo_dice(raiz):
+    assert "no-existe" in ops.get_flow("no-existe", root=raiz)["error"]
+
+
+def test_list_runs_y_get_run_responden_que_corrio_y_por_que_fallo(raiz):
+    _alta(raiz)
+    ejecutado = ops.run_flow(str(FLOWS / "lineal.mmd"), root=raiz, row={"id": "0044"})
+
+    runs = ops.list_runs(root=raiz)["runs"]
+    assert [r["run_id"] for r in runs] == [ejecutado["run_id"]]
+    assert runs[0]["case_id"] == "0044"
+
+    detalle = ops.get_run(ejecutado["run_id"], root=raiz)
+    assert detalle["run_id"] == ejecutado["run_id"]
+    # La traza nodo por nodo, que es lo que `list_runs` deliberadamente no trae.
+    assert detalle["trace"]
+
+
+def test_list_runs_filtra_por_caso_y_por_fallidos(raiz):
+    _alta(raiz)
+    ops.run_flow(str(FLOWS / "lineal.mmd"), root=raiz, row={"id": "0044"})
+
+    assert ops.list_runs(case_id="0044", root=raiz)["runs"]
+    assert ops.list_runs(case_id="otro", root=raiz)["runs"] == []
+    assert ops.list_runs(only_failed=True, root=raiz)["runs"] == []
+
+
+def test_list_runs_filtra_por_status_actor_y_flujo_y_pagina(raiz):
+    _alta(raiz)
+    primero = ops.run_flow(str(FLOWS / "lineal.mmd"), root=raiz, row={"id": "1"})
+    segundo = ops.run_flow(str(FLOWS / "lineal.mmd"), root=raiz, row={"id": "2"})
+    flujo = ops.list_runs(root=raiz)["runs"][0]["flow"]
+
+    assert len(ops.list_runs(status="ok", actor="agente-mcp", flow=flujo, root=raiz)["runs"]) == 2
+    assert ops.list_runs(status="err", root=raiz)["runs"] == []
+    assert ops.list_runs(actor="otro", root=raiz)["runs"] == []
+    assert ops.list_runs(flow="no-existe", root=raiz)["runs"] == []
+
+    # Del más nuevo al más viejo, de a uno.
+    pagina_1 = ops.list_runs(limit=1, root=raiz)["runs"]
+    pagina_2 = ops.list_runs(limit=1, offset=1, root=raiz)["runs"]
+    assert [r["run_id"] for r in pagina_1 + pagina_2] == [segundo["run_id"], primero["run_id"]]
+    assert ops.list_runs(limit=1, offset=2, root=raiz)["runs"] == []
+
+
+def test_get_run_se_puede_leer_por_partes(raiz):
+    _alta(raiz)
+    ejecutado = ops.run_flow(str(FLOWS / "lineal.mmd"), root=raiz, row={"id": "0044"})
+    entera = ops.get_run(ejecutado["run_id"], root=raiz)["trace"]
+    assert len(entera) > 1
+
+    parte = ops.get_run(ejecutado["run_id"], offset=1, limit=1, root=raiz)
+
+    assert parte["trace_total"] == len(entera)
+    assert [n["node_id"] for n in parte["trace"]] == [entera[1]["node_id"]]
+
+
+def test_get_case_log_cruza_todos_los_runs_de_una_fila(raiz):
+    _alta(raiz)
+    ops.run_flow(str(FLOWS / "lineal.mmd"), root=raiz, row={"id": "0044"})
+    ops.run_flow(str(FLOWS / "lineal.mmd"), root=raiz, row={"id": "0044"})
+
+    registro = ops.get_case_log("0044", root=raiz)
+    assert registro["case_id"] == "0044"
+    # Dos corridas de la misma fila: el registro de la fila las acumula, que es
+    # justamente lo que un run suelto no muestra.
+    assert sum("procesando 0044" in e["message"] for e in registro["entries"]) == 2
+
+
+def test_write_y_delete_resource_item_completan_una_coleccion(raiz):
+    """
+    `list_resource_items` sólo leía: un agente podía ver qué conexiones hay
+    pero no dar de alta una.
+    """
+    escrito = ops.write_resource_item(
+        "demo", "destinos", "ARCHIVO", {"ruta": "/archivo"}, plugins={"demo": DEMO}, root=raiz
+    )
+    assert escrito["ok"] is True
+    assert escrito["item"]["ruta"] == "/archivo"
+
+    items = ops.list_resource_items("demo", "destinos", plugins={"demo": DEMO}, root=raiz)["items"]
+    assert [i["name"] for i in items] == ["ARCHIVO"]
+
+    ops.delete_resource_item("demo", "destinos", "ARCHIVO", plugins={"demo": DEMO}, root=raiz)
+    vacio = ops.list_resource_items("demo", "destinos", plugins={"demo": DEMO}, root=raiz)
+    assert vacio["items"] == []
+
+
+def test_write_resource_item_no_devuelve_el_secreto_ni_al_guardarlo(raiz):
+    """
+    `TableStore.write` sí se lo devuelve a quien lo escribió —pensado para una
+    UI donde la misma persona lo tipeó—. Por este camino quien escribe puede
+    ser un agente, así que se aplica el criterio de `resource_items_masked`.
+    """
+    escrito = ops.write_resource_item(
+        "demo",
+        "destinos",
+        "CON-TOKEN",
+        {"ruta": "/archivo", "token": "no-debe-volver"},
+        plugins={"demo": DEMO},
+        root=raiz,
+    )
+    assert escrito["item"]["token"] is None
+    assert "no-debe-volver" not in json.dumps(escrito)
+
+
+def test_write_resource_item_rechaza_una_coleccion_que_no_existe(raiz):
+    resultado = ops.write_resource_item(
+        "demo", "no-existe", "K", {}, plugins={"demo": DEMO}, root=raiz
+    )
+    assert resultado["ok"] is False
+    assert "no-existe" in resultado["error"]
+
+
 # ── Dry run ─────────────────────────────────────────────────────────────
 
 
@@ -157,7 +344,7 @@ def test_load_plugin_acepta_uno_valido(raiz):
     assert resultado["ok"] is True
     assert resultado["plugin"]["ports"] == ["http", "fs", "process", "clock"]
     assert "demo.mover" in resultado["plugin"]["tools"]
-    assert resultado["plugin"]["actions"] == ["ping"]
+    assert resultado["plugin"]["actions"] == ["ping", "probar_destino"]
 
 
 def test_load_plugin_reporta_un_port_sin_adapter(raiz, tmp_path):
@@ -274,6 +461,61 @@ def test_install_plugin_reinstala_reemplazando_entero(raiz, tmp_path):
     assert "PluginManifest" in (destino / "__init__.py").read_text()
 
 
+def test_install_plugin_rechaza_cuando_origen_esta_dentro_del_destino(raiz, tmp_path):
+    """
+    Issue #2: instalar un archivo que vive dentro de su propia carpeta destino
+    —el bug real: `plugins_dir` apuntando al checkout de desarrollo en vez de
+    a una instalación separada— no puede terminar en un rmtree que borra todo
+    lo que no sea ese archivo (un __init__.py de re-export, una carpeta de
+    fixtures, lo que sea que compartiera carpeta con él).
+    """
+    plugins_dir = tmp_path / "plugins"
+    paquete = plugins_dir / "archivos"
+    paquete.mkdir(parents=True)
+    (paquete / "plugin.py").write_text(_plugin_minimo("archivos"), encoding="utf-8")
+    (paquete / "__init__.py").write_text("from .plugin import PLUGIN\n", encoding="utf-8")
+    prueba = paquete / "prueba"
+    prueba.mkdir()
+    (prueba / "fixture.txt").write_text("dato de prueba\n", encoding="utf-8")
+
+    with pytest.raises(ops.OperationError) as exc:
+        ops.install_plugin(
+            "archivos", str(paquete / "plugin.py"), str(plugins_dir), source="agent", root=raiz
+        )
+
+    assert "se pisan" in str(exc.value)
+    assert (paquete / "plugin.py").is_file()
+    assert (paquete / "__init__.py").is_file()
+    assert (prueba / "fixture.txt").is_file()
+
+
+def test_install_plugin_no_borra_el_destino_anterior_lo_deja_de_backup(raiz, tmp_path):
+    """
+    Reemplazar un destino existente no es un rmtree: lo que hubiera ahí queda
+    renombrado al lado, recuperable a mano.
+    """
+    plugins_dir = tmp_path / "plugins"
+    primero = ops.install_plugin("demo", DEMO, str(plugins_dir), source="agent", root=raiz)
+    assert primero["ok"] is True
+    destino = plugins_dir / "demo"
+    (destino / "marca.txt").write_text("algo que no viene de la instalación\n", encoding="utf-8")
+
+    origen_v2 = tmp_path / "demo_v2"
+    origen_v2.mkdir()
+    (origen_v2 / "__init__.py").write_text(_plugin_minimo("demo"), encoding="utf-8")
+
+    segundo = ops.install_plugin("demo", str(origen_v2), str(plugins_dir), source="agent", root=raiz)
+
+    assert segundo["ok"] is True
+    assert segundo["backup"] is not None
+    backup = pathlib.Path(segundo["backup"])
+    assert backup.is_dir()
+    assert (backup / "marca.txt").read_text(encoding="utf-8") == (
+        "algo que no viene de la instalación\n"
+    )
+    assert not (destino / "marca.txt").exists()
+
+
 # ── Guardar un flujo sin ejecutarlo ──────────────────────────────────────
 
 
@@ -372,6 +614,87 @@ def test_run_action_inexistente_nombra_las_disponibles(raiz):
     assert "ping" in resultado["message"]
 
 
+def _sembrar_destino(raiz, key, **campos):
+    """Escribe un item de `destinos` directo a la base, sin pasar por el MCP."""
+    from backend.core.instance import Instance
+    from backend.tests.demo_plugin import DESTINOS
+
+    inst = Instance(raiz)
+    try:
+        inst.resource_store("demo", DESTINOS).write(key, campos)
+    finally:
+        inst.close()
+
+
+def test_list_resource_items_tapa_secrets(raiz):
+    """
+    Issue #7: un agente tiene que poder ver qué "sources" existen sin que el
+    campo `secret` (token, acá) viaje nunca en claro.
+    """
+    _sembrar_destino(raiz, "frio", ruta="/deposito", token="Bearer abc123")
+
+    resultado = ops.list_resource_items("demo", "destinos", plugins={"demo": DEMO}, root=raiz)
+
+    assert resultado["key_field"] == "name"
+    item = next(i for i in resultado["items"] if i["name"] == "frio")
+    assert item["ruta"] == "/deposito"
+    assert item["token"] is None
+
+
+def test_describe_extra_params_sin_describer_es_vacio(raiz):
+    """
+    Issue #27: la operación llega hasta `Instance.describe_extra_params` por
+    el mismo camino que el resto (CLI en subproceso, --json). La mayoría de
+    los tools no describe una forma dinámica: vacío, no error.
+    """
+    resultado = ops.describe_extra_params("demo.mover", plugins={"demo": DEMO}, root=raiz)
+    assert resultado == {"tool": "demo.mover", "params": []}
+
+
+def test_run_action_con_item_resuelve_params_desde_el_resource(raiz):
+    """
+    La otra mitad del issue #7: "ingresar un source" es una sola llamada, sin
+    reconstruir la config del item a mano.
+    """
+    _sembrar_destino(raiz, "frio", ruta="/deposito", token="secreto-de-verdad")
+
+    resultado = ops.run_action(
+        "demo", "probar_destino", item="frio", plugins={"demo": DEMO}, root=raiz
+    )
+
+    assert resultado["status"] == "ok"
+    assert resultado["outputs"]["ruta"] == "/deposito"
+    assert resultado["outputs"]["token"] == "secreto-de-verdad"
+
+
+def test_run_action_con_item_y_params_explicitos_estos_pisan(raiz):
+    _sembrar_destino(raiz, "frio", ruta="/deposito", token="secreto-de-verdad")
+
+    resultado = ops.run_action(
+        "demo", "probar_destino", params={"ruta": "/otro"}, item="frio",
+        plugins={"demo": DEMO}, root=raiz,
+    )
+
+    assert resultado["outputs"]["ruta"] == "/otro"
+    assert resultado["outputs"]["token"] == "secreto-de-verdad"
+
+
+def test_run_action_con_item_inexistente_es_err(raiz):
+    resultado = ops.run_action(
+        "demo", "probar_destino", item="no-existe", plugins={"demo": DEMO}, root=raiz
+    )
+    assert resultado["status"] == "err"
+    assert "no-existe" in resultado["message"]
+
+
+def test_run_action_con_item_en_accion_sin_resource_es_err(raiz):
+    resultado = ops.run_action(
+        "demo", "ping", item="frio", plugins={"demo": DEMO}, root=raiz
+    )
+    assert resultado["status"] == "err"
+    assert "no está atada a ninguna colección" in resultado["message"]
+
+
 # ── El cableado del protocolo ───────────────────────────────────────────
 
 
@@ -405,10 +728,22 @@ def test_la_lista_de_tools_no_crece_con_los_plugins():
     from backend.mcp.server import TOOLS
 
     assert {t.name for t in TOOLS} == {
+        "describe_installation",
         "list_tools",
         "list_plugins",
+        "list_resource_items",
+        "describe_extra_params",
         "list_ports",
         "list_users",
+        "list_flows",
+        "get_flow",
+        "list_runs",
+        "list_waiting_runs",
+        "resume_run",
+        "get_run",
+        "get_case_log",
+        "write_resource_item",
+        "delete_resource_item",
         "check_flow",
         "dry_run_flow",
         "load_plugin",
@@ -502,6 +837,69 @@ def test_run_flow_ejecuta_de_verdad_y_deja_traza(raiz):
     assert any("procesando 0044" in linea for linea in resultado["logs"])
 
 
+def test_resume_run_exige_root(raiz):
+    with pytest.raises(ops.OperationError, match="necesita `root`"):
+        ops.resume_run("run-x", "si", root="")
+
+
+def test_list_waiting_runs_y_resume_run(raiz, tmp_path):
+    """Issue #37: un agente ve la espera, elige la rama y el run termina."""
+    _alta(raiz)
+    flujo = tmp_path / "revision.mmd"
+    flujo.write_text(
+        "flowchart TD\n S(inicio)\n D{Rev § ok | manual | ayuda=Mirá antes}\n"
+        ' A["core.log | message=aprobado {id}"]\n'
+        ' B["core.log | message=rechazado {id}"]\n'
+        " S --> D\n D -->|si| A\n D -->|no| B\n",
+        encoding="utf-8",
+    )
+    pausado = ops.run_flow(str(flujo), root=raiz, row={"id": "9"}, save=True)
+    assert pausado["status"] == "waiting"
+    assert [o["value"] for o in pausado["waiting"]["options"]] == ["si", "no"]
+
+    esperando = ops.list_waiting_runs(root=raiz)["runs"]
+    assert [r["run_id"] for r in esperando] == [pausado["run_id"]]
+    assert esperando[0]["waiting"]["ayuda"] == "Mirá antes"
+
+    with pytest.raises(ops.OperationError, match="no es una rama"):
+        ops.resume_run(pausado["run_id"], "tal vez", root=raiz)
+
+    final = ops.resume_run(pausado["run_id"], "no", root=raiz)
+    assert final["status"] == "ok"
+    assert final["run_id"] == pausado["run_id"]
+    assert final["trace"][0]["decided_by"] == "agente-mcp"
+    assert any("rechazado 9" in linea for linea in final["logs"])
+    assert ops.list_waiting_runs(root=raiz)["runs"] == []
+
+
+def test_resumen_de_run_no_pierde_el_error_kind():
+    """
+    Issue #4: `_resumen_de_run` recorta la traza completa a lo que un agente
+    necesita ver -- pero recortar no puede perder la clasificación del error,
+    que es justo lo que un disparador automático no tiene hoy.
+    """
+    resultado = {
+        "status": "err",
+        "message": "Detenido en \"F\": la sesión ya no sirve",
+        "failed_node": "F",
+        "error_kind": "sesion_vencida",
+        "logs": [],
+        "trace": [
+            {
+                "node_id": "F",
+                "fn": "demo.algo",
+                "params": {},
+                "status": "err",
+                "message": "la sesión ya no sirve",
+                "error_kind": "sesion_vencida",
+            }
+        ],
+    }
+    resumen = ops._resumen_de_run(resultado)
+    assert resumen["error_kind"] == "sesion_vencida"
+    assert resumen["trace"][0]["error_kind"] == "sesion_vencida"
+
+
 def test_run_flow_deniega_un_tool_peligroso_sin_tocar_nada(raiz, tmp_path):
     """
     La propiedad que justifica todo el mecanismo: el agente no puede, y el
@@ -528,6 +926,44 @@ def test_run_flow_deniega_un_tool_peligroso_sin_tocar_nada(raiz, tmp_path):
     assert "no tiene permiso" in str(exc.value)
     assert (origen / "a.stl").exists()          # no se movió
     assert list(destino.iterdir()) == []
+
+
+def _flujo_tool_inexistente(tmp_path):
+    flujo = tmp_path / "roto.mmd"
+    flujo.write_text(
+        "flowchart TD\n"
+        "    B(inicio)\n"
+        '    N["archivos.copiar"]\n'
+        '    E["core.log | message=manejado"]\n'
+        "    B --> N\n"
+        "    N -->|err| E\n",
+        encoding="utf-8",
+    )
+    return flujo
+
+
+def test_run_flow_con_tool_inexistente_falla_antes_de_ejecutar(raiz, tmp_path):
+    """
+    Issue #9: antes esto terminaba en status "ok" con el nodo roto escondido
+    detrás de `|err|`. Mismo criterio que un tool peligroso sin permiso: falla
+    en el chequeo previo, antes de ejecutar nada.
+    """
+    _alta(raiz)
+    flujo = _flujo_tool_inexistente(tmp_path)
+
+    with pytest.raises(ops.OperationError) as exc:
+        ops.run_flow(str(flujo), root=raiz, row={"id": "0044"})
+
+    assert "archivos.copiar" in str(exc.value)
+
+
+def test_run_flow_allow_broken_corre_igual(raiz, tmp_path):
+    _alta(raiz)
+    flujo = _flujo_tool_inexistente(tmp_path)
+
+    resultado = ops.run_flow(str(flujo), root=raiz, row={"id": "0044"}, allow_broken=True)
+
+    assert resultado["status"] == "ok"
 
 
 def test_un_humano_si_puede(raiz, tmp_path):
@@ -566,3 +1002,92 @@ def test_las_instrucciones_documentan_la_ejecucion_real():
 
     for pieza in ("run_flow", "root", "dangerous", "users allow"):
         assert pieza in INSTRUCCIONES, f"falta documentar: {pieza}"
+
+
+# ── Defaults del servidor: root y plugins (issue #16) ───────────────────
+
+
+def test_con_defaults_completa_root_cuando_el_agente_no_lo_manda():
+    from backend.mcp.server import con_defaults
+
+    esquema = {"properties": {"flow": {}, "root": {}, "plugins": {}}}
+    completos = con_defaults({"flow": "x"}, esquema, root="/instalacion")
+    assert completos == {"flow": "x", "root": "/instalacion"}
+
+
+def test_lo_que_manda_el_agente_le_gana_al_default():
+    """Así puede apuntar a otra instalación en vez de a la que sirve la app."""
+    from backend.mcp.server import con_defaults
+
+    esquema = {"properties": {"root": {}}}
+    completos = con_defaults({"root": "/otra"}, esquema, root="/instalacion")
+    assert completos["root"] == "/otra"
+
+
+def test_los_plugins_se_mergean_con_los_del_agente_arriba():
+    """
+    No es uno u otro: el servidor declara los de la instalación —que el agente
+    no puede conocer— y el agente igual puede sumar o pisar el suyo para
+    probar una versión propia sin instalarla.
+    """
+    from backend.mcp.server import con_defaults
+
+    esquema = {"properties": {"plugins": {}}}
+    completos = con_defaults(
+        {"plugins": {"demo": "/mio.py"}},
+        esquema,
+        plugins={"connections": "/app.py", "demo": "/instalado.py"},
+    )
+    assert completos["plugins"] == {"connections": "/app.py", "demo": "/mio.py"}
+
+
+def test_una_tool_que_no_acepta_root_no_lo_recibe():
+    """
+    `list_ports` se responde desde el contrato y no toca la instalación. Si se
+    le colara un `root`, fallaría con "argumentos inválidos".
+    """
+    from backend.mcp.server import TOOLS, con_defaults
+
+    esquema = next(t for t in TOOLS if t.name == "list_ports").input_schema
+    assert con_defaults({}, esquema, root="/instalacion", plugins={"x": "/y"}) == {}
+
+
+def test_parse_args_toma_los_flags():
+    from backend.mcp.server import parse_args
+
+    root, plugins = parse_args(["--root", "/inst", "--plugin", "connections=/c.py"])
+    assert root == "/inst"
+    assert plugins == {"connections": "/c.py"}
+
+
+def test_parse_args_cae_al_entorno(monkeypatch):
+    """Un cliente MCP que sólo deja configurar comando y entorno usa esto."""
+    from backend.mcp.server import ENV_PLUGINS, ENV_ROOT, parse_args
+
+    monkeypatch.setenv(ENV_ROOT, "/desde-el-entorno")
+    monkeypatch.setenv(ENV_PLUGINS, "connections=/c.py;otro=/o.py")
+
+    root, plugins = parse_args([])
+    assert root == "/desde-el-entorno"
+    assert plugins == {"connections": "/c.py", "otro": "/o.py"}
+
+
+def test_el_flag_le_gana_al_entorno(monkeypatch):
+    from backend.mcp.server import ENV_ROOT, parse_args
+
+    monkeypatch.setenv(ENV_ROOT, "/entorno")
+    root, _ = parse_args(["--root", "/flag"])
+    assert root == "/flag"
+
+
+def test_el_prefijo_no_es_BOT_para_no_pisar_un_setting():
+    """
+    `BOT_<CLAVE>` ya es el prefijo con el que se pisa un setting de un plugin:
+    cualquier `BOT_*` del entorno entra a `effective_config()`. Un `BOT_ROOT`
+    dejaría un setting fantasma llamado "ROOT" en toda instalación.
+    """
+    from backend.core.config import ENV_PREFIX
+    from backend.mcp.server import ENV_PLUGINS, ENV_ROOT
+
+    assert not ENV_ROOT.startswith(ENV_PREFIX)
+    assert not ENV_PLUGINS.startswith(ENV_PREFIX)

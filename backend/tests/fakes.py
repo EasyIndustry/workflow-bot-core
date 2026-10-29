@@ -14,7 +14,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from backend.core.ports import FileInfo, HttpResponse, PortError, ProcessResult
+from backend.core.ports import (
+    FileInfo,
+    HttpResponse,
+    NearestOnSurfaceResult,
+    PortError,
+    ProcessResult,
+    SocketConnection,
+    WindowInfo,
+)
 
 
 class FakeHttp:
@@ -106,11 +114,15 @@ class FakeFs:
                 hijos.append(self.stat(ruta))
         return hijos
 
-    def walk(self, path):
+    def walk(self, path, max_depth=None):
         p = _norm(path)
         for ruta in sorted(self.dirs | set(self.files)):
-            if ruta != p and ruta.startswith(p + "/"):
-                yield self.stat(ruta)
+            if ruta == p or not ruta.startswith(p + "/"):
+                continue
+            profundidad = ruta[len(p) + 1:].count("/") + 1
+            if max_depth is not None and profundidad > max_depth:
+                continue
+            yield self.stat(ruta)
 
     # ── Escritura ───────────────────────────────────────────────────────
 
@@ -298,13 +310,243 @@ class FakeClock:
         return sum(self.slept)
 
 
+class FakeBrowser:
+    """
+    Navegador guionado: nunca abre uno de verdad.
+
+    `paginas` mapea una URL a los selectores que se pueden leer ahí, como
+    `{url: {selector: texto}}`. Igual que `FakeHttp`: navegar a una URL no
+    guionada, o leer un selector que no está en el guion, levanta PortError.
+    """
+
+    def __init__(self, paginas: dict | None = None) -> None:
+        self.paginas = {url: dict(selectores) for url, selectores in (paginas or {}).items()}
+        self.calls: list[dict] = []
+        self.cerrado = False
+        self._url_actual: str | None = None
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def goto(self, url, *, timeout=None):
+        self.calls.append({"op": "goto", "url": url, "timeout": timeout})
+        if url not in self.paginas:
+            raise PortError(f"FakeBrowser: nadie guionó la página {url}")
+        self._url_actual = url
+
+    def click(self, selector, *, timeout=None):
+        self.calls.append({"op": "click", "selector": selector, "timeout": timeout})
+        if self._url_actual is None:
+            raise PortError("FakeBrowser: click sin haber navegado antes")
+
+    def leer_texto(self, selector, *, timeout=None):
+        self.calls.append({"op": "leer_texto", "selector": selector, "timeout": timeout})
+        selectores = self.paginas.get(self._url_actual or "", {})
+        if selector not in selectores:
+            raise PortError(f"FakeBrowser: nadie guionó el selector {selector!r}")
+        return selectores[selector]
+
+    def screenshot(self):
+        self.calls.append({"op": "screenshot"})
+        return b""
+
+    def close(self):
+        self.cerrado = True
+
+
+class FakeGeometry:
+    """
+    Adapter de geometría guionado (issue #19): nunca corre `trimesh` de
+    verdad.
+
+    `resultados` mapea `mesh_bytes` a la lista de `(punto_proyectado,
+    distancia)` que devuelve, en el mismo orden que los `points` pedidos.
+    Igual que el resto de los fakes: una malla no guionada levanta
+    `PortError`, para poder probar también el camino de error del tool.
+    A diferencia del `NullGeometryAdapter` real que trae el core,
+    `available` es True -- lo que un test necesita para ejercer el tool
+    como si hubiera un adapter de verdad detrás.
+    """
+
+    def __init__(self, resultados: dict[bytes, list[tuple]] | None = None) -> None:
+        self.resultados = dict(resultados or {})
+        self.calls: list[dict] = []
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def nearest_on_surface(self, mesh_bytes, points):
+        self.calls.append({"op": "nearest_on_surface", "n_points": len(points)})
+        if mesh_bytes not in self.resultados:
+            raise PortError("FakeGeometry: nadie guionó esta malla")
+        pares = self.resultados[mesh_bytes]
+        return NearestOnSurfaceResult(
+            points=tuple(p for p, _ in pares), distances=tuple(d for _, d in pares)
+        )
+
+
+class FakeSocket:
+    """
+    Adapter de socket guionado (issue #39): nunca abre un socket de verdad.
+
+    `respuestas` mapea `(host, port)` a la lista de bytes que `recv` va
+    devolviendo en orden para esa conexión. Conectar a un destino no guionado
+    levanta `PortError` -- un test que no dijo qué esperaba de la red tiene un
+    agujero.
+    """
+
+    def __init__(self, respuestas: dict[tuple[str, int], list[bytes]] | None = None) -> None:
+        self.respuestas = {clave: list(v) for clave, v in (respuestas or {}).items()}
+        self.calls: list[dict] = []
+        self._contador = 0
+        self._abiertas: dict[str, tuple[str, int]] = {}
+
+    def connect(self, host, port, *, tls=False, timeout=None):
+        self.calls.append({"op": "connect", "host": host, "port": port, "tls": tls})
+        clave = (host, port)
+        if clave not in self.respuestas:
+            raise PortError(f"FakeSocket: nadie guionó {host}:{port}")
+        self._contador += 1
+        handle = str(self._contador)
+        self._abiertas[handle] = clave
+        return SocketConnection(handle=handle)
+
+    def _clave(self, conn: SocketConnection) -> tuple[str, int]:
+        clave = self._abiertas.get(conn.handle)
+        if clave is None:
+            raise PortError("FakeSocket: conexión cerrada o inexistente")
+        return clave
+
+    def send(self, conn: SocketConnection, data: bytes) -> None:
+        self._clave(conn)
+        self.calls.append({"op": "send", "handle": conn.handle, "data": data})
+
+    def recv(self, conn: SocketConnection, size: int, *, timeout=None) -> bytes:
+        clave = self._clave(conn)
+        self.calls.append({"op": "recv", "handle": conn.handle, "size": size})
+        cola = self.respuestas.get(clave, [])
+        return cola.pop(0) if cola else b""
+
+    def close(self, conn: SocketConnection | None = None) -> None:
+        if conn is None:
+            self._abiertas.clear()
+            return
+        self._abiertas.pop(conn.handle, None)
+
+
+class FakeSqliteFile:
+    """
+    Adapter de archivo SQLite externo guionado (issue #40): nunca abre un
+    archivo de verdad.
+
+    `filas` mapea `path` a la lista de dicts que devuelve `query` para
+    cualquier SQL sobre ese path -- no interpreta el SQL, como el resto de los
+    fakes de almacenamiento. Un `path` no guionado levanta `PortError`.
+    """
+
+    def __init__(self, filas: dict[str, list[dict]] | None = None) -> None:
+        self.filas = {clave: list(v) for clave, v in (filas or {}).items()}
+        self.calls: list[dict] = []
+
+    def query(self, path: str, sql: str, params=()) -> list[dict]:
+        self.calls.append({"op": "query", "path": path, "sql": sql, "params": tuple(params)})
+        if path not in self.filas:
+            raise PortError(f"FakeSqliteFile: nadie guionó {path!r}")
+        return list(self.filas[path])
+
+    def one(self, path: str, sql: str, params=()) -> dict | None:
+        filas = self.query(path, sql, params)
+        return filas[0] if filas else None
+
+    def columns(self, path: str, table: str) -> list[str]:
+        self.calls.append({"op": "columns", "path": path, "table": table})
+        filas = self.filas.get(path, [])
+        return list(filas[0].keys()) if filas else []
+
+
+class FakeWindow:
+    """
+    Ventana de escritorio guionada: nunca toca una de verdad.
+
+    `windows` mapea un título o nombre de proceso a los controles legibles,
+    como `{titulo: {control: texto}}`. Igual que `FakeBrowser`: buscar una
+    ventana no guionada, o leer/clickear un control que no está en el guion,
+    levanta `PortError`.
+    """
+
+    def __init__(self, windows: dict | None = None, states: dict | None = None) -> None:
+        self.windows = {clave: dict(controles) for clave, controles in (windows or {}).items()}
+        # `states` (issue #25): igual forma que `windows`, pero para
+        # `read_state` -- {titulo: {control: "on"/"off"/"indeterminate"/None}}.
+        # `None` es un valor guionado válido (el control no tiene estado); un
+        # control ausente del dict es "nadie lo guionó", y eso sí es error,
+        # igual que en `read_text`.
+        self.states = {clave: dict(estados) for clave, estados in (states or {}).items()}
+        self.calls: list[dict] = []
+        self._contador = 0
+        self._abiertas: dict[str, str] = {}
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def find_window(self, *, title=None, process=None, timeout=None):
+        self.calls.append({"op": "find_window", "title": title, "process": process})
+        clave = title or process
+        if clave not in self.windows:
+            raise PortError(f"FakeWindow: nadie guionó la ventana {clave!r}")
+        self._contador += 1
+        handle = str(self._contador)
+        self._abiertas[handle] = clave
+        return WindowInfo(handle=handle, title=title or "", process=process or "")
+
+    def _clave(self, window: WindowInfo) -> str:
+        clave = self._abiertas.get(window.handle)
+        if clave is None:
+            raise PortError("FakeWindow: operación sin haber buscado la ventana antes")
+        return clave
+
+    def click(self, window, control, *, button="left", timeout=None):
+        self.calls.append(
+            {"op": "click", "handle": window.handle, "control": control, "button": button}
+        )
+        self._clave(window)
+
+    def type_text(self, window, control, text, *, timeout=None):
+        self.calls.append(
+            {"op": "type_text", "handle": window.handle, "control": control, "text": text}
+        )
+        self.windows[self._clave(window)][control] = text
+
+    def read_text(self, window, control=None, *, timeout=None):
+        self.calls.append({"op": "read_text", "handle": window.handle, "control": control})
+        controles = self.windows[self._clave(window)]
+        if control not in controles:
+            raise PortError(f"FakeWindow: nadie guionó el control {control!r}")
+        return controles[control]
+
+    def read_state(self, window, control, *, timeout=None):
+        self.calls.append({"op": "read_state", "handle": window.handle, "control": control})
+        estados = self.states.get(self._clave(window), {})
+        if control not in estados:
+            raise PortError(f"FakeWindow: nadie guionó el estado de {control!r}")
+        return estados[control]
+
+
 def fake_adapters(**overrides) -> dict:
-    """Los cuatro ports en versión falsa. Se puede pisar cualquiera."""
+    """Los ports de plugin en versión falsa. Se puede pisar cualquiera."""
     adapters = {
         "http": FakeHttp(),
         "fs": FakeFs(),
         "process": FakeProcess(),
         "clock": FakeClock(),
+        "browser": FakeBrowser(),
+        "window": FakeWindow(),
+        "geometry": FakeGeometry(),
+        "socket": FakeSocket(),
+        "sqlite_file": FakeSqliteFile(),
     }
     adapters.update(overrides)
     return adapters
@@ -316,9 +558,14 @@ def _norm(path) -> str:
 
 
 __all__ = [
+    "FakeBrowser",
     "FakeClock",
     "FakeFs",
+    "FakeGeometry",
     "FakeHttp",
     "FakeProcess",
+    "FakeSocket",
+    "FakeSqliteFile",
+    "FakeWindow",
     "fake_adapters",
 ]

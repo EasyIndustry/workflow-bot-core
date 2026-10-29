@@ -26,9 +26,16 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
-from ..contract import STATUS_ERR, STATUS_OK, ParamError, ToolContext, ToolResult
+from ..contract import (
+    STATUS_ERR,
+    STATUS_OK,
+    STATUS_WAITING,
+    ParamError,
+    ToolContext,
+    ToolResult,
+)
 from ..registry import ToolRegistry
 from .context import RunContext
 from .parser import (
@@ -53,6 +60,11 @@ MAX_DEPTH = 5
 FLOW_EJECUTAR = "flow.ejecutar"
 FLOW_RETRY_GATE = "flow.retry_gate"
 NATIVE_FNS = frozenset({FLOW_EJECUTAR, FLOW_RETRY_GATE})
+
+# Versión del formato del checkpoint de una decisión manual (issue #37). Sube
+# si cambia lo que hace falta para retomar; un checkpoint de otra versión no
+# se intenta leer.
+CHECKPOINT_VERSION = 1
 
 
 @dataclass
@@ -80,7 +92,8 @@ class NodeTrace:
 
     params guarda los valores **ya resueltos**, que es lo que hace falta para
     entender un fallo: no sirve saber que el nodo pedía {filesFolder} sino a qué
-    ruta se resolvió esa vez.
+    ruta se resolvió esa vez. Salvo un secreto: `Instance` lo tapa con `***`
+    antes de guardar o devolver el run (ver `core/redact.py`).
     """
 
     node_id: str
@@ -93,11 +106,19 @@ class NodeTrace:
     outputs: dict = field(default_factory=dict)
     loop: bool = False
     traceback: str | None = None
+    error_kind: str | None = None
     duration_ms: int = 0
     visit: int = 1
     depth: int = 1
     flow: str = ""
     decision_value: str | None = None
+    # Issue #34: True sólo cuando un tool declarado dry_run="run" corrió de
+    # verdad en un dry run (ports fs/http en modo de sólo lectura). Distingue
+    # ese paso de uno salteado -- los outputs de acá son reales, no un "OK"
+    # asumido, y una UI no debería confundir los dos casos.
+    dry_executed: bool = False
+    # Issue #37: en una decisión manual, quién eligió la rama al retomar.
+    decided_by: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -111,12 +132,21 @@ class NodeTrace:
             "outputs": self.outputs,
             "loop": self.loop,
             "traceback": self.traceback,
+            "error_kind": self.error_kind,
             "duration_ms": self.duration_ms,
             "visit": self.visit,
             "depth": self.depth,
             "flow": self.flow,
             "decision_value": self.decision_value,
+            "dry_executed": self.dry_executed,
+            "decided_by": self.decided_by,
         }
+
+    @classmethod
+    def from_dict(cls, datos: dict) -> "NodeTrace":
+        """La traza de un nodo ya guardada, para seguirla al retomar (issue #37)."""
+        campos = cls.__dataclass_fields__
+        return cls(**{k: v for k, v in datos.items() if k in campos})
 
 
 @dataclass
@@ -129,13 +159,23 @@ class RunResult:
     status: str = STATUS_OK
     message: str = ""
     failed_node: str | None = None
+    error_kind: str | None = None
     trace: list[NodeTrace] = field(default_factory=list)
     logs: list[LogEntry] = field(default_factory=list)
     dry_run: bool = False
+    # Issue #37: None salvo que el run esté pausado en una decisión manual. Es
+    # lo que una UI necesita para preguntar sin leer el .mmd: nodo, variable,
+    # ayuda y una opción por rama. Que no sea None es la forma de saber que el
+    # run espera (`if resultado.waiting:`), aparte de `failed`.
+    waiting: dict | None = None
+    # Lo que hace falta para retomar. **No** va en `to_dict()`: lo persiste
+    # `Instance` en su propia tabla, y nunca incluye `env` ni `config`.
+    checkpoint: dict | None = field(default=None, repr=False)
 
     @property
     def failed(self) -> bool:
-        return self.status != STATUS_OK
+        # Un run en espera no falló: sólo `err` es falla (issue #37).
+        return self.status == STATUS_ERR
 
     def to_dict(self) -> dict:
         return {
@@ -145,7 +185,9 @@ class RunResult:
             "status": self.status,
             "message": self.message,
             "failed_node": self.failed_node,
+            "error_kind": self.error_kind,
             "dry_run": self.dry_run,
+            "waiting": self.waiting,
             "trace": [t.to_dict() for t in self.trace],
             "logs": [entry.to_dict() for entry in self.logs],
         }
@@ -167,6 +209,7 @@ class _Run:
         policy,
         dry_run: bool,
         max_visits: int,
+        on_step: Callable[..., None] | None = None,
     ) -> None:
         self.result = RunResult(run_id=run_id, case_id=case_id, dry_run=dry_run)
         self.policy = policy
@@ -178,6 +221,12 @@ class _Run:
         self.resources = resources
         self.dry_run = dry_run
         self.max_visits = max_visits
+        self.on_step = on_step
+        # Pasos ya anunciados y cuántos tiene el flujo principal. Viven en el
+        # run y no en `_walk` porque un subflujo sigue contando sobre el mismo
+        # número: para quien mira la barra, es una sola corrida.
+        self.steps = 0
+        self.total_steps = 0
         self.retry_counters: dict[str, int] = {}
         # Status de la última acción: define qué arista |ok|/|err| se toma.
         self.last_status = STATUS_OK
@@ -188,18 +237,74 @@ class _Run:
             LogEntry(t=time.strftime("%H:%M:%S"), message=message, level=level, node_id=node_id)
         )
 
-    def fail(self, message: str, node_id: str | None = None) -> None:
+    def step(self, node_id: str, node) -> None:
+        """
+        Avisa que se va a ejecutar un nodo, y lleva la cuenta.
+
+        Existe porque desde afuera del executor nadie sabía en qué nodo está un
+        run: `Instance.run` bloquea hasta el final, así que una UI sólo podía
+        decir "está corriendo" y desde cuándo, nunca "paso 3 de 10" (issue
+        #15).
+
+        **Una excepción acá no puede tumbar el run.** Quien escucha está
+        dibujando una barra de progreso, y que se caiga dibujando no puede
+        costar una ejecución que ya está a mitad de camino — el mismo criterio
+        con el que se trata a un logger.
+        """
+        self.steps += 1
+        if self.on_step is None:
+            return
+        try:
+            self.on_step(
+                node_id,
+                display=getattr(node, "display", "") or "",
+                index=self.steps,
+                total=self.total_steps,
+            )
+        except Exception:  # noqa: BLE001 - ver docstring
+            pass
+
+    def build_checkpoint(self, flow_text: str, node_id: str, visits: dict[str, int]) -> dict:
+        """
+        Todo lo que hace falta para retomar una decisión manual (issue #37).
+
+        El texto del flujo va entero: se retoma lo que se empezó, aunque
+        alguien edite el flujo mientras espera. **Nunca** `env` ni `config`:
+        se vuelven a leer al retomar, así un secreto no queda escrito acá.
+        `vars` sí -- ya está en la traza (`trace.outputs`), no expone nada
+        nuevo.
+        """
+        return {
+            "version": CHECKPOINT_VERSION,
+            "flow_text": flow_text,
+            "node_id": node_id,
+            "vars": dict(self.context.vars),
+            "row": dict(self.context.row),
+            "plain_keys": sorted(self.context._plain_keys),
+            "visits": dict(visits),
+            "steps": self.steps,
+            "total_steps": self.total_steps,
+            "retry_counters": dict(self.retry_counters),
+            "last_status": self.last_status,
+            "last_loop": self.last_loop,
+            "actor": self.result.actor,
+        }
+
+    def fail(
+        self, message: str, node_id: str | None = None, *, error_kind: str | None = None
+    ) -> None:
         """
         Marca el run como fallido.
 
-        Preserva el PRIMER mensaje y el primer nodo: al desapilar flujos
-        anidados, cada nivel querría reportar su propio "terminó con error" y
-        taparía la causa raíz.
+        Preserva el PRIMER mensaje, el primer nodo y su error_kind: al
+        desapilar flujos anidados, cada nivel querría reportar su propio
+        "terminó con error" y taparía la causa raíz.
         """
         primero = not self.result.failed
         self.result.status = STATUS_ERR
         if primero:
             self.result.message = message
+            self.result.error_kind = error_kind
         if node_id and not self.result.failed_node:
             self.result.failed_node = node_id
         if message:
@@ -221,6 +326,7 @@ def execute_flow(
     policy: "RunPolicy | None" = None,
     dry_run: bool = False,
     max_visits: int = MAX_VISITS,
+    on_step: Callable[..., None] | None = None,
 ) -> RunResult:
     """
     Ejecuta un flujo completo y devuelve su resultado con la traza.
@@ -236,6 +342,12 @@ def execute_flow(
     restricciones, que es el comportamiento de una persona operando su propia
     máquina. El chequeo ocurre **por nodo**, no sólo al empezar: un subflujo
     resuelto en runtime por flow.ejecutar no se puede inspeccionar de antemano.
+
+    on_step(node_id, display=, index=, total=) se llama antes de cada nodo de
+    acción o decisión, para que una UI pueda mostrar en qué paso va mientras
+    el run corre. Es el hermano de `is_cancelled`: el mismo punto del
+    recorrido, en la otra dirección. `index` es 1-based y cuenta nodos
+    visitados, así que con bucles supera a `total` — quien dibuja lo topa.
     """
     from ..users import RunPolicy as _RunPolicy
 
@@ -251,6 +363,7 @@ def execute_flow(
         resources=resources or (lambda _plugin, _collection: []),
         dry_run=dry_run,
         max_visits=max_visits,
+        on_step=on_step,
     )
     run.result.actor = run.policy.actor
 
@@ -258,8 +371,23 @@ def execute_flow(
     return run.result
 
 
-def _walk(run: _Run, flow_text: str, *, depth: int, flow_name: str) -> None:
-    """Recorre un grafo. Se reentra a sí misma por flow.ejecutar."""
+def _walk(
+    run: _Run,
+    flow_text: str,
+    *,
+    depth: int,
+    flow_name: str,
+    start: str | None = None,
+    visits: dict[str, int] | None = None,
+) -> None:
+    """
+    Recorre un grafo. Se reentra a sí misma por flow.ejecutar.
+
+    `start`/`visits` son para retomar una decisión manual (issue #37): se
+    sigue desde la rama elegida con las visitas que ya había, sin volver a
+    anunciar el flujo ni sus warnings, que ya están en el log del run.
+    """
+    retomando = start is not None
     if depth > MAX_DEPTH:
         run.fail(f"Máximo nivel de anidamiento de flujos alcanzado ({MAX_DEPTH})")
         return
@@ -276,20 +404,27 @@ def _walk(run: _Run, flow_text: str, *, depth: int, flow_name: str) -> None:
         run.fail(f"El flujo {etiqueta} tiene errores y no se puede ejecutar — {detalle}")
         return
 
-    for warning in graph.warnings:
+    if not retomando:
+        for warning in graph.warnings:
+            run.log(
+                f"L{warning.line}: {warning.message}" if warning.line else warning.message,
+                "warning",
+                warning.node_id,
+            )
+
         run.log(
-            f"L{warning.line}: {warning.message}" if warning.line else warning.message,
-            "warning",
-            warning.node_id,
+            f"Flujo {etiqueta}: {len(graph.nodes)} nodos, {len(graph.edges)} aristas"
+            + (" (dry run)" if run.dry_run else "")
         )
 
-    run.log(
-        f"Flujo {etiqueta}: {len(graph.nodes)} nodos, {len(graph.edges)} aristas"
-        + (" (dry run)" if run.dry_run else "")
-    )
+        # El total es el del flujo principal: un subflujo sigue contando sobre
+        # el mismo índice, porque para quien mira el progreso es una sola
+        # corrida.
+        if depth == 1:
+            run.total_steps = len(graph.action_nodes())
 
-    visits: dict[str, int] = {}
-    current: str | None = graph.start_node
+    visits = dict(visits or {})
+    current: str | None = start if retomando else graph.start_node
 
     while current:
         if run.is_cancelled():
@@ -298,6 +433,9 @@ def _walk(run: _Run, flow_text: str, *, depth: int, flow_name: str) -> None:
             return
 
         node = graph.nodes[current]
+        # El nodo de inicio no es un paso: no hace nada que se pueda mostrar.
+        if isinstance(node, (ActionNode, DecisionNode)):
+            run.step(current, node)
         visits[current] = visits.get(current, 0) + 1
         if visits[current] > run.max_visits:
             run.fail(
@@ -307,6 +445,7 @@ def _walk(run: _Run, flow_text: str, *, depth: int, flow_name: str) -> None:
             )
             return
 
+        node_id = current
         current = _step(
             run,
             graph,
@@ -317,6 +456,11 @@ def _walk(run: _Run, flow_text: str, *, depth: int, flow_name: str) -> None:
             flow_name=flow_name,
         )
         if run.result.failed:
+            return
+        if run.result.waiting is not None:
+            # Issue #37: pausa. El hilo vuelve acá y queda libre; retomar es
+            # otra llamada, desde el checkpoint.
+            run.result.checkpoint = run.build_checkpoint(flow_text, node_id, visits)
             return
 
     run.log(f"Flujo {etiqueta} completado")
@@ -343,6 +487,9 @@ def _step(
         # ejecuta un grafo con errores. Queda como red de seguridad.
         run.fail(f'Nodo "{node_id}" no está definido', node_id)
         return None
+
+    if isinstance(node, DecisionNode) and node.manual and not run.dry_run:
+        return _pause_for_decision(run, graph, node_id, node, visit=visit, depth=depth, flow_name=flow_name)
 
     if isinstance(node, DecisionNode):
         value = run.context.decision_value(node.variable)
@@ -372,12 +519,15 @@ def _step(
                 (e for e in graph.out_edges(node_id) if e.condition is not None), None
             )
             if primera is not None:
-                run.log(
-                    f'[DRY] {node.variable} sin valor conocido; se explora la rama '
-                    f'"{primera.condition}"',
-                    "warning",
-                    node_id,
-                )
+                if node.manual:
+                    # Issue #37: en seco una decisión manual no pausa.
+                    aviso = f'[DRY] decisión manual: en seco se explora la rama "{primera.condition}"'
+                else:
+                    aviso = (
+                        f'[DRY] {node.variable} sin valor conocido; se explora la rama '
+                        f'"{primera.condition}"'
+                    )
+                run.log(aviso, "warning", node_id)
                 return primera.to
 
         run.fail(
@@ -393,6 +543,224 @@ def _step(
 
     run.fail(f'Tipo de nodo desconocido en "{node_id}"', node_id)
     return None
+
+
+def _pause_for_decision(
+    run: _Run,
+    graph: FlowGraph,
+    node_id: str,
+    node: DecisionNode,
+    *,
+    visit: int,
+    depth: int,
+    flow_name: str,
+) -> None:
+    """
+    Una decisión manual en una corrida real (issue #37): siempre pausa, aunque
+    la variable ya tenga valor -- si es manual es porque se quiere que decida
+    una persona. Deja `status="waiting"` y el payload de `waiting`; `_walk`
+    arma el checkpoint y vuelve.
+    """
+    if depth > 1:
+        run.fail(
+            f'Decisión manual en un subflujo ("{node_id}" en "{flow_name}"): '
+            "no soportado todavía",
+            node_id,
+            error_kind="manual_in_subflow",
+        )
+        return None
+
+    run.result.trace.append(
+        NodeTrace(
+            node_id=node_id,
+            node_type="decision",
+            display=node.display,
+            depth=depth,
+            visit=visit,
+            flow=flow_name,
+            message="esperando decisión manual",
+        )
+    )
+    run.result.status = STATUS_WAITING
+    run.result.waiting = waiting_payload(graph, node_id, context=run.context)
+    run.log(
+        f"Esperando decisión manual {node.variable}"
+        + (f' ("{node.display}")' if node.display else ""),
+        "warning",
+        node_id,
+    )
+    return None
+
+
+def waiting_payload(
+    graph: FlowGraph, node_id: str, *, context: RunContext | None = None
+) -> dict:
+    """
+    Lo que una UI necesita para preguntar, sin leer el .mmd (issue #37).
+
+    Una opción por arista **con condición**. `value` es lo que hay que mandar
+    para ir por esa arista: en una condición con coma (`a,b`), alcanza el
+    primero.
+
+    Con `context`, la ayuda sale resuelta con lo que el run tiene en ese
+    momento (issue #38); `ayuda_plantilla` es la original.
+    """
+    node = graph.nodes[node_id]
+    plantilla = getattr(node, "ayuda", "") or ""
+    opciones = []
+    for edge in graph.out_edges(node_id):
+        if edge.condition is None:
+            continue
+        destino = graph.nodes.get(edge.to)
+        opciones.append({
+            "value": edge.condition.split(",")[0].strip(),
+            "condition": edge.condition,
+            "to": edge.to,
+            "to_display": (
+                getattr(destino, "display", "") or getattr(destino, "label", "") or ""
+            ),
+            "to_fn": getattr(destino, "fn", None),
+        })
+    return {
+        "node_id": node_id,
+        "display": getattr(node, "display", ""),
+        "variable": getattr(node, "variable", ""),
+        "ayuda": _resolver_ayuda(plantilla, context) if context is not None else plantilla,
+        "ayuda_plantilla": plantilla,
+        "options": opciones,
+    }
+
+
+def _resolver_ayuda(plantilla: str, context: RunContext) -> str:
+    """
+    La ayuda con sus `{variables}` resueltas: fila, salidas planas y
+    `{NODO.salida...}`, con la misma precedencia que un param. Lo que no
+    resuelve queda literal.
+
+    **Sin `env` ni `config`** (issue #38): la ayuda viaja a la UI y queda en
+    `runs.data`, así que un `{env.SECRETO}` queda como plantilla en vez de
+    escribirse resuelto.
+    """
+    if "{" not in plantilla:
+        return plantilla
+    visible = RunContext(row=context.row, vars=context.vars)
+    resuelta = visible.resolve(plantilla)
+    return resuelta if isinstance(resuelta, str) else str(resuelta)
+
+
+def resume_flow(
+    checkpoint: dict,
+    value: str,
+    *,
+    run_id: str,
+    case_id: str,
+    registry: ToolRegistry,
+    decided_by: str,
+    prior_trace: list[NodeTrace] | None = None,
+    prior_logs: list[LogEntry] | None = None,
+    config: dict | None = None,
+    env: dict | None = None,
+    load_flow: Callable[[str], str] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+    resources: Callable[[str, str], list[dict]] | None = None,
+    policy: "RunPolicy | None" = None,
+    max_visits: int = MAX_VISITS,
+    on_step: Callable[..., None] | None = None,
+) -> RunResult:
+    """
+    Retoma un run pausado en una decisión manual (issue #37).
+
+    Mismo `run_id`, misma traza: se restaura el contexto (vars, row, visitas,
+    contadores) desde el checkpoint, `config` y `env` se leen de nuevo, se
+    anota la decisión y se sigue por la rama elegida con el flujo **del
+    checkpoint**, no con el que haya ahora guardado. Puede terminar `ok`,
+    `err`, o `waiting` otra vez si llega a otra decisión manual.
+
+    Quien llama ya validó `value` (`resolve_manual`); si igual no resuelve,
+    el run falla con un mensaje en vez de seguir por cualquier lado.
+    """
+    from ..users import RunPolicy as _RunPolicy
+
+    if checkpoint.get("version") != CHECKPOINT_VERSION:
+        raise ValueError(
+            f"checkpoint de versión {checkpoint.get('version')!r}; se esperaba {CHECKPOINT_VERSION}"
+        )
+
+    context = RunContext(
+        row=dict(checkpoint.get("row") or {}),
+        vars=dict(checkpoint.get("vars") or {}),
+        config=dict(config or {}),
+        env=dict(env or {}),
+    )
+    context._plain_keys.update(checkpoint.get("plain_keys") or [])
+    run = _Run(
+        policy=policy if policy is not None else _RunPolicy.sin_restricciones(),
+        run_id=run_id,
+        case_id=case_id,
+        registry=registry,
+        context=context,
+        load_flow=load_flow,
+        is_cancelled=is_cancelled or (lambda: False),
+        resources=resources or (lambda _plugin, _collection: []),
+        dry_run=False,
+        max_visits=max_visits,
+        on_step=on_step,
+    )
+    run.result.actor = checkpoint.get("actor") or run.policy.actor
+    run.result.trace = list(prior_trace or [])
+    run.result.logs = list(prior_logs or [])
+    run.steps = int(checkpoint.get("steps") or 0)
+    run.total_steps = int(checkpoint.get("total_steps") or 0)
+    run.retry_counters = dict(checkpoint.get("retry_counters") or {})
+    run.last_status = checkpoint.get("last_status") or STATUS_OK
+    run.last_loop = bool(checkpoint.get("last_loop"))
+
+    flow_text = checkpoint["flow_text"]
+    node_id = checkpoint["node_id"]
+    graph = parse_flow(flow_text)
+    node = graph.nodes.get(node_id)
+    variable = getattr(node, "variable", "") or node_id
+
+    elegido = str(value)
+    context.vars[variable] = elegido
+    decision = next(
+        (
+            t for t in reversed(run.result.trace)
+            if t.node_id == node_id and t.node_type == "decision" and t.decision_value is None
+        ),
+        None,
+    )
+    if decision is not None:
+        decision.decision_value = elegido
+        decision.decided_by = decided_by
+        decision.message = ""
+    run.log(f'Decisión manual {variable} = "{elegido}" (por {decided_by})', node_id=node_id)
+
+    siguiente = resolve_manual(graph, node_id, elegido)
+    if siguiente is None:
+        run.fail(f'Sin rama para "{variable} = {elegido}" en el nodo "{node_id}"', node_id)
+        return run.result
+
+    _walk(
+        run,
+        flow_text,
+        depth=1,
+        flow_name="",
+        start=siguiente,
+        visits=dict(checkpoint.get("visits") or {}),
+    )
+    return run.result
+
+
+def resolve_manual(graph: FlowGraph, node_id: str, value) -> str | None:
+    """
+    A qué nodo lleva elegir `value` en la decisión manual `node_id`, o None
+    si no es una rama de esa decisión. Misma lógica que una decisión común.
+    """
+    node = graph.nodes.get(node_id)
+    if not isinstance(node, DecisionNode):
+        return None
+    return _resolve_decision(graph, node_id, value)
 
 
 def _run_action(
@@ -419,7 +787,7 @@ def _run_action(
 
     # Params con sus `{variables}` sustituidas. Todavía son texto: el tipado lo
     # aplica el manifest más abajo, y la traza se actualiza con el resultado.
-    resueltos, pendientes = _resolve_raw_params(run, node)
+    resueltos, pendientes, claves_sin_resolver = _resolve_raw_params(run, node)
     trace.params = resueltos
     if pendientes:
         trace.message = f"variables sin resolver: {', '.join(pendientes)}"
@@ -450,7 +818,8 @@ def _run_action(
                 run.fail(f'Detenido en "{node_id}": {motivo}', node_id)
                 return None
 
-    # ── Dry run: valida y sigue, sin ejecutar nada ────────────────────
+    # ── Dry run: valida y sigue, sin ejecutar nada -- salvo que el tool se
+    # declare dry_run="run" (issue #34) ───────────────────────────────────
     if run.dry_run:
         if node.fn not in NATIVE_FNS and run.registry.get(node.fn) is None:
             trace.status = STATUS_ERR
@@ -461,15 +830,39 @@ def _run_action(
         # Los params se tipan igual que en una corrida real. Un `seconds=abc`
         # tiene que salir acá y no reventar recién en producción: un dry run que
         # pasa sobre una entrada que el run real rechaza no sirve de nada.
+        #
+        # Salvo el que todavía es un placeholder sin resolver (issue #24): el
+        # nodo que lo produce no corrió -es la situación normal de un dry
+        # run, no la excepcional-, así que `{rutas}` no tiene nada que
+        # juzgar todavía. Tipar ese texto literal es indistinguible de un
+        # valor mal escrito a mano, y por eso `rutas={rutas}` -el caso que el
+        # #21 vino a habilitar- fallaba en el dry run y andaba en la corrida
+        # real.
         manifest = run.registry.manifest(node.fn)
         if manifest is not None:
             try:
-                trace.params = manifest.resolve_params(resueltos, run.context.config)
+                trace.params = manifest.resolve_params(
+                    resueltos, run.context.config, sin_resolver=claves_sin_resolver
+                )
             except ParamError as exc:
                 trace.status = STATUS_ERR
                 trace.message = str(exc)
                 run.fail(f'Detenido en "{node_id}" ({node.fn}): {exc}', node_id)
                 return None
+
+        # Un tool que sólo lee (`dry_run="run"`, y sin ningún port que se
+        # quede sin modo de sólo lectura -- `dry_run_ok` repite ese chequeo)
+        # corre de verdad: es lo único que le da a una decisión posterior
+        # algo real con qué decidir, en vez de "sin valor conocido" y la
+        # primera rama siempre. `dry_run_ok` en `NATIVE_FNS` (flow.ejecutar,
+        # flow.retry_gate) no aplica -- no son tools de registry.
+        if node.fn not in NATIVE_FNS and run.registry.dry_run_ok(node.fn):
+            result = _invoke_tool(
+                run, node, node_id, resueltos,
+                on_params=lambda p: setattr(trace, "params", p),
+                read_only=True,
+            )
+            return _apply_result(run, trace, node, node_id, graph, result, started, dry_executed=True)
 
         run.log(
             f"[DRY] {node.fn}" + (f" | {_fmt(trace.params)}" if trace.params else ""),
@@ -492,15 +885,34 @@ def _run_action(
             run, node, node_id, resueltos, on_params=lambda p: setattr(trace, "params", p)
         )
 
+    return _apply_result(run, trace, node, node_id, graph, result, started)
+
+
+def _apply_result(
+    run: _Run,
+    trace: NodeTrace,
+    node: ActionNode,
+    node_id: str,
+    graph: FlowGraph,
+    result: ToolResult,
+    started: float,
+    *,
+    dry_executed: bool = False,
+) -> str | None:
+    """Vuelca un ToolResult a la traza y decide la próxima arista. Comparte
+    camino la corrida real y un dry run que ejecutó de verdad (issue #34)."""
     trace.status = result.status
     trace.message = result.message
     trace.outputs = dict(result.outputs)
     trace.loop = result.loop
     trace.traceback = result.traceback
+    trace.error_kind = result.error_kind
     trace.duration_ms = int((time.monotonic() - started) * 1000)
+    if dry_executed:
+        trace.dry_executed = True
 
     if result.outputs:
-        run.context.merge_outputs(result.outputs)
+        run.context.merge_outputs(result.outputs, node_id=node_id)
 
     if result.message:
         run.log(
@@ -518,6 +930,7 @@ def _run_action(
                 f'Detenido en "{node_id}" ({node.fn}): '
                 f"{result.message or 'terminó con error'}",
                 node_id,
+                error_kind=result.error_kind,
             )
             return None
 
@@ -526,14 +939,27 @@ def _run_action(
 
 
 
-def _resolve_raw_params(run: _Run, node: ActionNode) -> tuple[dict, list[str]]:
-    """Resuelve los `{var}` de los params crudos y reporta los que quedaron."""
-    resueltos: dict[str, str] = {}
+def _resolve_raw_params(run: _Run, node: ActionNode) -> tuple[dict, list[str], frozenset[str]]:
+    """
+    Resuelve los `{var}` de los params crudos y reporta los que quedaron.
+
+    El tercer elemento son las **claves de param** (no las variables) que
+    todavía tienen algo sin resolver adentro — lo que necesita el dry run
+    (issue #24) para no tipar un param cuyo valor de verdad depende de un
+    output que este recorrido en seco no produce: `pendientes` da los
+    nombres de variable para el mensaje, pero no dice a qué param
+    pertenecen.
+    """
+    resueltos: dict[str, Any] = {}
     pendientes: list[str] = []
+    claves_sin_resolver: set[str] = set()
     for key, raw in node.params.items():
         resueltos[key] = run.context.resolve(raw)
-        pendientes.extend(run.context.unresolved(raw))
-    return resueltos, pendientes
+        sin_resolver_de_este = run.context.unresolved(raw)
+        pendientes.extend(sin_resolver_de_este)
+        if sin_resolver_de_este:
+            claves_sin_resolver.add(key)
+    return resueltos, pendientes, frozenset(claves_sin_resolver)
 
 
 def _invoke_tool(
@@ -542,6 +968,8 @@ def _invoke_tool(
     node_id: str,
     resueltos: dict,
     on_params: Callable[[dict], None] | None = None,
+    *,
+    read_only: bool = False,
 ) -> ToolResult:
     """
     Llama a un tool a través del registry.
@@ -552,6 +980,9 @@ def _invoke_tool(
     `on_params` recibe los params ya tipados, para que la traza registre lo que
     el tool realmente vio. Se llama sólo si el tipado tuvo éxito: cuando falla,
     lo que interesa ver es el valor crudo que no convirtió.
+
+    `read_only=True` (issue #34) es sólo un pase directo a
+    `registry.execute`: el llamador ya verificó `dry_run_ok` antes de pedirlo.
     """
 
     def ctx_factory(manifest, ports):
@@ -577,7 +1008,7 @@ def _invoke_tool(
             ports=ports,
         )
 
-    return run.registry.execute(node.fn, ctx_factory)
+    return run.registry.execute(node.fn, ctx_factory, read_only=read_only)
 
 
 def _retry_gate(run: _Run, params: dict) -> ToolResult:
@@ -664,10 +1095,14 @@ def _fmt(params: dict) -> str:
 
 
 __all__ = [
+    "CHECKPOINT_VERSION",
     "MAX_DEPTH",
     "MAX_VISITS",
     "LogEntry",
     "NodeTrace",
     "RunResult",
     "execute_flow",
+    "resolve_manual",
+    "resume_flow",
+    "waiting_payload",
 ]

@@ -207,6 +207,26 @@ def test_defaults_precargan_la_configuracion_inicial():
     assert defaults == {"demoBase": "/casos", "demoTimeout": 10.0}
 
 
+def test_secret_setting_keys_junta_los_de_todos_los_plugins_cargados():
+    """
+    Issue #8: es lo que le permite a `ConfigStore` cifrar sin conocer el
+    contrato de `Setting` -- el registry sí lo conoce, y sólo expone la lista
+    de nombres.
+    """
+    manifest = PluginManifest(
+        name="p",
+        label="P",
+        settings=(
+            Setting("token", secret=True),
+            Setting("timeout", ParamType.FLOAT),
+        ),
+    )
+    reg = _registry()  # ya trae "demo", sin ningún Setting secret
+    reg._add_plugin("p", "test", Plugin(manifest=manifest))
+
+    assert reg.secret_setting_keys() == {"token"}
+
+
 def test_plugin_con_contrato_no_soportado_se_rechaza():
     reg = ToolRegistry()
     manifest = PluginManifest(name="futuro", label="Futuro", contract=99)
@@ -235,6 +255,31 @@ def test_excepcion_se_convierte_en_error_con_traceback():
     assert result.status == "err"
     assert "RuntimeError: explotó" in result.message
     assert result.traceback and "RuntimeError" in result.traceback
+
+
+def test_tool_result_err_admite_error_kind_libre():
+    """
+    Issue #4: quien dispara un run no puede distinguir causas de falla sólo
+    con un `message` de texto libre. `error_kind` es un string sin enum
+    cerrado -- cada plugin conoce sus propias causas.
+    """
+    resultado = ToolResult.err("la sesión ya no sirve", error_kind="sesion_vencida")
+    assert resultado.error_kind == "sesion_vencida"
+    assert resultado.to_dict()["error_kind"] == "sesion_vencida"
+
+
+def test_tool_result_err_sin_error_kind_es_none_no_falta_de_error():
+    resultado = ToolResult.err("algo salió mal")
+    assert resultado.status == "err"
+    assert resultado.error_kind is None
+
+
+def test_error_kind_de_un_tool_llega_intacto_a_traves_del_registry():
+    reg = _bare_registry(
+        "t.falla_clasificada", lambda ctx: ToolResult.err("timeout de red", error_kind="red")
+    )
+    resultado = _run_bare(reg, "t.falla_clasificada")
+    assert resultado.error_kind == "red"
 
 
 def test_status_no_declarado_se_rechaza():
@@ -312,6 +357,73 @@ def test_int_invalido_da_param_error():
         raise AssertionError("debió rechazar 'sesenta'")
     except ParamError as exc:
         assert "no es un entero" in str(exc)
+
+
+def test_sin_resolver_no_tipa_el_valor_y_lo_deja_crudo():
+    """
+    Issue #24: un param JSON cuyo valor todavía es `{placeholder}` sin
+    resolver -el nodo que lo produce no corrió, el caso normal de un dry
+    run- no tiene nada que juzgar. Se salta `_coerce` para esa clave.
+    """
+    manifest = ToolManifest(
+        id="t.x", label="x", category="X", params=(Param("items", ParamType.JSON, required=True),)
+    )
+    resolved = manifest.resolve_params({"items": "{rutas}"}, {}, sin_resolver=frozenset({"items"}))
+    assert resolved == {"items": "{rutas}"}
+
+
+def test_sin_resolver_no_afecta_a_otras_claves():
+    manifest = ToolManifest(
+        id="t.x",
+        label="x",
+        category="X",
+        params=(Param("items", ParamType.JSON), Param("n", ParamType.INT)),
+    )
+    resolved = manifest.resolve_params(
+        {"items": "{rutas}", "n": "60"}, {}, sin_resolver=frozenset({"items"})
+    )
+    assert resolved == {"items": "{rutas}", "n": 60}
+
+
+def test_sin_resolver_no_disculpa_un_literal_mal_escrito():
+    """Sólo se salta el tipado de las claves que están en `sin_resolver`; el resto sigue como siempre."""
+    manifest = ToolManifest(
+        id="t.x", label="x", category="X", params=(Param("n", ParamType.INT),)
+    )
+    try:
+        manifest.resolve_params({"n": "sesenta"}, {}, sin_resolver=frozenset({"otra_clave"}))
+        raise AssertionError("debió rechazar 'sesenta'")
+    except ParamError as exc:
+        assert "no es un entero" in str(exc)
+
+
+def test_json_literal_desde_el_mmd_parsea_a_objeto():
+    manifest = ToolManifest(
+        id="t.x", label="x", category="X", params=(Param("items", ParamType.JSON),)
+    )
+    resolved = manifest.resolve_params({"items": "[1, 2, 3]"}, {})
+    assert resolved == {"items": [1, 2, 3]}
+
+
+def test_json_ya_estructurado_pasa_directo():
+    """Viene así desde resolve() cuando el template era un único {placeholder}
+    apuntando a una lista/dict, o desde el store de configuración."""
+    manifest = ToolManifest(
+        id="t.x", label="x", category="X", params=(Param("items", ParamType.JSON),)
+    )
+    resolved = manifest.resolve_params({"items": ["a.stl", "b.stl"]}, {})
+    assert resolved == {"items": ["a.stl", "b.stl"]}
+
+
+def test_json_invalido_da_param_error():
+    manifest = ToolManifest(
+        id="t.x", label="x", category="X", params=(Param("items", ParamType.JSON),)
+    )
+    try:
+        manifest.resolve_params({"items": "no es json"}, {})
+        raise AssertionError("debió rechazar texto no-JSON")
+    except ParamError as exc:
+        assert "no es JSON válido" in str(exc)
 
 
 def test_enum_invalido_da_param_error():
@@ -453,7 +565,36 @@ def test_el_catalogo_publica_que_ports_usa_cada_plugin():
     catalogo = _registry().catalog()
     plugin = catalogo["plugins"][0]
     assert set(plugin["ports"]) == {"http", "fs", "process", "clock"}
-    assert set(catalogo["ports"]) == {"http", "fs", "process", "clock"}
+    assert set(catalogo["ports"]) == {
+        "http", "fs", "process", "clock", "browser", "window", "geometry", "socket", "sqlite_file",
+    }
+
+
+# ── Dependencias de cómputo puro (issue #20) ─────────────────────────────
+
+
+def test_el_catalogo_dice_si_una_dependencia_declarada_esta_instalada():
+    """
+    Observabilidad, no un instalador (issue #19/#20): el núcleo no resuelve
+    numpy/trimesh, pero un agente que ve "trimesh: falta" sabe qué pasó antes
+    de tropezar con un ImportError a mitad de un tool.
+    """
+    manifest = PluginManifest(
+        name="convertidor", label="Convertidor", requires=("pytest", "no-existe-esta-lib==1.0")
+    )
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("convertidor", "test", Plugin(manifest=manifest))
+
+    requiere = reg.catalog()["plugins"][0]["requires"]
+    assert {"spec": "pytest", "package": "pytest", "present": True} in requiere
+    assert {
+        "spec": "no-existe-esta-lib==1.0", "package": "no-existe-esta-lib", "present": False,
+    } in requiere
+
+
+def test_sin_requires_declarado_el_catalogo_no_inventa_nada():
+    catalogo = _registry().catalog()  # demo_plugin no declara requires
+    assert catalogo["plugins"][0]["requires"] == []
 
 
 # ── Acciones ────────────────────────────────────────────────────────────
@@ -464,7 +605,7 @@ def test_una_accion_se_declara_en_el_manifest_y_se_ejecuta():
     adapters["http"].stub("https://api.test/ping", status=200, text="{}")
     reg = _registry(adapters)
 
-    assert [a.name for a in reg.actions_of("demo")] == ["ping"]
+    assert [a.name for a in reg.actions_of("demo")] == ["ping", "probar_destino"]
     result = reg.execute_action(
         "demo", "ping", _ctx_factory({"url": "https://api.test/ping"})
     )
@@ -586,6 +727,45 @@ def test_dos_plugins_no_se_pisan_una_coleccion_con_el_mismo_nombre(db):
     assert otro.list_keys() == ["compartida"]
 
 
+def test_store_cifra_los_campos_que_el_resource_declara_secret(db, crypto):
+    """
+    Issue #8: `token` está declarado `secret=True` en el Field del demo
+    plugin (ver arriba). El store ya sabe eso -- recibe el `Resource`
+    completo--, así que no necesita que nadie más se lo diga.
+    """
+    resource = _registry().plugins[0].manifest.resources[0]
+    store = store_for(db, "demo", resource, crypto)
+    store.write("con secreto", {"ruta": "/x", "token": "shhh"})
+
+    fila = db.one(
+        "SELECT data FROM plugin_items WHERE plugin = ? AND key = ?",
+        ("demo", "con secreto"),
+    )
+    assert "shhh" not in fila["data"]  # en la base no queda ni un pedazo
+
+    # Pero para el plugin (ctx.resource(...)) sigue en claro.
+    assert store.read("con secreto")["token"] == "shhh"
+    assert store.list_items()[0]["token"] == "shhh"
+
+
+def test_store_sin_crypto_sigue_andando_si_no_hay_campo_secreto_con_valor(db):
+    """
+    Compatibilidad: la inmensa mayoría de los items no tocan un campo
+    `secret`, y esos siguen funcionando sin CryptoPort exactamente como antes.
+    """
+    resource = _registry().plugins[0].manifest.resources[0]
+    store = store_for(db, "demo", resource)  # sin crypto
+    assert store.write("sin secreto", {"ruta": "/x"})["ruta"] == "/x"
+
+
+def test_store_campo_secreto_sin_cifrado_configurado_es_un_error_explicito(db):
+    resource = _registry().plugins[0].manifest.resources[0]
+    store = store_for(db, "demo", resource)  # sin crypto
+
+    with pytest.raises(ResourceError, match="cifrado"):
+        store.write("falla", {"ruta": "/x", "token": "shhh"})
+
+
 def test_el_item_guarda_cuando_cambio(db):
     resource = _registry().plugins[0].manifest.resources[0]
     store = _store_de_prueba(db, resource)
@@ -639,6 +819,334 @@ def test_alias_en_conflicto_se_reporta():
     reg._add_plugin("dos", "test", [_tool("dos.hacer")])
 
     assert any("alias en conflicto" in e.error for e in reg.errors)
+
+
+# ── options_from: de qué colección salen los valores de un param ─────
+
+
+def test_options_from_viaja_en_el_to_dict():
+    param = Param("connection", options_from="connections")
+    assert param.to_dict()["options_from"] == "connections"
+
+
+def test_options_from_por_defecto_es_vacio():
+    """Compatibilidad: ningún plugin ni test existente declara esto, y no cambia nada si no lo usa."""
+    assert Param("x").to_dict()["options_from"] == ""
+
+
+def test_options_from_no_se_valida_al_resolver_params():
+    """
+    A diferencia de `choices`, no es una restricción del núcleo: un
+    `{variable}` sin resolver, o cualquier texto, tiene que poder pasar --
+    quien lo restringe (si quiere) es la UI que dibuja el buscador.
+    """
+    manifest = ToolManifest(
+        id="t.x",
+        label="x",
+        category="X",
+        params=(Param("connection", options_from="connections"),),
+    )
+    resolved = manifest.resolve_params({"connection": "cualquier-cosa"}, {})
+    assert resolved == {"connection": "cualquier-cosa"}
+
+
+def test_options_from_que_no_existe_en_el_plugin_se_reporta():
+    """Issue de diseño: un typo en `options_from` se ve al cargar, no como un buscador vacío."""
+    manifest = PluginManifest(name="p", label="P", resources=(Resource(name="connections", label="Conexiones"),))
+    tool = FunctionTool(
+        manifest=ToolManifest(
+            id="p.usar",
+            label="x",
+            category="X",
+            params=(Param("connection", options_from="conexiones"),),  # typo
+        ),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("p", "test", Plugin(manifest=manifest, tools=[tool]))
+
+    assert any("options_from" in e.error and "conexiones" in e.error for e in reg.errors)
+    # El tool se registra igual: el typo no impide que ande, sólo rompe el hint.
+    assert reg.manifest("p.usar") is not None
+
+
+def test_options_from_que_existe_no_se_reporta():
+    manifest = PluginManifest(name="p", label="P", resources=(Resource(name="connections", label="Conexiones"),))
+    tool = FunctionTool(
+        manifest=ToolManifest(
+            id="p.usar",
+            label="x",
+            category="X",
+            params=(Param("connection", options_from="connections"),),
+        ),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("p", "test", Plugin(manifest=manifest, tools=[tool]))
+
+    assert reg.errors == []
+
+
+def test_options_from_sin_manifest_de_plugin_siempre_se_reporta():
+    """El modo mínimo (sin PluginManifest) no declara ningún Resource posible."""
+    tool = FunctionTool(
+        manifest=ToolManifest(
+            id="p.usar",
+            label="x",
+            category="X",
+            params=(Param("connection", options_from="connections"),),
+        ),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("p", "test", [tool])  # lista de tools pelada, sin Plugin/manifest
+
+    assert any("options_from" in e.error for e in reg.errors)
+
+
+def test_options_from_de_una_accion_tambien_se_valida():
+    declaracion = Action(
+        name="probar", label="Probar", params=(Param("connection", options_from="conexiones"),)
+    )
+    manifest = PluginManifest(
+        name="p",
+        label="P",
+        resources=(Resource(name="connections", label="Conexiones"),),
+        actions=(declaracion,),
+    )
+    accion = FunctionAction(action=declaracion, fn=lambda ctx: ToolResult.ok())
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("p", "test", Plugin(manifest=manifest, tools=[], actions=[accion]))
+
+    assert any("probar.connection" in e.error for e in reg.errors)
+
+
+# ── dry_run="run" — un tool que sólo lee corre de verdad en seco (issue #34) ──
+
+
+def test_dry_run_run_con_puerto_sin_modo_lectura_se_reporta_al_cargar():
+    tool = FunctionTool(
+        manifest=ToolManifest(id="p.usar", label="x", category="X", dry_run="run"),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    manifest = PluginManifest(name="p", label="P", ports=("process",))
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("p", "test", Plugin(manifest=manifest, tools=[tool]))
+
+    assert any(
+        "dry_run" in e.error and "process" in e.error for e in reg.errors
+    )
+    # El typo de diseño no impide que el tool ande -- mismo criterio que options_from.
+    assert reg.manifest("p.usar") is not None
+
+
+def test_dry_run_run_con_puertos_compatibles_no_se_reporta():
+    tool = FunctionTool(
+        manifest=ToolManifest(id="p.usar", label="x", category="X", dry_run="run"),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    manifest = PluginManifest(name="p", label="P", ports=("fs", "http"))
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("p", "test", Plugin(manifest=manifest, tools=[tool]))
+
+    assert reg.errors == []
+
+
+def test_dry_run_ok_es_false_por_default():
+    tool = FunctionTool(
+        manifest=ToolManifest(id="p.usar", label="x", category="X"),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("p", "test", Plugin(manifest=PluginManifest(name="p", label="P"), tools=[tool]))
+
+    assert reg.dry_run_ok("p.usar") is False
+
+
+def test_dry_run_ok_es_true_con_puertos_compatibles():
+    tool = FunctionTool(
+        manifest=ToolManifest(id="p.usar", label="x", category="X", dry_run="run"),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    manifest = PluginManifest(name="p", label="P", ports=("fs",))
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("p", "test", Plugin(manifest=manifest, tools=[tool]))
+
+    assert reg.dry_run_ok("p.usar") is True
+
+
+def test_dry_run_ok_es_false_con_puerto_incompatible_aunque_declare_run():
+    """
+    La red de seguridad: `dry_run_ok` no confía en el diagnóstico de carga --
+    lo repite. Un `--allow-broken` u otro camino que pase por alto el error
+    de carga no debería poder arriesgar tocar el mundo en un dry run.
+    """
+    tool = FunctionTool(
+        manifest=ToolManifest(id="p.usar", label="x", category="X", dry_run="run"),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    manifest = PluginManifest(name="p", label="P", ports=("fs", "browser"))
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("p", "test", Plugin(manifest=manifest, tools=[tool]))
+
+    assert reg.dry_run_ok("p.usar") is False
+
+
+def test_execute_read_only_bloquea_escritura_de_fs_y_deja_pasar_lectura():
+    fs = FakeFs(files={"/a.txt": "hola"})
+    tool = FunctionTool(
+        manifest=ToolManifest(id="p.usar", label="x", category="X"),
+        fn=lambda ctx: ToolResult.ok(leido=ctx.port("fs").read_text("/a.txt")),
+    )
+    manifest = PluginManifest(name="p", label="P", ports=("fs",))
+    reg = ToolRegistry(adapters=fake_adapters(fs=fs))
+    reg._add_plugin("p", "test", Plugin(manifest=manifest, tools=[tool]))
+
+    resultado = reg.execute("p.usar", lambda m, ports: ToolContext(
+        run_id="r", case_id="c", params={}, config={}, context={}, log=lambda *a: None, ports=ports,
+    ), read_only=True)
+    assert resultado.outputs["leido"] == "hola"
+
+    def _ctx_que_escribe(m, ports):
+        ports["fs"].write_text("/b.txt", "x")
+        return ToolContext(
+            run_id="r", case_id="c", params={}, config={}, context={}, log=lambda *a: None, ports=ports,
+        )
+
+    escritura = reg.execute("p.usar", _ctx_que_escribe, read_only=True)
+    assert escritura.failed
+    assert "escritura en dry run" in escritura.message
+
+
+# ── options_from="core:..." — fuente de opciones que provee el núcleo (issue #32) ──
+
+
+def test_options_from_core_no_se_busca_entre_los_resources_del_plugin():
+    """Sin resources declarados, options_from='connections' se reportaría; 'core:plugins' no."""
+    tool = FunctionTool(
+        manifest=ToolManifest(
+            id="p.usar",
+            label="x",
+            category="X",
+            params=(Param("plugin", options_from="core:plugins"),),
+        ),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("p", "test", [tool])
+
+    assert reg.errors == []
+
+
+def test_options_from_core_con_placeholder_que_nombra_otro_param_es_valido():
+    tool = FunctionTool(
+        manifest=ToolManifest(
+            id="bots.migrar",
+            label="Migrar",
+            category="X",
+            params=(
+                Param("plugin", options_from="core:plugins"),
+                Param("coleccion", options_from="core:resources:{plugin}"),
+            ),
+        ),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("bots", "test", [tool])
+
+    assert reg.errors == []
+
+
+def test_options_from_core_con_placeholder_que_no_existe_se_reporta():
+    """Un typo acá es peor que en un options_from normal: el campo parece depender de algo."""
+    tool = FunctionTool(
+        manifest=ToolManifest(
+            id="bots.migrar",
+            label="Migrar",
+            category="X",
+            params=(Param("coleccion", options_from="core:resources:{plugn}"),),  # typo
+        ),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("bots", "test", [tool])
+
+    assert any(
+        "options_from" in e.error and "plugn" in e.error and "no existe" in e.error
+        for e in reg.errors
+    )
+
+
+def test_options_from_core_acepta_un_alias_del_param_referenciado():
+    """Mismo criterio que la resolución real: `read_from` acepta el nombre actual o un alias."""
+    tool = FunctionTool(
+        manifest=ToolManifest(
+            id="bots.migrar",
+            label="Migrar",
+            category="X",
+            params=(
+                Param("plugin", aliases=("nombre_plugin",)),
+                Param("coleccion", options_from="core:resources:{nombre_plugin}"),
+            ),
+        ),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("bots", "test", [tool])
+
+    assert reg.errors == []
+
+
+def test_options_from_core_con_sintaxis_invalida_se_reporta():
+    """Un solo placeholder, sin expresiones ni anidado: cualquier otra forma es un error de carga."""
+    tool = FunctionTool(
+        manifest=ToolManifest(
+            id="bots.migrar",
+            label="Migrar",
+            category="X",
+            params=(Param("coleccion", options_from="core:resources:{plugin}{otro}"),),
+        ),
+        fn=lambda ctx: ToolResult.ok(),
+    )
+    reg = ToolRegistry(adapters=fake_adapters())
+    reg._add_plugin("bots", "test", [tool])
+
+    assert any("options_from" in e.error and "sintaxis" in e.error for e in reg.errors)
+
+
+# ── placeholder: ejemplo adentro del campo vacío (issue #29) ─────────
+
+
+def test_placeholder_viaja_en_el_to_dict():
+    param = Param("ruta", placeholder=r"D:\casos\AP962\stl")
+    assert param.to_dict()["placeholder"] == r"D:\casos\AP962\stl"
+
+
+def test_placeholder_por_defecto_es_vacio():
+    """Compatibilidad: ningún plugin ni test existente declara esto, y no cambia nada si no lo usa."""
+    assert Param("x").to_dict()["placeholder"] == ""
+
+
+def test_placeholder_no_se_valida_al_resolver_params():
+    """
+    Puramente informativo, como options_from: un {variable} sigue pudiendo
+    resolver a cualquier cosa aunque no se parezca en nada al placeholder.
+    """
+    manifest = ToolManifest(
+        id="p.hacer",
+        label="Hacer",
+        category="TEST",
+        params=(Param("ruta", placeholder=r"D:\casos\AP962\stl"),),
+    )
+    resueltos = manifest.resolve_params({"ruta": "cualquier cosa"}, {})
+    assert resueltos["ruta"] == "cualquier cosa"
+
+
+def test_placeholder_no_reemplaza_doc_conviven_los_dos():
+    param = Param("coleccion", doc="La colección del plugin", placeholder="bots")
+    datos = param.to_dict()
+    assert datos["doc"] == "La colección del plugin"
+    assert datos["placeholder"] == "bots"
 
 
 # ── Params abiertos ─────────────────────────────────────────────────────

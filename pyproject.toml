@@ -4,15 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bot-core"
-version = "0.1.0"
+version = "1.0.0"
 description = "Motor de workflows con trazas: parsea un flujo en Mermaid, lo ejecuta y deja registro de qué pasó en cada nodo."
 readme = "backend/README.md"
 requires-python = ">=3.10"
-dependencies = []
+# numpy (issue #19): transversal a cualquier port/adapter que haga cómputo
+# numérico -- geometría, imágenes, señales --, a diferencia de una librería
+# específica de un plugin (`trimesh`, por ejemplo, que se queda afuera:
+# ver GeometryPort en backend/core/ports.py). Es la única excepción a "cero
+# dependencias obligatorias" y es deliberada: sin esto, cada instalación que
+# necesite un adapter numérico tendría que acordarse de pedirla aparte.
+dependencies = ["numpy"]
 
 [project.optional-dependencies]
 crypto = ["cryptography==50.0.1"]
 mcp = ["mcp==2.1.1"]
+browser = ["playwright==1.62.0"]
+# Sólo la mitad del port `window`: el adapter de Windows. El de Linux (AT-SPI)
+# no es un paquete de pip -- lo instala el sistema, ver backend/requirements.txt.
+window = ["pywinauto==0.6.8; sys_platform == 'win32'"]
 dev = ["pytest"]
 
 [project.scripts]
@@ -22,3 +32,10 @@ bot-core-mcp = "backend.mcp.server:main"
 [tool.setuptools.packages.find]
 include = ["backend", "backend.*"]
 exclude = ["backend.tests", "backend.tests.*"]
+
+[tool.setuptools.package-data]
+# VERSION no es código: release.yml lo escribe con el tag antes de empaquetar
+# (issue #5), para que un backend/ vendorizado sin pasar por pip tenga de
+# dónde leer la versión. Si no existe al buildear (un dev local, por
+# ejemplo), setuptools no se queja -- simplemente no lo incluye.
+backend = ["VERSION"]

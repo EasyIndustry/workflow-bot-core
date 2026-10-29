@@ -77,6 +77,12 @@ class DecisionNode:
     display: str = ""
     line: int | None = None
     type: str = "decision"
+    # Issue #37: `D1{Revisión § aprobado | manual | ayuda=...}`. Una decisión
+    # manual la toma una persona: la corrida real se pausa acá (status
+    # "waiting") hasta que alguien elige la rama, aunque la variable ya tenga
+    # valor. `ayuda` es el texto que una UI muestra al preguntar.
+    manual: bool = False
+    ayuda: str = ""
 
 
 @dataclass(frozen=True)
@@ -98,6 +104,11 @@ def _node_to_dict(node: FlowNode) -> dict:
             data[attr] = value
     if display := getattr(node, "display", ""):
         data["display"] = display
+    # Issue #37: sólo si están, así el payload de una decisión común no cambia.
+    if getattr(node, "manual", False):
+        data["manual"] = True
+    if ayuda := getattr(node, "ayuda", ""):
+        data["ayuda"] = ayuda
     return data
 
 
@@ -119,13 +130,19 @@ class FlowMeta:
     folder: str = ""
     state: str = "enabled"
     description: str = ""
+    source: str = ""  # issue #31: fuente para la que el flujo está pensado
 
     @property
     def enabled(self) -> bool:
         return self.state != "disabled"
 
     def to_dict(self) -> dict:
-        return {"folder": self.folder, "state": self.state, "description": self.description}
+        return {
+            "folder": self.folder,
+            "state": self.state,
+            "description": self.description,
+            "source": self.source,
+        }
 
 
 @dataclass
@@ -177,28 +194,68 @@ _EDGE_RE = re.compile(r"^(\w+)\s*-->\s*(?:\|([^|]*)\|)?\s*(\w+)(.*)?$")
 _CONT_RE = re.compile(r"^-->\s*(?:\|([^|]*)\|)?\s*(\w+)(.*)?$")
 
 _SHAPES = (
-    (re.compile(r'^(\w+)\["([^"]*)"\]$'), "rect"),
+    # `.*` y no `[^"]*`: un valor citado (`message="a, b"`) mete comillas
+    # adentro de la etiqueta, y greedy + backtracking hace que esto siga
+    # tomando la primera y la última como el wrapper de Mermaid, no las de
+    # adentro (ver `_dividir_pares`, que es quien realmente las interpreta).
+    (re.compile(r'^(\w+)\["(.*)"\]$'), "rect"),
     (re.compile(r"^(\w+)\[([^\]]+)\]$"), "rect"),
-    (re.compile(r"^(\w+)\{([^}]+)\}$"), "diamond"),
+    # Issue #38: la ayuda de una decisión manual puede llevar `{variables}`,
+    # así que el rombo ya no es "sin `}` adentro": se toma todo hasta la `}`
+    # final y `_rombo` verifica que esa sea la que cierra la primera `{`.
+    (re.compile(r"^(\w+)(\{.+\})$"), "diamond"),
     (re.compile(r"^(\w+)\(([^)]+)\)$"), "round"),
 )
 
 _INLINE_SHAPES = (
-    (re.compile(r'^\["([^"]*)"\]$'), "rect"),
+    (re.compile(r'^\["(.*)"\]$'), "rect"),
     (re.compile(r"^\[([^\]]+)\]$"), "rect"),
-    (re.compile(r"^\{([^}]+)\}$"), "diamond"),
+    (re.compile(r"^(\{.+\})$"), "diamond"),
     (re.compile(r"^\(([^)]+)\)$"), "round"),
 )
 
 
-def parse_meta(raw: str) -> tuple[FlowMeta, str]:
+def _rombo(texto: str) -> str | None:
+    """
+    El contenido de `{...}` si la `}` final es la que cierra la primera `{`
+    (issue #38); None si no -- `{a} --> C{b}` no es un rombo, son dos cosas.
+
+    Llaves de más sin cerrar (`{a{b}`) siguen valiendo como antes, cuando el
+    patrón era "cualquier cosa menos `}`": lo único que se rechaza es una
+    `{` de apertura que ya cerró antes del final.
+    """
+    profundidad = 0
+    for i, ch in enumerate(texto):
+        if ch == "{":
+            profundidad += 1
+        elif ch == "}":
+            profundidad -= 1
+            if profundidad == 0 and i != len(texto) - 1:
+                return None
+    return texto[1:-1] or None
+
+
+def _etiqueta(m: "re.Match[str]", shape: str, grupo: int) -> str | None:
+    etiqueta = m.group(grupo)
+    return _rombo(etiqueta) if shape == "diamond" else etiqueta
+
+
+def parse_meta(raw: str) -> tuple[FlowMeta, str, frozenset[str]]:
     """
     Separa la cabecera `%% key: value` del contenido Mermaid.
 
     La cabecera es parte del DSL, así
     que su parseo pertenece al núcleo y no a la capa HTTP.
+
+    El tercer elemento son las claves que de verdad aparecieron en la
+    cabecera, para distinguir "no la trajo" de "la trajo vacía" — un `.mmd`
+    sin `%% folder:` no es lo mismo que uno con `%% folder:` a secas, y quien
+    guarda de nuevo un flujo existente sin repetir su cabecera completa
+    necesita poder conservar lo que ya tenía en vez de que se le pise con el
+    default (ver `WorkflowStore.save_mmd`).
     """
-    values = {"folder": "", "state": "enabled", "description": ""}
+    values = {"folder": "", "state": "enabled", "description": "", "source": ""}
+    explicitas: set[str] = set()
     lines = raw.splitlines()
     i = 0
     while i < len(lines):
@@ -208,8 +265,9 @@ def parse_meta(raw: str) -> tuple[FlowMeta, str]:
         key, val = m.group(1).lower(), m.group(2).strip()
         if key in values:
             values[key] = val
+            explicitas.add(key)
         i += 1
-    return FlowMeta(**values), "\n".join(lines[i:]).lstrip("\n")
+    return FlowMeta(**values), "\n".join(lines[i:]).lstrip("\n"), frozenset(explicitas)
 
 
 def _split_display(label: str) -> tuple[str, str]:
@@ -220,16 +278,138 @@ def _split_display(label: str) -> tuple[str, str]:
     return label[:idx].strip(), label[idx + len(DISPLAY_SEP) :].strip()
 
 
-def _parse_action_label(label: str) -> tuple[str, dict[str, str], str, list[str]]:
+# Issue #37: dos entidades de Mermaid, no una. Un valor citado con comilla
+# cruda (`key="valor"`) tiene el mismo problema de fondo que la comilla que
+# quería escapar: **cualquier** `"` de más adentro de la etiqueta de un nodo
+# (`["…"]`) rompe mermaid.js apenas lo que sigue se parece a su sintaxis
+# (`{`, `(`, `[`, `>`) -- verificado por workflow-bot-app contra la vista
+# real, y les pasaba ya antes de esto a valores citados sin ninguna comilla
+# adentro, con sólo empezar así. `#quot;` (que Mermaid ya reconoce y dibuja
+# como `"`) reemplaza la comilla cruda como apertura/cierre de la cita. Una
+# comilla LITERAL dentro del valor usa una entidad distinta, `#34;` -- si
+# las dos usaran `#quot;` (el primer intento), este mismo parser no podría
+# distinguir "cierra la cita" de "una comilla más del valor". Las dos se
+# dibujan igual (`"`) en Mermaid, así que la elección no afecta el diagrama.
+CITA_ENTIDAD = "#quot;"
+ESCAPE_COMILLA = "#34;"
+
+# Issue #38: las llaves de una `{variable}` adentro de la ayuda de un rombo.
+# mermaid.js no acepta `{`/`}` sueltas en la etiqueta de un `D1{...}`, así que
+# el serializer las escribe como entidad (que Mermaid dibuja como la llave) y
+# el parser las lee de vuelta.
+LLAVE_ABRE = "#123;"
+LLAVE_CIERRA = "#125;"
+
+
+def _dividir_pares(texto: str) -> tuple[list[str], bool]:
     """
-    Parsea "Nombre § fn.id | k=v, k2=v2" → (fn_id, params, display, descartados).
+    Separa por `,` y `|`, salvo dentro de comillas dobles.
+
+    `k=#quot;v, con coma#quot;` es un solo segmento: la coma de adentro no
+    separa. La cita sólo abre pegada a un `=` (`key=#quot;...` o, en modo
+    legado, `key="...`) — en cualquier otro lugar del valor es texto más,
+    sin efecto.
+
+    Dos formas de citar un valor, y las dos se leen:
+
+    - **Nueva (issue #37), la que escribe `to_mermaid` de acá en más:**
+      `#quot;` abre y cierra; `#34;` adentro es una comilla literal.
+    - **Legado (los nodos ya escritos así):** una comilla cruda (`"`) abre y
+      cierra -- sin escape para nada, es el formato original de antes de
+      #36, y sigue leyéndose para no romper lo ya guardado. `to_mermaid` ya
+      no lo vuelve a escribir: tiene el mismo problema con Mermaid que se
+      corrige acá.
+
+    Los dos modos no se mezclan: una cita abierta en un modo sólo cierra con
+    el delimitador de ese mismo modo. El límite que persiste es un valor
+    citado (en modo nuevo) que ya trae, sin querer decir una comilla, la
+    secuencia literal `#quot;` o `#34;` -- mismo límite que tiene el propio
+    Mermaid con sus entidades.
+
+    Devuelve además si el texto terminó con una comilla sin cerrar, para que
+    quien llama pueda avisar en vez de devolver un valor cortado a la mitad.
+    """
+    segmentos: list[str] = []
+    actual: list[str] = []
+    en_comillas = False
+    modo_entidad = False
+    i = 0
+    n = len(texto)
+    while i < n:
+        if en_comillas and modo_entidad and texto.startswith(ESCAPE_COMILLA, i):
+            actual.append('"')  # #34; -> " literal: no cierra la cita
+            i += len(ESCAPE_COMILLA)
+            continue
+        if en_comillas and modo_entidad and texto.startswith(CITA_ENTIDAD, i):
+            en_comillas, modo_entidad = False, False
+            actual.append('"')
+            i += len(CITA_ENTIDAD)
+            continue
+        if not en_comillas and texto.startswith(CITA_ENTIDAD, i) and (not actual or actual[-1] == "="):
+            en_comillas, modo_entidad = True, True
+            actual.append('"')
+            i += len(CITA_ENTIDAD)
+            continue
+        ch = texto[i]
+        if ch == '"' and not modo_entidad and (en_comillas or not actual or actual[-1] == "="):
+            en_comillas = not en_comillas
+            actual.append(ch)
+        elif ch in ",|" and not en_comillas:
+            segmentos.append("".join(actual))
+            actual = []
+        else:
+            actual.append(ch)
+        i += 1
+    segmentos.append("".join(actual))
+    return segmentos, en_comillas
+
+
+def _parse_decision_label(label: str) -> tuple[str, str, bool, str, list[str], bool]:
+    """
+    Parsea "Nombre § variable | manual | ayuda=texto" (issue #37) →
+    (variable, display, manual, ayuda, descartados, sin_cerrar).
+
+    Misma forma `| clave=valor` que una acción, con `manual` como bandera
+    suelta. Sin `|`, es la decisión de siempre: toda la definición es la
+    variable.
+    """
+    display, definition = _split_display(label)
+    pipe = definition.find("|")
+    variable = (definition[:pipe] if pipe >= 0 else definition).strip()
+    manual, ayuda = False, ""
+    descartados: list[str] = []
+    sin_cerrar = False
+    if pipe >= 0:
+        pares, sin_cerrar = _dividir_pares(definition[pipe + 1 :])
+        for pair in pares:
+            texto = pair.strip()
+            if not texto:
+                continue
+            if texto.lower() == "manual":
+                manual = True
+                continue
+            clave, eq, valor = texto.partition("=")
+            if eq and clave.strip().lower() == "ayuda":
+                valor = valor.strip()
+                if len(valor) >= 2 and valor[0] == '"' and valor[-1] == '"':
+                    valor = valor[1:-1]
+                ayuda = valor.replace(LLAVE_ABRE, "{").replace(LLAVE_CIERRA, "}")
+                continue
+            descartados.append(texto)
+    return variable, display, manual, ayuda, descartados, sin_cerrar
+
+
+def _parse_action_label(label: str) -> tuple[str, dict[str, str], str, list[str], bool]:
+    """
+    Parsea "Nombre § fn.id | k=v, k2=v2" → (fn_id, params, display, descartados, sin_cerrar).
 
     El valor no se trimea, igual que en el motor anterior: preserva sufijos con espacios
-    como windowsRenameSuffix= - COMPLETADO.
+    como windowsRenameSuffix= - COMPLETADO. Lo mismo adentro de un valor citado.
 
-    La coma separa parámetros, así que un valor **no puede contener comas**:
-    `message=Hola, mundo` pierde " mundo". el motor anterior lo descartaba en
-    silencio; acá los segmentos sin `=` se devuelven para avisar.
+    Un valor entre comillas dobles puede contener comas y pipes:
+    `message="Hola, mundo"` guarda "Hola, mundo" entero. Sin comillas, la coma
+    sigue separando como siempre —`message=Hola, mundo` pierde " mundo"— así
+    que ningún flujo existente cambia de comportamiento con esto.
     """
     display, definition = _split_display(label)
     pipe = definition.find("|")
@@ -237,19 +417,24 @@ def _parse_action_label(label: str) -> tuple[str, dict[str, str], str, list[str]
 
     params: dict[str, str] = {}
     descartados: list[str] = []
+    sin_cerrar = False
     if pipe >= 0:
-        for pair in re.split(r"[,|]", definition[pipe + 1 :]):
+        pares, sin_cerrar = _dividir_pares(definition[pipe + 1 :])
+        for pair in pares:
             eq = pair.find("=")
             if eq < 0:
                 if pair.strip():
                     descartados.append(pair.strip())
                 continue
             key = pair[:eq].strip()
+            valor = pair[eq + 1 :]
+            if len(valor) >= 2 and valor[0] == '"' and valor[-1] == '"':
+                valor = valor[1:-1]
             if key:
-                params[key] = pair[eq + 1 :]
+                params[key] = valor
             elif pair.strip():
                 descartados.append(pair.strip())
-    return fn_id, params, display, descartados
+    return fn_id, params, display, descartados, sin_cerrar
 
 
 class _Builder:
@@ -283,19 +468,46 @@ class _Builder:
         if shape == "round":
             node: FlowNode = StartNode(label=label or "inicio", line=line)
         elif shape == "diamond":
-            display, variable = _split_display(label)
+            variable, display, manual, ayuda, descartados, sin_cerrar = _parse_decision_label(label)
             if not variable:
                 self.error(f'Nodo de decisión "{node_id}" sin variable', line, node_id)
                 variable = ""
-            node = DecisionNode(variable=variable, display=display, line=line)
+            for texto in descartados:
+                self.error(
+                    f'En la decisión "{node_id}" no se reconoce "{texto}": se acepta '
+                    f'"manual" y "ayuda=texto".',
+                    line,
+                    node_id,
+                )
+            if sin_cerrar:
+                self.error(
+                    f'En la decisión "{node_id}" hay una comilla sin cerrar en la ayuda.',
+                    line,
+                    node_id,
+                )
+            node = DecisionNode(
+                variable=variable, display=display, line=line, manual=manual, ayuda=ayuda
+            )
         else:
-            fn_id, params, display, descartados = _parse_action_label(label)
+            fn_id, params, display, descartados, sin_cerrar = _parse_action_label(label)
             if not fn_id:
                 self.error(f'Nodo de acción "{node_id}" sin función', line, node_id)
+            # Error y no warning: un flujo con un valor mutilado queda
+            # "runnable" con un texto cortado a la mitad, que es peor que no
+            # ejecutar nada. `graph.runnable` (y por lo tanto `run()`) ya
+            # respeta la severidad del diagnóstico, así que subirla acá
+            # alcanza para que el flujo deje de poder correr así.
             for texto in descartados:
-                self.warn(
+                self.error(
                     f'En "{node_id}" se descartó "{texto}": no tiene forma clave=valor. '
-                    f"La coma separa parámetros, así que un valor no puede contener comas.",
+                    f'Si el valor necesita una coma o un pipe, va entre comillas: '
+                    f'clave="{texto}".',
+                    line,
+                    node_id,
+                )
+            if sin_cerrar:
+                self.error(
+                    f'En "{node_id}" hay una comilla sin cerrar en el valor de un parámetro.',
                     line,
                     node_id,
                 )
@@ -311,8 +523,8 @@ class _Builder:
             return
         for pattern, shape in _INLINE_SHAPES:
             m = pattern.match(text)
-            if m:
-                self.register(node_id, shape, m.group(1), line)
+            if m and (etiqueta := _etiqueta(m, shape, 1)) is not None:
+                self.register(node_id, shape, etiqueta, line)
                 return
 
 
@@ -325,7 +537,7 @@ def parse_flow(text: str, *, with_meta: bool = True) -> FlowGraph:
     """
     meta = FlowMeta()
     if with_meta:
-        meta, text = parse_meta(text)
+        meta, text, _ = parse_meta(text)
 
     b = _Builder()
 
@@ -368,8 +580,8 @@ def parse_flow(text: str, *, with_meta: bool = True) -> FlowGraph:
         # ── Definición de nodo suelta ────────────────────────────────
         for pattern, shape in _SHAPES:
             m = pattern.match(line)
-            if m:
-                b.register(m.group(1), shape, m.group(2), lineno)
+            if m and (etiqueta := _etiqueta(m, shape, 2)) is not None:
+                b.register(m.group(1), shape, etiqueta, lineno)
                 break
         else:
             b.warn(f"Línea no reconocida por el parser: {line!r}", lineno)
@@ -378,7 +590,28 @@ def parse_flow(text: str, *, with_meta: bool = True) -> FlowGraph:
     _resolve_orphans(graph)
     _resolve_start(graph)
     _flag_unreachable(graph)
+    _check_manual_decisions(graph)
     return graph
+
+
+def _check_manual_decisions(graph: FlowGraph) -> None:
+    """
+    Una decisión manual sin ninguna arista con condición no tiene nada que
+    ofrecerle a quien decide (issue #37): la corrida se pausaría para una
+    pregunta sin respuestas posibles.
+    """
+    for node_id, node in graph.nodes.items():
+        if isinstance(node, DecisionNode) and node.manual:
+            if not any(e.condition is not None for e in graph.out_edges(node_id)):
+                graph.diagnostics.append(
+                    Diagnostic(
+                        Severity.ERROR,
+                        f'La decisión manual "{node_id}" no tiene ninguna arista con '
+                        f"condición: no habría nada que elegir.",
+                        node.line,
+                        node_id,
+                    )
+                )
 
 
 def _resolve_orphans(graph: FlowGraph) -> None:

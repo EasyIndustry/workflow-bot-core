@@ -30,14 +30,16 @@ from __future__ import annotations
 
 import importlib
 import logging
+import re
 from dataclasses import dataclass
-from importlib.metadata import entry_points
+from importlib.metadata import PackageNotFoundError, entry_points, version
 from typing import Iterable
 
 from .contract import (
     CONTRACT_VERSION,
     Action,
     MissingSetting,
+    Param,
     ParamError,
     Plugin,
     PluginManifest,
@@ -46,7 +48,16 @@ from .contract import (
     ToolManifest,
     ToolResult,
 )
-from .ports import PLUGIN_PORTS
+from .builtins import NATIVE_MANIFESTS
+from .ports import PLUGIN_PORTS, PortError
+
+# Capacidades del núcleo que un cliente puede consultar en `catalog()` en vez
+# de comparar versiones. Sólo se agregan claves; una que existe no cambia de
+# significado.
+CAPABILITIES = {
+    "manual_decisions": True,  # issue #37
+    "manual_decision_help_vars": True,  # issue #38: `{variables}` en la ayuda
+}
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +82,180 @@ def _module_of(entry_point_value: str) -> object | None:
 def _version_of(module: object | None) -> str:
     """Versión declarada por el plugin; 'desconocida' si no expone __version__."""
     return str(getattr(module, "__version__", "") or "desconocida")
+
+
+# El nombre del paquete es el prefijo de la línea de requirements: todo lo que
+# no sea un caracter válido de nombre (=, <, >, !, ~, [, un espacio) corta el
+# match. No se resuelven marcadores de entorno ni hashes -- ver el nombre y
+# saber si está instalado alcanza para lo que esto existe (issue #20).
+_NOMBRE_DEPENDENCIA = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def _dependencia(spec: str) -> dict:
+    """
+    Una línea de `PluginManifest.requires`, con si está instalada en este
+    intérprete.
+
+    Es observabilidad, no un instalador: el núcleo no resuelve dependencias de
+    cómputo (issue #19/#20, eso lo hace la app contra su runtime versionado),
+    pero un agente que ve "trimesh: falta" sabe qué pasó antes de correr nada
+    en vez de tropezar con un ImportError a mitad de un tool.
+    """
+    coincidencia = _NOMBRE_DEPENDENCIA.match(spec.strip())
+    nombre = coincidencia.group(0) if coincidencia else spec.strip()
+    try:
+        version(nombre)
+        presente = True
+    except PackageNotFoundError:
+        presente = False
+    return {"spec": spec, "package": nombre, "present": presente}
+
+
+# ── dry_run="run": el tool corre de verdad en seco, con fs/http en modo de
+# sólo lectura (issue #34) ───────────────────────────────────────────────
+
+# Sin ningún subconjunto de sólo lectura razonable: un tool que pide alguno
+# de éstos no puede beneficiarse de `dry_run="run"`, declare lo que declare.
+PORTS_SIN_MODO_LECTURA = frozenset({"process", "window", "browser"})
+
+_FS_ESCRITURA = frozenset({
+    "make_dirs", "move", "copy_file", "copy_tree",
+    "remove_file", "remove_tree", "rename", "write_text", "write_bytes",
+})
+
+_HTTP_METODOS_LECTURA = frozenset({"GET", "HEAD"})
+
+
+class _SoloLecturaFs:
+    """
+    Envuelve cualquier adapter de `fs`: delega consulta, bloquea escritura.
+
+    Genérico sobre el Protocol, no sobre un adapter concreto -- anda igual
+    con `LocalFsAdapter` que con el fake de test o un adapter de terceros.
+    `__getattr__` alcanza porque `FsPort` no tiene estado propio que envolver,
+    sólo métodos: lo único que hace falta interceptar es la escritura.
+    """
+
+    def __init__(self, real) -> None:
+        self._real = real
+
+    def __getattr__(self, nombre: str):
+        if nombre in _FS_ESCRITURA:
+            def _bloqueado(*args, **kwargs):
+                raise PortError(f"escritura en dry run: fs.{nombre}")
+            return _bloqueado
+        return getattr(self._real, nombre)
+
+
+class _SoloLecturaHttp:
+    """`GET`/`HEAD` pasan; cualquier otro método es escritura y se bloquea."""
+
+    def __init__(self, real) -> None:
+        self._real = real
+
+    def request(self, url, *, method: str = "GET", **kwargs):
+        if method.upper() not in _HTTP_METODOS_LECTURA:
+            raise PortError(f"escritura en dry run: HTTP {method}")
+        return self._real.request(url, method=method, **kwargs)
+
+    def __getattr__(self, nombre: str):
+        return getattr(self._real, nombre)
+
+
+def _en_modo_lectura(ports: dict) -> dict:
+    envueltos = dict(ports)
+    if "fs" in envueltos:
+        envueltos["fs"] = _SoloLecturaFs(envueltos["fs"])
+    if "http" in envueltos:
+        envueltos["http"] = _SoloLecturaHttp(envueltos["http"])
+    return envueltos
+
+
+def _dry_run_run_invalido(dueño_ports: tuple[str, ...], tool_id: str, manifest: ToolManifest) -> str | None:
+    """
+    Un tool que declara `dry_run="run"` pero pide un port sin modo de sólo
+    lectura. Se reporta al cargar, igual que un `options_from` inválido: no
+    impide que el tool se registre -- `ToolRegistry.dry_run_ok` vuelve a
+    chequear esto mismo en cada dry run, así que la declaración se trata
+    como "skip" pase lo que pase con este diagnóstico.
+    """
+    if manifest.dry_run != "run":
+        return None
+    conflicto = PORTS_SIN_MODO_LECTURA & set(dueño_ports)
+    if not conflicto:
+        return None
+    return (
+        f"{tool_id}: declara dry_run='run' pero pide {', '.join(sorted(conflicto))}, "
+        f"que no tiene modo de sólo lectura -- se lo trata como 'skip' en dry run"
+    )
+
+
+# `core:<namespace>` o `core:<namespace>:{<param>}` -- issue #32. Un solo
+# placeholder, nombrando un solo param, sin expresiones ni anidado: eso es lo
+# que mantiene este chequeo en un `in` contra los params declarados, en vez de
+# convertirlo en un parser.
+_OPTIONS_FROM_CORE_RE = re.compile(r"^core:[\w-]+(?::\{(\w+)\})?$")
+
+
+def _options_from_invalidos(
+    plugin_manifest: PluginManifest | None, dueño: str, params: Iterable[Param]
+) -> list[str]:
+    """
+    Un `Param.options_from` que no nombra un `Resource` que el propio
+    plugin declara, o que no respeta la sintaxis del namespace `core:`.
+
+    `dueño` es sólo para el mensaje: el id del tool o el nombre de la acción
+    al que pertenecen `params`. Sin `plugin_manifest` (el modo mínimo, sin
+    configuración declarada) cualquier `options_from` no vacío ya es
+    inválido -- no hay ningún `Resource` posible al que pueda apuntar.
+
+    `options_from="core:..."` (issue #32) es una fuente de opciones que
+    provee el núcleo -- "plugins instalados", "colecciones de tal plugin" --
+    y por eso no se busca entre los `Resource` del plugin dueño. Si además
+    trae un placeholder (`core:resources:{plugin}`), el nombre adentro de
+    `{}` tiene que ser el `name` o un alias de **otro param de esta misma
+    declaración** (tool o acción -- no por plugin: dos tools del mismo plugin
+    pueden declarar params distintos, y validar por plugin daría verde a una
+    combinación que en los hechos no existe). Un placeholder que no nombra
+    ningún param real de acá es el mismo tipo de typo que un `options_from`
+    que no nombra un `Resource`, y encima más difícil de notar: el campo
+    también queda vacío, pero *parece* que dependiera de algo.
+
+    Esta validación no ve los params que un tool agrega en runtime vía
+    `describe_extra_params` -- esos nunca pasan por acá, por diseño: es el
+    límite de lo que se puede saber al cargar, no un hueco a tapar después.
+    """
+    declarados = {r.name for r in plugin_manifest.resources} if plugin_manifest else set()
+    nombres_validos = {p.name for p in params} | {a for p in params for a in p.aliases}
+
+    errores: list[str] = []
+    for p in params:
+        if not p.options_from:
+            continue
+        if p.options_from.startswith("core:"):
+            m = _OPTIONS_FROM_CORE_RE.match(p.options_from)
+            if not m:
+                errores.append(
+                    f"{dueño}.{p.name}: options_from='{p.options_from}' no respeta la "
+                    f"sintaxis 'core:namespace' o 'core:namespace:{{param}}' (un solo "
+                    f"placeholder, sin anidar)"
+                )
+                continue
+            placeholder = m.group(1)
+            if placeholder and placeholder not in nombres_validos:
+                errores.append(
+                    f"{dueño}.{p.name}: options_from='{p.options_from}' referencia el "
+                    f"param '{placeholder}', que no existe en esta misma declaración"
+                    + (f" (tiene: {', '.join(sorted(nombres_validos))})" if nombres_validos else "")
+                )
+            continue
+        if p.options_from not in declarados:
+            errores.append(
+                f"{dueño}.{p.name}: options_from='{p.options_from}' no es un resource "
+                f"declarado por este plugin"
+                + (f" (tiene: {', '.join(sorted(declarados))})" if declarados else " (no declara ninguno)")
+            )
+    return errores
 
 
 @dataclass(frozen=True)
@@ -148,6 +333,23 @@ class ToolRegistry:
         if cargado is None:
             return {}
         return {p: self._adapters[p] for p in cargado.ports if p in self._adapters}
+
+    def dry_run_ok(self, tool_id: str) -> bool:
+        """
+        Si el `dry_run="run"` de este tool es honorable ahora mismo (issue #34).
+
+        Repite el chequeo de `_dry_run_run_invalido` en vez de confiar en el
+        diagnóstico de carga: éste se puede haber pasado por alto
+        (`--allow-broken`, o un catálogo leído de una instalación vieja), y
+        un tool que pide `process`/`window`/`browser` no puede arriesgarse a
+        correr de verdad en seco pase lo que declare.
+        """
+        tool = self.get(tool_id)
+        if tool is None or tool.manifest.dry_run != "run":
+            return False
+        cargado = self.plugin_of(tool_id)
+        ports_del_dueño = set(cargado.ports) if cargado else set()
+        return not (ports_del_dueño & PORTS_SIN_MODO_LECTURA)
 
     # ── Descubrimiento ──────────────────────────────────────────────────
 
@@ -257,6 +459,14 @@ class ToolRegistry:
             self._tools[manifest.id] = tool  # type: ignore[assignment]
             accepted.append(manifest.id)
 
+            for error in _options_from_invalidos(plugin_manifest, manifest.id, manifest.params):
+                self._errors.append(LoadError(name, source, error))
+
+            dueño_ports = plugin_manifest.ports if plugin_manifest else ()
+            error_dry_run = _dry_run_run_invalido(dueño_ports, manifest.id, manifest)
+            if error_dry_run:
+                self._errors.append(LoadError(name, source, error_dry_run))
+
             for alias in manifest.aliases:
                 if alias in self._tools or alias in self._aliases:
                     self._errors.append(
@@ -283,6 +493,8 @@ class ToolRegistry:
                     )
                 )
                 continue
+            for error in _options_from_invalidos(plugin_manifest, accion.name, accion.params):
+                self._errors.append(LoadError(name, source, error))
             self._actions[(name, accion.name)] = handler
 
         self._plugins.append(
@@ -359,6 +571,22 @@ class ToolRegistry:
                 valores.update(p.manifest.defaults())
         return valores
 
+    def secret_setting_keys(self) -> set[str]:
+        """
+        Los `key` de Setting que algún plugin instalado declaró `secret`.
+
+        Es lo que le permite a `ConfigStore` cifrar en reposo (issue #8) sin
+        dejar de ser genérico: no conoce el contrato de `Setting`, sólo
+        recibe esta lista de nombres desde quien sí lo conoce.
+        """
+        return {
+            s.key
+            for p in self._plugins
+            if p.manifest
+            for s in p.manifest.settings
+            if s.secret
+        }
+
     def effective_config(self, config: dict) -> dict:
         """
         La configuración como la ve el sistema: defaults del manifest, pisados
@@ -387,8 +615,15 @@ class ToolRegistry:
         """
         return {
             "contract": CONTRACT_VERSION,
+            # Qué sabe hacer este núcleo, para que una UI decida qué dibujar
+            # sin comparar versiones. `manual_decisions` (issue #37): decisión
+            # manual que pausa el run y `Instance.resume` para seguir.
+            "capabilities": dict(CAPABILITIES),
             "ports": sorted(self._adapters),
-            "tools": [m.to_dict() for m in self.manifests],
+            "tools": [
+                m.to_dict()
+                for m in sorted([*self.manifests, *NATIVE_MANIFESTS], key=lambda m: m.id)
+            ],
             "plugins": [
                 {
                     "name": p.name,
@@ -402,6 +637,7 @@ class ToolRegistry:
                             "settings": [s.to_dict() for s in p.manifest.settings],
                             "resources": [r.to_dict() for r in p.manifest.resources],
                             "actions": [a.to_dict() for a in p.manifest.actions],
+                            "requires": [_dependencia(r) for r in p.manifest.requires],
                             "doc": p.manifest.doc,
                         }
                         if p.manifest
@@ -410,6 +646,7 @@ class ToolRegistry:
                             "settings": [],
                             "resources": [],
                             "actions": [],
+                            "requires": [],
                             "doc": "",
                         }
                     ),
@@ -421,7 +658,7 @@ class ToolRegistry:
 
     # ── Ejecución ───────────────────────────────────────────────────────
 
-    def execute(self, tool_id: str, ctx_factory) -> ToolResult:
+    def execute(self, tool_id: str, ctx_factory, *, read_only: bool = False) -> ToolResult:
         """
         Ejecuta un tool con aislamiento de fallos.
 
@@ -434,6 +671,12 @@ class ToolRegistry:
         tool, y devuelve el ToolContext. Recibe las dos cosas porque el núcleo
         tiene que resolver los params contra el manifest antes de construirlo, y
         porque los ports dependen de qué plugin es dueño del tool.
+
+        `read_only=True` (issue #34, dry_run="run") envuelve `fs`/`http` en un
+        modo que deja pasar la consulta y bloquea la escritura con `PortError`
+        -- el llamador (el executor) es quien decide, según `dry_run_ok`,
+        cuándo corresponde. `execute` no lo vuelve a chequear: confía en que
+        quien pide `read_only=True` ya lo hizo.
         """
         tool = self.get(tool_id)
         if tool is None:
@@ -443,8 +686,12 @@ class ToolRegistry:
                 f"Registrados: {disponibles}…"
             )
 
+        ports = self.ports_for(tool_id)
+        if read_only:
+            ports = _en_modo_lectura(ports)
+
         try:
-            ctx = ctx_factory(tool.manifest, self.ports_for(tool_id))
+            ctx = ctx_factory(tool.manifest, ports)
         except ParamError as exc:
             return ToolResult.err(str(exc))
         except Exception as exc:

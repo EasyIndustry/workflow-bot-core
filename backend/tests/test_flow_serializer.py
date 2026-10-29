@@ -122,25 +122,109 @@ def test_el_separador_no_le_agrega_un_espacio_al_valor_anterior():
     assert despues.nodes["N1"].params["suffix"] == " - HECHO "
 
 
-# ── Lo que no se puede escribir ─────────────────────────────────────────
+# ── Comas y pipes: se citan solos, no se avisan más ─────────────────────
 
 
-def test_un_valor_con_pipe_se_avisa():
+def test_un_valor_con_pipe_no_es_problema_se_cita_solo():
+    """Issue #10: antes esto no round-trippeaba; ahora se escribe citado (issue #37: con #quot;)."""
     grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "a|b"}, line=1)})
-    problemas = verificar(grafo)
-    assert len(problemas) == 1
-    assert "N1 › msg" in problemas[0]
+    assert verificar(grafo) == []
+    assert "#quot;a|b#quot;" in to_mermaid(grafo)
 
 
-def test_un_valor_con_coma_se_avisa():
+def test_un_valor_con_coma_no_es_problema_se_cita_solo():
     """Es el defecto original: `message=Hola, mundo` perdía " mundo"."""
     grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "Hola, mundo"}, line=1)})
-    assert any("," in p for p in verificar(grafo))
+    assert verificar(grafo) == []
+    antes, despues = _ida_y_vuelta(to_mermaid(grafo))
+    assert despues.nodes["N1"].params["msg"] == "Hola, mundo"
 
 
-def test_un_valor_con_comilla_se_avisa():
+def test_un_valor_sin_coma_ni_pipe_no_se_cita():
+    """No le agrega comillas a los nodos que no las necesitan."""
+    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "hola"}, line=1)})
+    assert 'msg="hola"' not in to_mermaid(grafo)
+    assert "msg=hola" in to_mermaid(grafo)
+
+
+# ── Comillas escapadas (issue #36/#37) ───────────────────────────────────
+
+
+def test_un_valor_con_comilla_se_cita_con_quot_y_escapa_con_34():
+    """
+    Issue #37: dos entidades distintas -- #quot; abre/cierra la cita, #34;
+    es una comilla literal adentro. La misma entidad para las dos cosas
+    (el primer intento) es indistinguible para este mismo parser.
+    """
     grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": 'di "hola"'}, line=1)})
+    assert verificar(grafo) == []
+    texto = to_mermaid(grafo, strict=True)
+    assert 'msg=#quot;di #34;hola#34;#quot;' in texto
+    despues = parse_flow(texto, with_meta=False)
+    assert despues.nodes["N1"].params["msg"] == 'di "hola"'
+
+
+def test_el_wrapper_ya_no_es_una_comilla_cruda():
+    """
+    Issue #37: una comilla cruda de más adentro de la etiqueta de un nodo
+    rompe mermaid.js -- ni siquiera la del wrapper de la cita puede serlo.
+    """
+    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": 'di "hola"'}, line=1)})
+    texto = to_mermaid(grafo, strict=True)
+    assert "\\" not in texto
+    # Único par de comillas crudas: el wrapper `["…"]` del nodo, de Mermaid.
+    assert texto.count('"') == 2
+
+
+def test_un_valor_citado_que_empieza_con_llave_ya_no_rompe_mermaid():
+    """
+    Issue #37: el bug de fondo no era sólo la comilla -- CUALQUIER valor
+    citado que empezara con "{"/"("/"["/">" ya rompía mermaid.js antes de
+    esto, con o sin comillas adentro, porque el wrapper era una comilla
+    cruda. Con #quot; como wrapper, deja de pasar.
+    """
+    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "{a}, b"}, line=1)})
+    assert verificar(grafo) == []
+    texto = to_mermaid(grafo, strict=True)
+    assert texto.count('"') == 2  # nada más que el wrapper del nodo
+    despues = parse_flow(texto, with_meta=False)
+    assert despues.nodes["N1"].params["msg"] == "{a}, b"
+
+
+def test_un_json_serializado_con_varias_claves_sobrevive_el_round_trip():
+    """El caso real reportado (issue #36): un ParamType.JSON con más de una clave."""
+    import json
+
+    valor = json.dumps({"a": {"tipo": "si_no"}, "b": {"tipo": "si_no"}})
+    grafo = FlowGraph(nodes={"N1": ActionNode(fn="test.decide", params={"preguntas": valor}, line=1)})
+    assert verificar(grafo) == []
+    despues = parse_flow(to_mermaid(grafo, strict=True), with_meta=False)
+    assert json.loads(despues.nodes["N1"].params["preguntas"]) == json.loads(valor)
+
+
+def test_el_formato_legado_con_comilla_cruda_se_sigue_leyendo():
+    """Los ~30 nodos ya escritos con comilla cruda (antes de #37) no se rompen."""
+    texto = 'flowchart TD\n    N1["core.log | message="a, b""]\n'
+    despues = parse_flow(texto, with_meta=False)
+    assert despues.nodes["N1"].params == {"message": "a, b"}
+
+
+def test_un_valor_citado_con_la_secuencia_de_escape_literal_se_avisa():
+    """
+    El límite que persiste (issue #37): un valor citado que ya trae, sin
+    querer decir eso, la secuencia literal de una de las entidades se leería
+    como parte de la cita -- mismo límite que tiene el propio Mermaid.
+    """
+    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "a, b #quot; c"}, line=1)})
     assert verificar(grafo)
+    grafo2 = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "a, b #34; c"}, line=1)})
+    assert verificar(grafo2)
+
+
+def test_una_ruta_de_windows_sin_coma_no_se_cita_ni_le_pega_el_escape():
+    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"ruta": r"D:\casos\AP962\stl"}, line=1)})
+    assert verificar(grafo) == []
+    assert r'ruta=D:\casos\AP962\stl' in to_mermaid(grafo)
 
 
 def test_la_coma_en_una_condicion_no_es_un_problema():
@@ -162,7 +246,7 @@ def test_un_pipe_en_una_condicion_si_es_un_problema():
 
 
 def test_strict_levanta_antes_de_guardar_algo_roto():
-    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "a|b"}, line=1)})
+    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "a, b #quot; c"}, line=1)})
     try:
         to_mermaid(grafo, strict=True)
         raise AssertionError("debió levantar")
@@ -172,7 +256,7 @@ def test_strict_levanta_antes_de_guardar_algo_roto():
 
 def test_sin_strict_escribe_igual_y_deja_decidir():
     """Guardar a medias mientras se escribe está permitido; hacerlo callado, no."""
-    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "a|b"}, line=1)})
+    grafo = FlowGraph(nodes={"N1": ActionNode(fn="core.log", params={"msg": "a, b #quot; c"}, line=1)})
     assert "core.log" in to_mermaid(grafo)
 
 
@@ -219,6 +303,18 @@ def test_la_cabecera_solo_lleva_lo_que_tiene_valor():
     assert "%% folder: FORM/CNC4" in texto
     assert "%% state: disabled" in texto
     assert "description" not in texto
+    assert "source" not in texto
+
+
+def test_la_cabecera_lleva_la_fuente_cuando_la_trae():
+    """Issue #31: `source` es una clave más de la cabecera, escrita sólo si no está vacía."""
+    grafo = FlowGraph(
+        nodes={"A": StartNode(line=1)},
+        meta=FlowMeta(source="casos-nuevos"),
+    )
+    texto = to_mermaid(grafo, with_header=True)
+    assert "%% source: casos-nuevos" in texto
+    assert parse_flow(texto, with_meta=True).meta.source == "casos-nuevos"
 
 
 def test_lo_que_guarda_la_base_va_sin_cabecera():

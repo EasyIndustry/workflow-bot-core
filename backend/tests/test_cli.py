@@ -97,6 +97,9 @@ def test_tools_json_es_el_catalogo_crudo(correr):
         "core.log",
         "core.set_status",
         "core.wait",
+        # Declarados para el editor; los resuelve el executor (native=True).
+        "flow.ejecutar",
+        "flow.retry_gate",
     }
 
 
@@ -127,6 +130,21 @@ def test_doctor_corre_sin_instalacion_previa(correr):
     assert "Adapters" in salida
 
 
+def test_fs_root_invalido_corta_con_un_mensaje_claro_y_no_un_traceback(correr, tmp_path, capsys):
+    """
+    Issue #22: `boot.env` es el único camino para cambiar `fs_root` en una
+    instalación existente, y editarlo mal antes tenía que arrancar y fallar
+    recién adentro de un run. Acá la CLI entera —cualquier subcomando, no sólo
+    `boot`— corta temprano con el problema explicado, no con una traza.
+    """
+    (tmp_path / "boot.env").write_text("fs_root=/no/existe/de/verdad\n", encoding="utf-8")
+    codigo = cli.main(["--root", str(tmp_path), "tools"])
+    salida = capsys.readouterr()
+    assert codigo == 2
+    assert "fs_root" in salida.err
+    assert "no existe" in salida.err
+
+
 def test_add_y_workflows(correr, tmp_path):
     archivo = tmp_path / "mi-flujo.mmd"
     archivo.write_text(
@@ -155,6 +173,7 @@ def test_add_json_devuelve_el_workflow_guardado(correr, tmp_path):
         "folder": "pruebas",
         "state": "enabled",
         "description": "",
+        "source": "",
     }
 
 
@@ -435,6 +454,75 @@ def test_action_con_params_invalidos(correr):
     assert codigo == 2
 
 
+def test_action_con_item_resuelve_params_desde_el_resource(correr):
+    """Issue #7: --item ahorra reconstruir a mano lo que ya está guardado."""
+    from backend.tests.demo_plugin import DESTINOS
+
+    correr("--plugin", f"demo={DEMO}", "plugins", "--json")
+    correr.instancias[-1].resource_store("demo", DESTINOS).write(
+        "frio", {"ruta": "/deposito", "token": "sss"}
+    )
+
+    codigo, salida = correr(
+        "--plugin", f"demo={DEMO}", "action", "demo", "probar_destino", "--item", "frio", "--json"
+    )
+
+    assert codigo == 0
+    outputs = json.loads(salida)["outputs"]
+    assert outputs["ruta"] == "/deposito"
+    assert outputs["token"] == "sss"
+
+
+# ── resources ───────────────────────────────────────────────────────────
+
+
+def test_resources_lista_items_con_secrets_tapados(correr):
+    from backend.tests.demo_plugin import DESTINOS
+
+    correr("--plugin", f"demo={DEMO}", "plugins", "--json")
+    correr.instancias[-1].resource_store("demo", DESTINOS).write(
+        "frio", {"ruta": "/deposito", "token": "sss"}
+    )
+
+    codigo, salida = correr("--plugin", f"demo={DEMO}", "resources", "demo", "destinos", "--json")
+
+    assert codigo == 0
+    datos = json.loads(salida)
+    assert datos["key_field"] == "name"
+    item = next(i for i in datos["items"] if i["name"] == "frio")
+    assert item["ruta"] == "/deposito"
+    assert item["token"] is None
+
+
+def test_resources_de_coleccion_inexistente_es_error(correr):
+    codigo, _ = correr("--plugin", f"demo={DEMO}", "resources", "demo", "nada", "--json")
+    assert codigo == 2
+
+
+# ── extra-params (issue #27) ─────────────────────────────────────────────
+
+
+def test_extra_params_sin_describer_es_vacio(correr):
+    """La mayoría de los tools no describe params extra dinámicos: vacío, no error."""
+    codigo, salida = correr("--plugin", f"demo={DEMO}", "extra-params", "demo.mover", "--json")
+    assert codigo == 0
+    assert json.loads(salida) == {"tool": "demo.mover", "params": []}
+
+
+def test_extra_params_texto_sin_nada_que_describir(correr):
+    codigo, salida = correr("--plugin", f"demo={DEMO}", "extra-params", "demo.mover")
+    assert codigo == 0
+    assert "sin params extra" in salida
+
+
+def test_extra_params_con_params_invalidos_es_error(correr):
+    codigo, salida = correr(
+        "--plugin", f"demo={DEMO}", "extra-params", "demo.mover", "--params", "{no es json", "--json"
+    )
+    assert codigo == 2
+    assert json.loads(salida)["ok"] is False
+
+
 # ── Actores desde la CLI ────────────────────────────────────────────────
 
 
@@ -501,6 +589,40 @@ def test_run_con_actor_inexistente_sale_con_codigo_propio(correr, tmp_path):
     archivo.write_text('flowchart TD\n    B(inicio)\n    N["core.log | message=x"]\n    B --> N\n')
     codigo, _ = correr("--actor", "fantasma", "run", str(archivo))
     assert codigo == 3
+
+
+def test_run_con_tool_inexistente_falla_antes_de_ejecutar(correr, tmp_path):
+    """
+    Issue #9: antes esto terminaba con código 0 y "status: ok", el nodo roto
+    escondido detrás de una arista |err|. Mismo código 3 que un actor sin
+    permiso: es la misma clase de "no se puede ejecutar", no un fallo de run.
+    """
+    archivo = tmp_path / "roto.mmd"
+    archivo.write_text(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    N["archivos.copiar"]\n'
+        '    E["core.log | message=manejado"]\n'
+        '    B --> N\n'
+        '    N -->|err| E\n'
+    )
+    codigo, _ = correr("run", str(archivo))
+    assert codigo == 3
+
+
+def test_run_allow_broken_corre_igual(correr, tmp_path):
+    archivo = tmp_path / "roto.mmd"
+    archivo.write_text(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    N["archivos.copiar"]\n'
+        '    E["core.log | message=manejado"]\n'
+        '    B --> N\n'
+        '    N -->|err| E\n'
+    )
+    codigo, salida = correr("run", str(archivo), "--allow-broken", "--json")
+    assert codigo == 0
+    assert json.loads(salida)["status"] == "ok"
 
 
 # ── Correr un archivo ya no lo guarda ───────────────────────────────────

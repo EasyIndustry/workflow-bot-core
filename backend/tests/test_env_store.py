@@ -169,6 +169,16 @@ def test_borrar_dice_si_habia_algo(db, crypto, tmp_path):
     assert store.get("X") is None
 
 
+def test_save_por_posicion_es_typeerror(db, crypto):
+    """Issue #11: `secret`/`updated_by` sólo por nombre, mismo criterio que RunStore."""
+    store = EnvStore(db, crypto)
+    try:
+        store.save("X", "1", True, "quien-sea")  # type: ignore[misc]
+        raise AssertionError("debió rechazar los params posicionales")
+    except TypeError:
+        pass
+
+
 # ── Referencias ─────────────────────────────────────────────────────────
 
 

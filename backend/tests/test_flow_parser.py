@@ -35,18 +35,23 @@ def _errors(graph) -> list[str]:
 
 
 def test_parse_meta_extrae_la_cabecera():
-    meta, content = parse_meta(
-        "%% folder: FORM\n%% state: disabled\n%% description: hola\nflowchart TD\n    A(inicio)"
+    meta, content, explicitas = parse_meta(
+        "%% folder: FORM\n%% state: disabled\n%% description: hola\n"
+        "%% source: casos-nuevos\nflowchart TD\n    A(inicio)"
     )
-    assert (meta.folder, meta.state, meta.description) == ("FORM", "disabled", "hola")
+    assert (meta.folder, meta.state, meta.description, meta.source) == (
+        "FORM", "disabled", "hola", "casos-nuevos",
+    )
     assert meta.enabled is False
     assert content.startswith("flowchart TD")
+    assert explicitas == {"folder", "state", "description", "source"}
 
 
 def test_meta_por_defecto_es_enabled():
-    meta, _ = parse_meta("flowchart TD\n    A(inicio)")
+    meta, _, explicitas = parse_meta("flowchart TD\n    A(inicio)")
     assert meta.enabled is True
     assert meta.folder == ""
+    assert explicitas == frozenset()
 
 
 # ── Tipos de nodo ───────────────────────────────────────────────────────
@@ -231,6 +236,70 @@ def test_decision_sin_variable_es_error():
     graph = parse_flow("flowchart TD\n    B(inicio)\n    C{ § }\n    B --> C\n")
     assert not graph.runnable
     assert any("sin variable" in m for m in _errors(graph))
+
+
+# ── Issue #10: valores citados ───────────────────────────────────────────
+
+
+def test_valor_citado_preserva_coma_y_pipe():
+    """El ejemplo real del issue: un mensaje de log con una coma adentro."""
+    graph = parse_flow(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    N3["Registrar UY § core.log | message="Caso {id} es de UY, no se copia""]\n'
+        '    B --> N3\n'
+    )
+    assert graph.runnable
+    assert graph.nodes["N3"].params["message"] == "Caso {id} es de UY, no se copia"
+
+
+def test_valor_citado_con_pipe_no_corta_los_params():
+    graph = parse_flow(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    N["core.log | message="a|b", level=warning"]\n'
+        '    B --> N\n'
+    )
+    assert graph.runnable
+    assert graph.nodes["N"].params == {"message": "a|b", "level": "warning"}
+
+
+def test_comilla_escapada_dentro_de_un_valor_citado_es_literal():
+    """
+    Issue #37: `#quot;` abre/cierra la cita, `#34;` es una comilla literal
+    adentro -- deja pasar un JSON con sus propias comillas.
+    """
+    graph = parse_flow(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    N["laya.preguntar | preguntas=#quot;{#34;a#34;: 1, #34;b#34;: 2}#quot;"]\n'
+        '    B --> N\n'
+    )
+    assert graph.runnable
+    assert graph.nodes["N"].params == {"preguntas": '{"a": 1, "b": 2}'}
+
+
+def test_cita_con_comilla_cruda_legada_sigue_funcionando():
+    """El formato original (antes de #36/#37) no se rompe: sigue siendo válido para leer."""
+    graph = parse_flow(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    N["core.log | message="a, b""]\n'
+        '    B --> N\n'
+    )
+    assert graph.runnable
+    assert graph.nodes["N"].params == {"message": "a, b"}
+
+
+def test_comilla_sin_cerrar_es_error():
+    graph = parse_flow(
+        'flowchart TD\n'
+        '    B(inicio)\n'
+        '    N["core.log | message="a, b, c"]\n'
+        '    B --> N\n'
+    )
+    assert not graph.runnable
+    assert any("comilla sin cerrar" in m for m in _errors(graph))
 
 
 def test_parser_nunca_levanta_excepcion():

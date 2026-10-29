@@ -20,27 +20,60 @@ plugins se descubrieran antes de atar los adapters, todos serían rechazados.
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 import sys
+import time
 from pathlib import Path
+from typing import Any
 
 from . import boot as bootstrap
 from .config import ConfigStore
 from .env_store import EnvStore, referencias
-from .flow.executor import NATIVE_FNS, RunResult, execute_flow
-from .flow.parser import Diagnostic, FlowGraph, Severity, parse_flow
+from .contract import STATUS_ERR, STATUS_WAITING
+from .flow.executor import (
+    CHECKPOINT_VERSION,
+    NATIVE_FNS,
+    LogEntry,
+    NodeTrace,
+    RunResult,
+    execute_flow,
+    resolve_manual,
+    resume_flow,
+    waiting_payload,
+)
+from .flow.parser import DecisionNode, Diagnostic, FlowGraph, Severity, parse_flow
 from .jsonio import dumps
 from .log_store import MODO_EXPIRACION, LogStore
 from .ports import CryptoPort, StoragePort
+from .redact import redact_run, secret_set
 from .registry import ToolRegistry
-from .resources import TableStore, store_for
+from .resources import ResourceError, TableStore, store_for
 from .schema import MIGRATIONS, SCHEMA
-from .stores import RunStore, StoreError, WorkflowStore
+from .stores import RunStore, StoreError, WaitStore, WorkflowStore
 from .users import RunPolicy, UserError, UserStore
+
+
+log = logging.getLogger(__name__)
 
 
 class WorkflowNotFound(StoreError):
     pass
+
+
+class PendingDecision(UserError):
+    """
+    El caso tiene una decisión manual pendiente en ese flujo (issue #37).
+
+    Distinguible a propósito: arrancar otra corrida encima dejaría dos runs
+    vivos del mismo caso, y quien lo pidió (la app, un agente) tiene que
+    poder mostrar "Esperando" en vez de un error genérico.
+    """
+
+    def __init__(self, message: str, *, run_id: str) -> None:
+        super().__init__(message)
+        self.run_id = run_id
 
 
 class Instance:
@@ -67,14 +100,30 @@ class Instance:
         """
         self.root = Path(root)
         self.boot = boot if boot is not None else bootstrap.load(self.root)
+
+        # Issue #22: un `fs_root`/`plugins_dir` que no resuelve a una carpeta
+        # real deja inutilizable un límite de seguridad de la instalación.
+        # `bootstrap.validar()` ya lo detecta, pero antes sólo lo consultaban
+        # `doctor` y la CLI — nunca la construcción misma —, así que una
+        # instalación con `boot.env` editado a mano arrancaba a medias y en
+        # silencio, y el error aparecía recién adentro de un run, apuntando al
+        # flujo y no a la configuración. Acá se corta temprano y fuerte.
+        problemas = bootstrap.fatal(self.boot)
+        if problemas:
+            raise bootstrap.BootError(
+                "No se puede arrancar la instancia en "
+                f"{self.root} — configuración de arranque inválida:\n"
+                + "\n".join(f"- {p}" for p in problemas)
+            )
+
         self.data_dir = self.boot.data_dir
 
         self.db = storage if storage is not None else _default_storage(self.boot)
         self.db.migrate(SCHEMA, MIGRATIONS)
 
-        self.config = ConfigStore(self.db)
         self.workflows = WorkflowStore(self.db)
         self.runs = RunStore(self.db)
+        self.waits = WaitStore(self.db)
         self.logs = LogStore(self.db)
 
         self.users = UserStore(self.db)
@@ -85,6 +134,12 @@ class Instance:
         # así que se resuelven acá y no entran al registry.
         self.crypto = crypto if crypto is not None else _default_crypto(self.data_dir)
         self.env = EnvStore(self.db, self.crypto)
+        # `secret_keys` es perezoso porque el registry se arma después, dos
+        # líneas más abajo: para cuando alguien llame `config.update(...)` de
+        # verdad, ya existe (issue #8).
+        self.config = ConfigStore(
+            self.db, self.crypto, secret_keys=lambda: self.registry.secret_setting_keys()
+        )
 
         self.registry = _build_registry(
             self.adapters, {**self._plugins_de_la_carpeta(), **(local_plugins or {})}
@@ -146,9 +201,35 @@ class Instance:
         graph = self.parse(name)
         return graph, self.check_graph(graph)
 
+    def get_flow(self, name: str) -> dict | None:
+        """
+        Un flujo guardado, con su contenido y sus diagnósticos ya cruzados
+        contra lo instalado. None si no existe.
+
+        Es lo que responde "¿por qué no anda?" sin que quien pregunta tenga
+        que adivinar en qué ruta de `workspace/` vive el `.mmd` (issue #17):
+        `diagnose()` ya cruza parser + registro, esto sólo le agrega el
+        contenido y lo empaqueta junto a los metadatos del flujo.
+        """
+        wf = self.workflows.get(name)
+        if wf is None:
+            return None
+        graph, extra = self.diagnose(name)
+        diagnosticos = sorted(
+            list(graph.errors) + list(graph.warnings) + extra, key=lambda d: (d.line or 0)
+        )
+        return {
+            **wf.to_dict(with_content=True),
+            "runnable": not any(d.severity is Severity.ERROR for d in diagnosticos),
+            "diagnostics": [d.to_dict() for d in diagnosticos],
+        }
+
     def check_graph(self, graph: FlowGraph) -> list[Diagnostic]:
         """Diagnósticos de un grafo contra los tools realmente instalados."""
         extra: list[Diagnostic] = []
+        # nodo de acción → su manifest, para el chequeo de {NODO.salida} de
+        # más abajo (issue #30). Sólo lo tienen los nodos con tool resuelto.
+        manifests: dict[str, Any] = {}
 
         for node_id, node in graph.action_nodes():
             # Las nativas las resuelve el motor: no están en el registro y no
@@ -170,6 +251,7 @@ class Instance:
             manifest = self.registry.manifest(tool_id)
             if manifest is None:
                 continue
+            manifests[node_id] = manifest
             # Un param que el tool no declara se ignora en silencio al
             # ejecutar. Decirlo acá evita el "puse el parámetro y no hace nada".
             if not manifest.extra_params:
@@ -194,6 +276,59 @@ class Instance:
                         node_id,
                     ))
 
+        # Issue #30: `{NODO.salida}` referencia el id de un nodo anterior, no
+        # un output plano cualquiera -- eso ya lo resuelve RunContext con un
+        # `{objeto.campo}` normal. Acá se valida la parte que un `.resolve()`
+        # en tiempo de ejecución no puede: que NODO exista como nodo de
+        # acción, que corra antes (directa o transitivamente) del nodo que lo
+        # usa, y -si el tool no declara `extra_outputs`- que la salida sea una
+        # que ese tool realmente deja.
+        ancestros: dict[str, set[str]] = {}
+        ids_de_accion = {nid for nid, _ in graph.action_nodes()}
+
+        def _valida_referencia_calificada(expr: str, node_id: str, line: int | None, origen: str) -> None:
+            parts = expr.split(".")
+            if len(parts) < 2 or parts[0] not in ids_de_accion:
+                return  # no es NODO.salida -- objeto.campo normal, o un índice de lista
+            ref_id, salida = parts[0], parts[1]
+            if node_id not in ancestros:
+                ancestros[node_id] = _ancestors(graph, node_id)
+            if ref_id not in ancestros[node_id]:
+                extra.append(Diagnostic(
+                    Severity.ERROR,
+                    f'{origen} referencia a "{ref_id}", que no corre antes en el flujo.',
+                    line,
+                    node_id,
+                ))
+                return
+            ref_manifest = manifests.get(ref_id)
+            if ref_manifest is not None and not ref_manifest.extra_outputs:
+                declaradas = {o.name for o in ref_manifest.outputs}
+                if salida not in declaradas:
+                    extra.append(Diagnostic(
+                        Severity.WARNING,
+                        f'"{ref_id}" no declara la salida "{salida}".',
+                        line,
+                        node_id,
+                    ))
+
+        for node_id, node in graph.action_nodes():
+            for clave, crudo in node.params.items():
+                if not isinstance(crudo, str):
+                    continue
+                for expr in _VAR_RE.findall(crudo):
+                    _valida_referencia_calificada(expr, node_id, node.line, f'"{clave}" en "{node_id}"')
+
+        # Issue #35: mismo chequeo para la `variable` de un nodo de Decisión,
+        # que ahora también acepta `NODO.salida` calificado (y recursivo,
+        # `NODO.salida.sub...`) -- ahí no hay `{}` que extraer con `_VAR_RE`:
+        # el string entero, sin envoltorio, ya es la expresión.
+        for node_id, node in graph.nodes.items():
+            if isinstance(node, DecisionNode) and "." in node.variable:
+                _valida_referencia_calificada(
+                    node.variable, node_id, node.line, f'La variable de "{node_id}"'
+                )
+
         return extra
 
     # ── Configuración ───────────────────────────────────────────────────
@@ -213,7 +348,7 @@ class Instance:
 
     def resource_store(self, plugin: str, resource) -> TableStore:
         """Store de una colección. El plugin no lo construye ni lo ve."""
-        return store_for(self.db, plugin, resource)
+        return store_for(self.db, plugin, resource, self.crypto)
 
     def resource_definition(self, plugin: str, collection: str):
         """El `Resource` que declaró ese plugin, o None."""
@@ -245,6 +380,118 @@ class Instance:
     def _resource_reader(self, plugin: str):
         """Lector ligado a un plugin, que es lo que recibe su contexto."""
         return lambda coleccion: self.resource_items(plugin, coleccion)
+
+    def resource_items_masked(self, plugin: str, collection: str) -> list[dict]:
+        """
+        Items de una colección, para listar — nunca para ejecutar.
+
+        A diferencia de `resource_items`, acá cada campo que el `Resource`
+        declaró `secret` queda en `None` (mismo criterio que `EnvStore.list`
+        con una variable marcada secreta: el valor no sale de acá ni por
+        error). Tampoco resuelve `{env.CLAVE}` — mostrar la referencia sin
+        resolver es lo que corresponde en un listado, resolverla sería
+        trabajo de más para algo que después se tapa igual.
+
+        Es lo que puede salir por el servidor MCP o cualquier otra API: un
+        agente necesita saber qué items existen para poder pedir uno por
+        nombre (`run_action(..., item=...)`), pero nunca sus secretos.
+        """
+        definicion = self.resource_definition(plugin, collection)
+        if definicion is None:
+            return []
+        secretos = {f.name for f in definicion.fields if f.secret}
+        items = self.resource_store(plugin, definicion).list_items()
+        return [
+            {clave: (None if clave in secretos else valor) for clave, valor in item.items()}
+            for item in items
+        ]
+
+    def write_resource_item(self, plugin: str, collection: str, key: str, item: dict) -> dict:
+        """
+        Escribe (crea o reemplaza) un item, y devuelve lo guardado con los
+        campos `secret` tapados.
+
+        `TableStore.write` le devuelve el item en claro a quien lo escribió,
+        pensado para una UI donde la misma persona lo acaba de tipear. Acá
+        quien escribe puede ser un agente vía MCP (issue #17), así que se
+        aplica el mismo criterio que `resource_items_masked`: un secreto
+        nunca vuelve en claro por este camino, ni siquiera al toque de
+        guardarlo (mismo espíritu que el #8).
+        """
+        definicion = self.resource_definition(plugin, collection)
+        if definicion is None:
+            raise ResourceError(f'no hay una colección "{collection}" en el plugin "{plugin}"')
+        guardado = self.resource_store(plugin, definicion).write(key, item)
+        secretos = {f.name for f in definicion.fields if f.secret}
+        return {clave: (None if clave in secretos else valor) for clave, valor in guardado.items()}
+
+    def delete_resource_item(self, plugin: str, collection: str, key: str) -> None:
+        definicion = self.resource_definition(plugin, collection)
+        if definicion is None:
+            raise ResourceError(f'no hay una colección "{collection}" en el plugin "{plugin}"')
+        self.resource_store(plugin, definicion).delete(key)
+
+    def describe_extra_params(self, tool_id: str, node_params: dict) -> list[dict]:
+        """
+        Los params extra que un tool con `extra_params=True` puede ofrecer,
+        dados los params que el nodo ya eligió (issue #27).
+
+        El caso: `connections.llamar` acepta cualquier `{variable}` de más
+        —lo que la Action elegida use en su url, headers y payload—, y hasta
+        ahora la única forma de saber cuáles eran era abrir la pantalla del
+        plugin y copiarlas a mano. Un tool que sabe describirse a sí mismo
+        (`Tool.describe_extra_params`, optativo) recibe acá los params ya
+        elegidos y un lector de sólo lectura sobre las colecciones del
+        **mismo** plugin, y devuelve qué otros params tienen sentido.
+
+        Vacío si el tool no lo declara (la mayoría), si no existe, o si el
+        manifest no marca `extra_params=True` — describir extras de un tool
+        que los descarta sería mostrar campos que después no llegarían a
+        ningún lado. Cualquier excepción del lado del plugin se traga y
+        vuelve vacío: esto corre mientras alguien edita un flujo, no en un
+        run, y no tiene sentido tumbar la pantalla por un describer roto.
+        """
+        manifest = self.registry.manifest(tool_id)
+        if manifest is None or not manifest.extra_params:
+            return []
+        tool = self.registry.get(tool_id)
+        describir = getattr(tool, "describe_extra_params", None)
+        if not callable(describir):
+            return []
+        dueño = self.registry.plugin_of(tool_id)
+        if dueño is None:
+            return []
+        try:
+            params = describir(dict(node_params), self._lector_de_items(dueño.name))
+            return [p.to_dict() for p in params]
+        except Exception:
+            log.exception("describe_extra_params de %s falló", tool_id)
+            return []
+
+    def _lector_de_items(self, plugin: str):
+        """
+        `leer_item(coleccion, clave, key_field="name")` ligado a un plugin,
+        para `describe_extra_params` (issue #27).
+
+        Mismo shape que `ToolContext.resource`, pero sobre
+        `resource_items_masked`: nunca ve el valor de un campo `secret`. Este
+        lector corre mientras se edita un flujo, no en un run -- no hay
+        `{env.CLAVE}` que resolver ni motivo para que el plugin vea un
+        secreto acá.
+        """
+
+        def leer(coleccion: str, clave: str, key_field: str = "name") -> dict | None:
+            objetivo = (clave or "").strip()
+            return next(
+                (
+                    i
+                    for i in self.resource_items_masked(plugin, coleccion)
+                    if str(i.get(key_field, "")) == objetivo
+                ),
+                None,
+            )
+
+        return leer
 
     # ── Ejecución ───────────────────────────────────────────────────────
 
@@ -303,7 +550,9 @@ class Instance:
         actor: str | None = None,
         dry_run: bool = False,
         is_cancelled=None,
+        on_step=None,
         persist: bool = True,
+        allow_broken: bool = False,
     ) -> RunResult:
         """
         Ejecuta un flujo y guarda su traza.
@@ -314,38 +563,92 @@ class Instance:
         falsificable desde adentro no serviría para autorizar.
 
         Un actor inexistente o sin permiso falla **antes** de ejecutar nada.
+        Un flujo con un tool que no está instalado, también: sin este chequeo,
+        el nodo falla, el executor sigue por `|err|` (pensada para fallas de
+        *runtime* — la API no respondió, el archivo no estaba, no para un
+        error de configuración) y el run completo termina `status: ok` con el
+        trabajo real sin hacer, sin que nada lo señale. Mismo criterio que
+        `authorize`: se mira el grafo entero antes de tocar nada, y se dice
+        qué nodos. `allow_broken=True` lo saltea, para quien sepa lo que hace.
+
+        `on_step(node_id, display=, index=, total=)` se llama antes de cada
+        nodo, para que quien haya disparado el run pueda mostrar en qué paso
+        va sin esperar a que termine (issue #15). Es el hermano de
+        `is_cancelled`: el mismo punto del recorrido, en la otra dirección.
 
         Los dry-run también se guardan: sirven para ver qué se validó y cuándo.
+
+        Una decisión manual (issue #37) pausa la corrida: vuelve con
+        `status="waiting"` y `resultado.waiting` con las opciones, y el
+        checkpoint queda en la base para `resume`. Con `persist=False` no
+        hay checkpoint, así que ese run no se puede retomar. Si el caso ya
+        tiene una espera abierta en este flujo, levanta `PendingDecision` en
+        vez de arrancar otra corrida encima (un dry run sí se permite: no
+        toca nada).
         """
         texto = self.load_workflow(flow_name)
         policy = self.policy_for(actor)
+        graph = parse_flow(texto, with_meta=False)
 
-        vedados = self.authorize(parse_flow(texto, with_meta=False), policy)
+        if not dry_run:
+            pendiente = self.waits.for_case(case_id, flow_name)
+            if pendiente is not None:
+                raise PendingDecision(
+                    f'El caso "{case_id}" tiene una decisión pendiente en el run '
+                    f"{pendiente.run_id} (nodo {pendiente.node_id}); retomala o "
+                    "descartala antes de volver a ejecutar.",
+                    run_id=pendiente.run_id,
+                )
+
+        vedados = self.authorize(graph, policy)
         if vedados:
             raise UserError(
                 f'El actor "{policy.actor}" no puede ejecutar "{flow_name}":\n  '
                 + "\n  ".join(vedados)
             )
 
+        if not allow_broken:
+            rotos = [d for d in self.check_graph(graph) if d.severity is Severity.ERROR]
+            if rotos:
+                detalle = "\n  ".join(
+                    f"{d.node_id}: {d.message}" if d.node_id else d.message for d in rotos
+                )
+                raise UserError(
+                    f'"{flow_name}" no se puede ejecutar, tiene errores:\n  {detalle}'
+                )
+
         empezado = self._ahora()
+        config, env = self.effective_config(), self.env_vars()
 
         resultado = execute_flow(
             texto,
             case_id=case_id,
             registry=self.registry,
             row=row or {},
-            config=self.effective_config(),
-            env=self.env_vars(),
+            config=config,
+            env=env,
             load_flow=self.load_workflow,
             is_cancelled=is_cancelled,
+            on_step=on_step,
             resources=self.resource_items,
             policy=policy,
             dry_run=dry_run,
         )
+        # Antes de guardar y antes de devolver: la traza tiene los params ya
+        # resueltos, con cualquier `{env.SECRETO}` en claro adentro.
+        redact_run(resultado, self.secret_values(env=env, config=config))
 
         if persist:
             try:
                 self.runs.save(resultado, flow=flow_name, source=source, started_at=empezado)
+                if resultado.checkpoint is not None:
+                    self.waits.save(
+                        resultado.run_id,
+                        {**resultado.checkpoint, "source": source, "flow": flow_name},
+                        case_id=case_id,
+                        flow=flow_name,
+                        source=source,
+                    )
                 # El log va a su propia tabla, en una escritura.
                 self.logs.append_run(resultado, flow=flow_name, source=source)
                 self._limpiar_logs()
@@ -354,24 +657,257 @@ class Instance:
                 pass
         return resultado
 
-    def run_action(self, plugin: str, action: str, params: dict | None = None):
+    # ── Decisiones manuales (issue #37) ─────────────────────────────────
+
+    def _espera(self, run_id: str):
+        """El resumen y el checkpoint de un run en espera, o UserError."""
+        resumen = self.runs.summary(run_id)
+        if resumen is None:
+            raise UserError(f"No existe el run {run_id}")
+        if resumen.status != STATUS_WAITING:
+            raise UserError(
+                f'El run {run_id} no está esperando una decisión (status "{resumen.status}")'
+            )
+        espera = self.waits.get(run_id)
+        if espera is None:
+            raise UserError(
+                f"El run {run_id} figura en espera pero no tiene checkpoint; "
+                "sólo se puede descartar (discard_wait)."
+            )
+        if espera.checkpoint.get("version") != CHECKPOINT_VERSION:
+            raise UserError(
+                f"El checkpoint del run {run_id} es de otra versión del núcleo "
+                f"({espera.checkpoint.get('version')!r}); sólo se puede descartar."
+            )
+        return resumen, espera
+
+    def resume(
+        self,
+        run_id: str,
+        value: str,
+        *,
+        actor: str | None = None,
+        is_cancelled=None,
+        on_step=None,
+    ) -> RunResult:
+        """
+        Retoma un run pausado en una decisión manual, por la rama `value`.
+
+        Exige que el run esté en `waiting` y que `value` sea una rama de
+        **esa** decisión; si no, `UserError` sin tocar nada. El actor de
+        `resume` tiene que poder correr el flujo (mismo chequeo que `run`), y
+        queda en la traza como `decided_by`. Mismo `run_id`: al terminar
+        queda `ok`/`err`, o `waiting` otra vez si llega a otra decisión
+        manual. Se corre el flujo del checkpoint, no el guardado ahora.
+        """
+        resumen, espera = self._espera(run_id)
+        policy = self.policy_for(actor)
+        checkpoint = espera.checkpoint
+        graph = parse_flow(checkpoint.get("flow_text") or "", with_meta=False)
+
+        vedados = self.authorize(graph, policy)
+        if vedados:
+            raise UserError(
+                f'El actor "{policy.actor}" no puede ejecutar "{resumen.flow}":\n  '
+                + "\n  ".join(vedados)
+            )
+
+        elegido = "" if value is None else str(value).strip()
+        if resolve_manual(graph, espera.node_id, elegido) is None:
+            opciones = ", ".join(
+                f'"{o["value"]}"' for o in waiting_payload(graph, espera.node_id)["options"]
+            ) or "ninguna"
+            raise UserError(
+                f'"{elegido}" no es una rama de la decisión "{espera.node_id}". '
+                f"Opciones: {opciones}"
+            )
+
+        if not self.waits.take(run_id):
+            raise UserError(f"El run {run_id} ya se está retomando o se descartó")
+
+        config, env = self.effective_config(), self.env_vars()
+        previo = self.runs.get(run_id) or {}
+        logs_previos = [
+            LogEntry(t=l.to_dict()["t"], message=l.message, level=l.level, node_id=l.node_id, ts=l.ts)
+            for l in self.logs.for_run(run_id)
+        ]
+        resultado = resume_flow(
+            checkpoint,
+            elegido,
+            run_id=run_id,
+            case_id=resumen.case_id,
+            registry=self.registry,
+            decided_by=policy.actor,
+            prior_trace=[NodeTrace.from_dict(t) for t in previo.get("trace") or []],
+            prior_logs=logs_previos,
+            config=config,
+            env=env,
+            load_flow=self.load_workflow,
+            is_cancelled=is_cancelled,
+            on_step=on_step,
+            resources=self.resource_items,
+            policy=policy,
+        )
+        redact_run(resultado, self.secret_values(env=env, config=config))
+        self._guardar_retomado(resultado, resumen, n_logs_previos=len(logs_previos))
+        return resultado
+
+    def discard_wait(self, run_id: str, *, actor: str | None = None) -> RunResult:
+        """
+        Cierra una espera sin seguir: el run queda `err` con
+        `error_kind="discarded"`. A diferencia de `resume`, funciona aunque
+        falte el checkpoint -- es la salida para una espera que quedó a
+        medias.
+        """
+        resumen = self.runs.summary(run_id)
+        if resumen is None:
+            raise UserError(f"No existe el run {run_id}")
+        if resumen.status != STATUS_WAITING:
+            raise UserError(
+                f'El run {run_id} no está esperando una decisión (status "{resumen.status}")'
+            )
+        policy = self.policy_for(actor)
+        self.waits.take(run_id)
+
+        previo = self.runs.get(run_id) or {}
+        mensaje = f"Decisión descartada por {policy.actor}"
+        nodo = (previo.get("waiting") or {}).get("node_id")
+        resultado = RunResult(
+            run_id=run_id,
+            case_id=resumen.case_id,
+            actor=resumen.actor,
+            status=STATUS_ERR,
+            message=mensaje,
+            failed_node=nodo,
+            error_kind="discarded",
+            trace=[NodeTrace.from_dict(t) for t in previo.get("trace") or []],
+            logs=[LogEntry(t=time.strftime("%H:%M:%S"), message=mensaje, level="error", node_id=nodo)],
+        )
+        self._guardar_retomado(resultado, resumen, n_logs_previos=0)
+        return resultado
+
+    def _guardar_retomado(self, resultado: RunResult, resumen, *, n_logs_previos: int) -> None:
+        """Reescribe el run que esperaba, suma sólo las líneas nuevas del log."""
+        datos = resultado.to_dict()
+        datos.update(flow=resumen.flow, source=resumen.source, started_at=resumen.started_at)
+        self.runs.finish_wait(resultado.run_id, datos, finished_at=self._ahora())
+        if resultado.checkpoint is not None:
+            self.waits.save(
+                resultado.run_id,
+                {**resultado.checkpoint, "source": resumen.source, "flow": resumen.flow},
+                case_id=resumen.case_id,
+                flow=resumen.flow,
+                source=resumen.source,
+            )
+        nuevas = RunResult(
+            run_id=resultado.run_id, case_id=resultado.case_id,
+            logs=resultado.logs[n_logs_previos:],
+        )
+        try:
+            self.logs.append_run(nuevas, flow=resumen.flow, source=resumen.source)
+            self._limpiar_logs()
+        except (StoreError, OSError):
+            pass
+
+    def list_waiting(
+        self,
+        *,
+        limit: int = 50,
+        case_id: str | None = None,
+        flow: str | None = None,
+        offset: int = 0,
+    ) -> list[dict]:
+        """
+        Los runs pausados en una decisión manual, cada uno con su `waiting`
+        (nodo, ayuda, opciones): lo que hace falta para preguntar y retomar.
+        """
+        filas = []
+        for r in self.runs.list(
+            status=STATUS_WAITING, limit=limit, case_id=case_id, flow=flow, offset=offset
+        ):
+            datos = self.runs.get(r.run_id) or {}
+            filas.append({**r.to_dict(), "waiting": datos.get("waiting")})
+        return filas
+
+    def run_action(
+        self, plugin: str, action: str, *, params: dict | None = None, item: str | None = None
+    ):
         """
         Ejecuta una acción de un plugin ("probar conexión", "previsualizar").
 
         No es parte de ningún run: la dispara una persona. Aun así vuelve como
         `ToolResult`, con el mismo aislamiento de fallos que un tool, porque la
         garantía de que nada falla en silencio no depende de quién apretó.
+
+        `item` resuelve los params desde un item ya guardado de la colección
+        que declara la acción (`Action.resource`), en vez de reconstruirlos a
+        mano en cada llamada — "previsualizar" contra una conexión guardada
+        con su url/headers/auth, por ejemplo. `params` explícitos pisan lo que
+        traiga el item, campo por campo.
+
+        El item entrega **todos** sus campos como base, `key_field` incluido
+        (issue #18): antes se lo excluía a propósito, pensando en que la
+        clave era sólo un identificador de fila y no un dato de negocio. Pero
+        nada en el contrato le impide a una acción declarar un param con el
+        mismo nombre que el `key_field` de su colección -- es exactamente lo
+        que hace `bots.probar(nombre)` sobre la colección `bots`, cuya clave
+        es `nombre` -- y para esa acción la exclusión hacía imposible usar
+        `item` en absoluto, la vía que el propio docstring recomienda. Un
+        `param` explícito sigue ganando, así que nada de esto cambia lo que
+        ya funcionaba.
         """
-        from .contract import ToolContext
+        from .contract import ParamError, ToolContext, ToolResult
+
+        base: dict = {}
+        origen_item: tuple[str, str] | None = None
+        if item:
+            declarada = next(
+                (a for a in self.registry.actions_of(plugin) if a.name == action), None
+            )
+            if declarada is None or not declarada.resource:
+                return (
+                    ToolResult.err(
+                        f'"{action}" de "{plugin}" no está atada a ninguna colección: '
+                        "no acepta `item`."
+                    ),
+                    [],
+                )
+            definicion = self.resource_definition(plugin, declarada.resource)
+            encontrado = definicion and next(
+                (
+                    i
+                    for i in self.resource_items(plugin, declarada.resource)
+                    if i.get(definicion.key_field) == item
+                ),
+                None,
+            )
+            if not encontrado:
+                return (
+                    ToolResult.err(f'no existe "{item}" en {declarada.resource} de {plugin}'),
+                    [],
+                )
+            base = {k: v for k, v in encontrado.items() if not k.startswith("_")}
+            origen_item = (item, declarada.resource)
 
         config = self.effective_config()
         registro: list[tuple[str, str]] = []
 
         def ctx_factory(declaracion, ports):
+            crudos = {**base, **(params or {})}
+            try:
+                resueltos = _resolver_action_params(declaracion, crudos, config)
+            except ParamError as exc:
+                if origen_item is None:
+                    raise
+                clave, coleccion = origen_item
+                campos = ", ".join(sorted(base)) or "nada"
+                raise ParamError(
+                    f'{exc} (desde el item "{clave}" de {coleccion} vinieron: {campos})'
+                ) from exc
             return ToolContext(
                 run_id="",
                 case_id="",
-                params=_resolver_action_params(declaracion, params or {}, config),
+                params=resueltos,
                 config=config,
                 context={},
                 log=lambda mensaje, nivel="info": registro.append((mensaje, nivel)),
@@ -410,17 +946,59 @@ class Instance:
 
         return borradas
 
-    def run_detail(self, run_id: str) -> dict | None:
+    def list_runs(
+        self,
+        *,
+        case_id: str | None = None,
+        limit: int = 50,
+        only_failed: bool = False,
+        source: str | None = None,
+        actor: str | None = None,
+        include_dry: bool = True,
+        status: str | None = None,
+        flow: str | None = None,
+        offset: int = 0,
+    ) -> list[dict]:
+        """
+        Runs ya ejecutados, resumidos -- "qué corrió y cómo terminó" sin abrir
+        cada traza. Del más nuevo al más viejo; `offset` pagina.
+        """
+        resumenes = self.runs.list(
+            case_id=case_id,
+            limit=limit,
+            only_failed=only_failed,
+            source=source,
+            actor=actor,
+            include_dry=include_dry,
+            status=status,
+            flow=flow,
+            offset=offset,
+        )
+        return [r.to_dict() for r in resumenes]
+
+    def run_detail(
+        self, run_id: str, *, trace_offset: int = 0, trace_limit: int | None = None
+    ) -> dict | None:
         """
         Un run con su log pegado de vuelta.
 
         El blob de `runs` guarda el trace y no el log —el log vive en su propia
         tabla, una fila por línea— así que se junta al leer.
+
+        `trace_offset`/`trace_limit` recortan la traza, para quien la lee por
+        partes (un run con cien reintentos tiene cien nodos); `trace_total`
+        dice cuántos hay en total. Sin ellos, la traza entera, como siempre.
         """
         datos = self.runs.get(run_id)
         if datos is None:
             return None
         datos["logs"] = [linea.to_dict() for linea in self.logs.for_run(run_id)]
+        if trace_offset or trace_limit is not None:
+            traza = datos.get("trace") or []
+            desde = max(0, int(trace_offset))
+            hasta = None if trace_limit is None else desde + max(0, int(trace_limit))
+            datos["trace_total"] = len(traza)
+            datos["trace"] = traza[desde:hasta]
         return datos
 
     def case_log(self, case_id: str, limit: int = 500) -> dict:
@@ -446,6 +1024,36 @@ class Instance:
         valores = dict(self.env.resolve())
         valores.update(_env_vars_del_entorno())
         return valores
+
+    def secret_values(self, *, env: dict | None = None, config: dict | None = None) -> frozenset[str]:
+        """
+        Los valores en claro de todo lo declarado secreto: lo que la traza y el
+        log de un run nunca pueden guardar ni devolver (ver `redact.py`).
+
+        Tres fuentes, y en las tres decide quien declara, no el núcleo: las
+        variables `secret` de la tabla `env` (con el valor que ve el flujo, así
+        que un `BOTENV_` que la pisa también se tapa), los `Setting` y los
+        `Field` de un `Resource` marcados `secret`. Una variable que sólo
+        existe como `BOTENV_` del proceso no está declarada en ningún lado:
+        es una variable, no un secreto.
+
+        `env`/`config` son los que ya se resolvieron para el run, para no
+        descifrar todo dos veces.
+        """
+        env = self.env_vars() if env is None else env
+        config = self.effective_config() if config is None else config
+        valores = [env[n] for n in self.env.secret_names() if n in env]
+        valores += [config[k] for k in self.registry.secret_setting_keys() if k in config]
+        for plugin in self.registry.plugins:
+            if plugin.manifest is None:
+                continue
+            for recurso in plugin.manifest.resources:
+                campos = [f.name for f in recurso.fields if f.secret]
+                if not campos:
+                    continue
+                for item in self.resource_items(plugin.name, recurso.name):
+                    valores += [item[c] for c in campos if c in item]
+        return secret_set(valores)
 
     def env_usage(self) -> dict[str, int]:
         """
@@ -498,6 +1106,90 @@ class Instance:
             })
         return filas
 
+    # ── Orientación ─────────────────────────────────────────────────────
+
+    def describe_installation(self) -> dict:
+        """
+        La foto de la instalación en una llamada.
+
+        Antes de esto, saber "qué hay acá" significaba pedir cinco cosas
+        sueltas (flujos, plugins, actores, config de arranque, runs
+        recientes) y cruzarlas a mano -- exactamente lo que un agente que no
+        conoce la instalación no puede hacer solo (issue #17). Es lo que se
+        lee ANTES de decidir qué otro tool usar, no un reemplazo de ellos:
+        `get_flow`/`list_runs`/etc. siguen siendo el camino para el detalle.
+        """
+        catalogo = self.registry.catalog()
+        tools_por_id = {t["id"]: t for t in catalogo["tools"]}
+
+        flujos = []
+        for wf in self.workflows.list():
+            graph = parse_flow(wf.content, with_meta=False)
+            flujos.append({
+                "name": wf.name,
+                "folder": wf.folder,
+                "enabled": wf.state != "disabled",
+                "description": wf.description,
+                "source": wf.source,
+                "tools": sorted({node.fn for _, node in graph.action_nodes()}),
+            })
+
+        plugins = []
+        for p in catalogo["plugins"]:
+            colecciones = []
+            for r in p["resources"]:
+                definicion = self.resource_definition(p["name"], r["name"])
+                cantidad = (
+                    len(self.resource_store(p["name"], definicion).list_keys())
+                    if definicion is not None
+                    else 0
+                )
+                colecciones.append({"name": r["name"], "label": r["label"], "items": cantidad})
+            plugins.append({
+                "name": p["name"],
+                "version": p["version"],
+                "doc": p["doc"],
+                "ports": p["ports"],
+                "requires": p["requires"],
+                "tools": [
+                    {"id": tid, "label": tools_por_id[tid]["label"], "doc": tools_por_id[tid]["doc"]}
+                    for tid in p["tools"]
+                    if tid in tools_por_id
+                ],
+                "collections": colecciones,
+                # Sin esto (issue #18), un agente que quiere "probar X" no
+                # tenía cómo distinguir una Action de un Tool con el mismo
+                # nombre, ni saber que existe -- run_action con la acción
+                # equivocada, o inexistente, es un tanteo a ciegas que le
+                # costó tres llamadas de más en la sesión que reportó el bug.
+                "actions": p["actions"],
+            })
+
+        runs_recientes = self.list_runs(limit=20)
+        ultimo_por_flujo: dict[str, dict] = {}
+        for r in runs_recientes:
+            ultimo_por_flujo.setdefault(r["flow"], r)
+
+        resultado = {
+            "flows": flujos,
+            "plugins": plugins,
+            "plugin_errors": catalogo["errors"],
+            "actors": [u.to_dict() for u in self.users.list()],
+            "boot": self.boot.to_dict(),
+            "effective_config": self.effective_config(),
+            "ports_disponibles": catalogo["ports"],
+            "runs": {
+                "recientes": len(runs_recientes),
+                "fallidos": sum(1 for r in runs_recientes if r["status"] == STATUS_ERR),
+                # Issue #37: decisiones manuales pendientes, en toda la
+                # instalación y no sólo entre los recientes.
+                "en_espera": self.runs.count(status=STATUS_WAITING),
+                "ultimo_por_flujo": ultimo_por_flujo,
+            },
+        }
+        resultado["resumen"] = _resumen_instalacion(resultado)
+        return resultado
+
     # ── Diagnóstico ─────────────────────────────────────────────────────
 
     def storage_info(self) -> dict:
@@ -536,6 +1228,14 @@ class Instance:
 
     def close(self) -> None:
         self.db.close()
+        # La mayoría de los adapters no tiene estado que cerrar (http/fs/
+        # process/clock son stdlib sin proceso propio); el que sí lo tiene
+        # —hoy, el navegador— declara su propio `close()`, y acá se cierra
+        # sin que el núcleo sepa cuál es cuál.
+        for adapter in self.adapters.values():
+            cerrar = getattr(adapter, "close", None)
+            if callable(cerrar):
+                cerrar()
 
 
 # ── Armado por defecto ──────────────────────────────────────────────────
@@ -560,14 +1260,26 @@ def _default_adapters(boot: bootstrap.BootConfig) -> dict:
     """
     Los adapters, atados con los límites que declaró el arranque.
 
-    `fs_root` y `process_allowlist` acotan qué puede tocar esta instalación, y
-    vienen de la capa bootstrap y no de un `Setting`: son de la máquina, y un
-    plugin no debería poder ampliarlos escribiendo en la configuración.
+    `fs_root`/`fs_roots` y `process_allowlist` acotan qué puede tocar esta
+    instalación, y vienen de la capa bootstrap y no de un `Setting`: son de la
+    máquina, y un plugin no debería poder ampliarlos escribiendo en la
+    configuración.
+
+    Se pasa `fs_roots_efectivos` y no los dos campos crudos: es la propiedad
+    de `BootConfig` que ya resolvió la precedencia entre `fs_root` singular y
+    `fs_roots` (issue #23), así que acá no hace falta repetirla.
+
+    `fs_denied` (issue #26) se arma acá siempre, no es algo que `boot.env`
+    declare: es lo que le permite a una instalación usar una raíz que la
+    contenga entera (`fs_root=D:\\` con la instalación en `D:\\User\\Bot`) sin
+    exponer su propia carpeta. Una protección que se puede olvidar de
+    configurar no protege.
     """
     from backend.adapters import build_default_adapters
 
     return build_default_adapters(
-        fs_root=boot.fs_root,
+        fs_roots=boot.fs_roots_efectivos or None,
+        fs_denied=_fs_denied(boot),
         http_timeout=boot.http_timeout,
         # `is not None`: la allowlist vacía es "ningún ejecutable", y colapsarla
         # a `None` acá desharía, en el último tramo, lo que declaró el arranque.
@@ -575,6 +1287,20 @@ def _default_adapters(boot: bootstrap.BootConfig) -> dict:
             list(boot.process_allowlist) if boot.process_allowlist is not None else None
         ),
     )
+
+
+def _fs_denied(boot: bootstrap.BootConfig) -> list[str]:
+    """
+    Lo que un flujo con el port `fs` nunca alcanza, sin importar qué raíz
+    declare (issue #26): la base y la llave (`data_dir`), el código que se
+    carga (`plugins_dir`, si está declarado) y `boot.env`, que declara los
+    límites mismos -un flujo que lo alcanzara podría reescribirlos y
+    reiniciar la instalación sin ellos.
+    """
+    denegadas = [str(boot.data_dir), str(boot.root / bootstrap.ARCHIVO)]
+    if boot.plugins_dir is not None:
+        denegadas.append(str(boot.plugins_dir))
+    return denegadas
 
 
 def _default_crypto(data_dir: Path) -> CryptoPort:
@@ -665,6 +1391,61 @@ def _resolver_action_params(accion, crudos: dict, config: dict) -> dict:
     return manifest.resolve_params(crudos, config)
 
 
+def _resumen_instalacion(datos: dict) -> str:
+    """Diez líneas de texto plano, para un cliente que sólo puede mostrar texto."""
+    habilitados = sum(1 for f in datos["flows"] if f["enabled"])
+    actores = ", ".join(f"{a['name']} ({a['kind']})" for a in datos["actors"]) or "ninguno"
+    boot = datos["boot"]
+
+    if boot.get("fs_roots"):
+        etiqueta_fs = "fs_roots: " + ", ".join(
+            f"{alias or 'default'}={ruta}" for alias, ruta in boot["fs_roots"].items()
+        )
+    else:
+        etiqueta_fs = f"fs_root: {boot['fs_root'] or 'todo el disco'}"
+
+    lineas = [
+        f"{len(datos['flows'])} flujo(s) guardado(s), {habilitados} habilitado(s).",
+        f"{len(datos['plugins'])} plugin(s) instalado(s)"
+        + (f", {len(datos['plugin_errors'])} con error al cargar" if datos["plugin_errors"] else "")
+        + ".",
+        f"Actores: {actores}.",
+        f"Ports disponibles: {', '.join(datos['ports_disponibles']) or 'ninguno'}.",
+        f"{etiqueta_fs} · "
+        f"process_allowlist: {boot['process_allowlist'] if boot['process_allowlist'] is not None else 'cualquiera'} · "
+        f"actor por defecto: {boot['default_actor']}.",
+        f"Runs recientes: {datos['runs']['recientes']}, {datos['runs']['fallidos']} fallaron."
+        + (
+            f" {datos['runs']['en_espera']} esperando una decisión manual."
+            if datos["runs"].get("en_espera")
+            else ""
+        ),
+    ]
+
+    acciones = [
+        f"{p['name']}.{a['name']}" + (f" (por item de {a['resource']})" if a["resource"] else "")
+        for p in datos["plugins"]
+        for a in p["actions"]
+    ]
+    if acciones:
+        lineas.append(f"Acciones sueltas: {', '.join(acciones)}.")
+
+    faltantes = [
+        f"{p['name']}.{r['package']}"
+        for p in datos["plugins"]
+        for r in p["requires"]
+        if not r["present"]
+    ]
+    if faltantes:
+        # Issue #20: esto es lo que le ahorra a un agente tropezar con un
+        # ImportError a mitad de un tool -- lo ve antes de correr nada.
+        lineas.append(f"Dependencias declaradas que faltan: {', '.join(faltantes)}.")
+
+    for flujo, run in sorted(datos["runs"]["ultimo_por_flujo"].items()):
+        lineas.append(f'  último run de "{flujo}": {run["status"]} ({run["run_id"]}).')
+    return "\n".join(lineas)
+
+
 def _parecidos(nombre: str, disponibles: list[str], maximo: int = 2) -> list[str]:
     """Tools con nombre parecido, para sugerir ante un typo."""
     import difflib
@@ -672,4 +1453,23 @@ def _parecidos(nombre: str, disponibles: list[str], maximo: int = 2) -> list[str
     return [f'"{c}"' for c in difflib.get_close_matches(nombre, disponibles, n=maximo, cutoff=0.6)]
 
 
-__all__ = ["Instance", "WorkflowNotFound"]
+# {nombre}, {NODO.salida} -- mismo patrón que RunContext, para encontrar en
+# check_graph las referencias calificadas por nodo del issue #30 sin correr
+# nada.
+_VAR_RE = re.compile(r"\{([\w.]+)\}")
+
+
+def _ancestors(graph: FlowGraph, node_id: str) -> set[str]:
+    """Ids que corren antes de `node_id`, siguiendo las aristas hacia atrás."""
+    seen: set[str] = set()
+    pending = [e.from_ for e in graph.in_edges(node_id)]
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        pending.extend(e.from_ for e in graph.in_edges(current))
+    return seen
+
+
+__all__ = ["Instance", "PendingDecision", "WorkflowNotFound"]
