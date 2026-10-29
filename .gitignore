@@ -5,3 +5,4 @@ backend/data/
 build/
 dist/
 backend/VERSION
+.claude/scratch/
