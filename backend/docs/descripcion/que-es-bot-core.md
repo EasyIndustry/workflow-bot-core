@@ -47,7 +47,7 @@ el mismo que usan muchas herramientas de documentación. Por eso el mismo
 archivo sirve para leerlo como dibujo y para que el motor lo ejecute: lo que
 se ve es exactamente lo que se ejecuta.
 
-Cada vez que el motor recorre un flujo para un caso (un pedido, una fila de
+Cada vez que el motor recorre un flujo para un ítem (un pedido, una fila de
 una planilla, un archivo) se llama una **corrida**.
 
 ## 4. Las piezas
@@ -94,10 +94,10 @@ flowchart TD
    paso use una herramienta que existe, que no falten datos y que las flechas
    tengan sentido. Si algo está mal, dice en qué paso y por qué.
 3. **Ensayarlo sin efectos** (en inglés, *dry run*). El motor recorre el
-   flujo con un caso de ejemplo pero **no hace** las tareas que modifican
+   flujo con un ítem de ejemplo pero **no hace** las tareas que modifican
    algo. Sirve para ver por qué camino iría. Solo se ejecutan las tareas que
    se declararon de solo lectura, y el motor impide que escriban.
-4. **Ejecutarlo.** Ahora sí, para un caso real.
+4. **Ejecutarlo.** Ahora sí, para un ítem real.
 5. **Consultar el registro.** Se ve paso a paso qué hizo, con qué datos y
    cómo terminó.
 
@@ -108,7 +108,7 @@ Cada corrida deja dos tipos de registro:
 | Registro | Qué contiene | Para qué sirve |
 |---|---|---|
 | **Traza** | cada paso de una corrida, con los datos que usó, cómo terminó y el error si lo hubo | responder "¿qué pasó en esta corrida y por qué falló?" |
-| **Bitácora** | líneas de texto por caso, a lo largo de todas sus corridas | responder "¿qué viene pasando con este caso?" |
+| **Bitácora** | líneas de texto por ítem, a lo largo de todas sus corridas | responder "¿qué viene pasando con este ítem?" |
 
 Además, cada corrida guarda **quién la puso en marcha** (ver punto 8), cuándo
 y con qué flujo.
@@ -133,10 +133,10 @@ flowchart TD
 
 - La corrida queda **en espera**, muestra las opciones posibles y una ayuda
   para quien decide.
-- Mientras espera, el resto de los casos sigue funcionando.
+- Mientras espera, el resto de los ítems sigue funcionando.
 - La espera sobrevive a un reinicio del equipo.
 - Cuando la persona elige, el registro guarda **qué eligió y quién**.
-- Si se edita el flujo mientras un caso espera, ese caso sigue con el flujo
+- Si se edita el flujo mientras un ítem espera, ese ítem sigue con el flujo
   con el que empezó.
 
 ## 8. Quién puede hacer qué
@@ -176,7 +176,7 @@ flowchart TD
     A -->|todavía no| C{¿Quedan intentos?}
     C -->|sí| D[Esperar un minuto]
     D --> A
-    C -->|no| E[Marcar el caso con error]
+    C -->|no| E[Marcar el ítem con error]
 ```
 
 ## 10. Límites y controles que trae
@@ -227,7 +227,7 @@ flowchart TD
   siempre se puede saber qué versión está instalada y qué cambió entre una y
   otra.
 - Antes de publicar una versión se corre automáticamente el conjunto completo
-  de pruebas (cientos de casos). Si alguna falla, la versión no se publica.
+  de pruebas (cientos de verificaciones). Si alguna falla, la versión no se publica.
 - Las versiones **de prueba** (con `-beta` o `-rc` en el número) sirven para
   probar novedades. Las **estables** (sin sufijo) son las que se recomiendan
   para uso normal.
@@ -252,7 +252,7 @@ Estos son los hechos sobre bot-core que sirven para evaluarlo:
   - permisos por tipo de actor y límites de carpetas y programas;
   - fallas visibles: nada falla en silencio y un flujo mal armado no arranca;
   - secretos cifrados y tapados en el registro.
-- La conservación del registro (cuánto tiempo, cuántas líneas por caso) es
+- La conservación del registro (cuánto tiempo, cuántas líneas por ítem) es
   configurable. Si una organización necesita conservarlo por un plazo
   determinado, lo tiene que configurar así.
 
@@ -261,14 +261,14 @@ Estos son los hechos sobre bot-core que sirven para evaluarlo:
 | Término | Qué significa |
 |---|---|
 | Flujo | Un procedimiento dibujado como diagrama de pasos y flechas. |
-| Corrida | Una vez que el motor recorre un flujo para un caso. |
-| Caso | Aquello sobre lo que trabaja una corrida: un pedido, una fila, un archivo. |
+| Corrida | Una vez que el motor recorre un flujo para un ítem. |
+| Ítem | Aquello sobre lo que trabaja una corrida: un pedido, una fila, un archivo. |
 | Paso (nodo) | Una caja del diagrama: una tarea o una decisión. |
 | Complemento (plugin) | Un paquete que agrega herramientas concretas al motor. |
 | Herramienta (tool) | Una tarea concreta que puede hacer un paso, aportada por un complemento. |
 | Actor | Quién pone en marcha una corrida: persona, agente, tarea programada o sistema. |
 | Traza | El registro paso a paso de una corrida. |
-| Bitácora (log) | Las líneas de texto acumuladas sobre un caso. |
+| Bitácora (log) | Las líneas de texto acumuladas sobre un ítem. |
 | Ensayo sin efectos (dry run) | Recorrer un flujo sin hacer las tareas que modifican algo. |
 | Decisión manual | Un punto del flujo donde una persona elige el camino. |
 | Mermaid | Formato de texto estándar para escribir diagramas. |
